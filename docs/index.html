@@ -1,0 +1,836 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pixi — pixel art editor for animators</title>
+  <meta name="description" content="Pixi — open-source, cross-platform pixel art and animation editor written in Zig." />
+  <link rel="icon" type="image/png" href="img/icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@400;600;700&family=Noto+Sans:wght@300;400;600;700&family=Silkscreen:wght@400;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #22232a;
+      --fg: #2a2c36;
+      --fg-raised: #34363f;
+      --text: #e6af89;
+      --text-muted: #9f9fb0;
+      --text-dim: #61616a;
+      --accent: #2fb387;       /* highlight_primary */
+      --accent-hover: #4c947b;
+      --plum: #4c3043;
+      --yellow: #d6c782;
+      --red: #ce7869;
+      --blue: #6e96c8;
+      --max: 1380px;
+      --pad: clamp(24px, 4.5vw, 72px);
+      --display: 'Comfortaa', system-ui, sans-serif;
+      --body: 'Noto Sans', system-ui, sans-serif;
+      --mono: 'Silkscreen', 'Courier New', monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: var(--bg); color: var(--text-muted);
+      font-family: var(--body); font-size: 15px; line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--text-muted); text-decoration: none; }
+    h1, h2, h3 { font-family: var(--display); color: var(--text); margin: 0; letter-spacing: -0.02em; }
+    h1 { font-weight: 700; }
+    .wrap { max-width: var(--max); margin: 0 auto; padding-inline: var(--pad); }
+    .eyebrow {
+      font-family: var(--mono); font-size: 11px; color: var(--accent);
+      letter-spacing: 0.18em; margin: 0 0 14px;
+    }
+
+    /* ── Header ───────────────────────── */
+    header.site {
+      border-bottom: 1px solid var(--fg);
+    }
+    header.site .row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 18px 0;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand img {
+      width: 28px; height: 28px; image-rendering: pixelated;
+    }
+    .brand .name {
+      font-family: var(--display); font-weight: 700; font-size: 22px;
+      color: var(--text); letter-spacing: -0.01em;
+    }
+    .brand .ver {
+      font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-left: 6px;
+    }
+    nav.top { display: flex; gap: 28px; font-size: 14px; }
+    nav.top a { padding: 4px 0; }
+    nav.top a:hover { color: var(--text); }
+    .menu-toggle { display: none; }
+
+    /* ── Hero ─────────────────────────── */
+    section.hero {
+      padding: clamp(48px, 7vw, 88px) 0 clamp(40px, 5vw, 64px);
+    }
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 0.78fr 1.45fr;
+      gap: clamp(28px, 4vw, 64px);
+      align-items: center;
+    }
+    h1.hero {
+      font-size: clamp(36px, 5.4vw, 64px);
+      line-height: 1.05;
+    }
+    h1.hero .muted { color: var(--text-muted); }
+    p.lede {
+      font-size: clamp(15px, 1.4vw, 17px);
+      margin-top: 24px; max-width: 480px;
+    }
+
+    /* Download buttons */
+    .downloads {
+      display: flex; gap: 12px; margin-top: 36px; flex-wrap: wrap;
+      align-items: flex-start;
+    }
+    .dl-group { position: relative; }
+    .dl {
+      display: flex; align-items: center; gap: 12px;
+      padding: 16px 20px;
+      background: var(--fg);
+      color: var(--text);
+      border: 1px solid var(--fg-raised);
+      border-radius: 8px; text-decoration: none;
+      font-weight: 600; font-size: 14px;
+      transition: transform .15s ease, background .15s ease, border-color .15s ease;
+      cursor: pointer;
+    }
+    .dl:hover { transform: translateY(-1px); border-color: var(--text-dim); }
+    .dl.primary {
+      background: var(--accent); color: var(--bg); border: none;
+    }
+    .dl.primary:hover { background: var(--accent-hover); }
+    .dl .label { display: flex; flex-direction: column; line-height: 1.15; }
+    .dl .note {
+      font-family: var(--mono); font-size: 10px; opacity: 0.7;
+      font-weight: 400; letter-spacing: 0.04em;
+    }
+    /* Hover popover with arch options */
+    .dl-options {
+      position: absolute; left: 0; top: calc(100% + 6px);
+      min-width: 100%;
+      background: var(--fg); border: 1px solid var(--fg-raised);
+      border-radius: 8px; padding: 6px;
+      display: flex; flex-direction: column; gap: 2px;
+      opacity: 0; pointer-events: none;
+      transform: translateY(-4px) scale(.98);
+      transition: opacity .18s ease, transform .18s ease;
+      z-index: 20;
+      box-shadow: 0 18px 40px -12px rgba(0,0,0,.55), 0 6px 14px -8px rgba(0,0,0,.4);
+    }
+    .dl-group:hover .dl-options,
+    .dl-group:focus-within .dl-options { /* keep keyboard tab-in working */
+      /* no-op: only .open shows */
+    }
+    .dl-group.open .dl-options {
+      opacity: 1; pointer-events: auto;
+      transform: translateY(0) scale(1);
+    }
+    .dl-group .dl::after {
+      content: "\25BE"; /* small caret */
+      margin-left: 6px; opacity: .55;
+      font-size: 10px;
+      transition: transform .2s ease;
+    }
+    .dl-group.open .dl::after { transform: rotate(180deg); }
+    .dl-option {
+      display: flex; align-items: center; justify-content: space-between; gap: 14px;
+      padding: 10px 12px; border-radius: 5px;
+      color: var(--text); text-decoration: none;
+      font-size: 13px; font-weight: 600;
+      white-space: nowrap;
+    }
+    .dl-option:hover { background: var(--fg-raised); color: var(--accent); }
+    .dl-option .arch {
+      font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+      font-weight: 400; letter-spacing: 0.04em;
+    }
+    .dl-option:hover .arch { color: var(--text-muted); }
+    .dl-glyph {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; flex-shrink: 0;
+    }
+    .dl-glyph svg { width: 100%; height: 100%; fill: currentColor; }
+
+    .release-line {
+      margin-top: 18px; font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+    }
+    .release-line a { color: var(--text-muted); }
+    .release-line a:hover { color: var(--accent); }
+
+    /* ── Hero shot ───────────────────── */
+    .hero-deck { display: flex; flex-direction: column; gap: 14px; }
+    .hero-stack {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1366 / 940;
+      perspective: 1600px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .hero-shot {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      display: block;
+      object-fit: contain;
+      border-radius: 10px;
+      transform-origin: 50% 60%;
+      transition: transform .85s cubic-bezier(.2,.7,.2,1), filter .85s ease, opacity .4s ease;
+      will-change: transform, filter;
+      backface-visibility: hidden;
+    }
+    /* Three positions: front (flush), back-1 (peeks up-right), back-2 (peeks further). */
+    .hero-shot[data-pos="front"] {
+      transform: translate3d(0,0,0) rotate(0deg) scale(1);
+      z-index: 3;
+      filter: none;
+    }
+    .hero-shot[data-pos="back-1"] {
+      transform: translate3d(4%, -3%, 0) rotate(2.4deg) scale(.965);
+      z-index: 2;
+      filter: brightness(.8) saturate(.9);
+    }
+    .hero-shot[data-pos="back-2"] {
+      transform: translate3d(7.5%, -5.5%, 0) rotate(4.6deg) scale(.93);
+      z-index: 1;
+      filter: brightness(.65) saturate(.85);
+    }
+    /* While swapping, the current front slides down-left, the next-up takes its place. */
+    .hero-stack.swapping .hero-shot[data-pos="front"] {
+      transform: translate3d(-4%, 6%, 0) rotate(-3.4deg) scale(.95);
+      filter: brightness(.7) saturate(.85);
+      opacity: 0;
+    }
+    .hero-stack.swapping .hero-shot[data-pos="back-1"] {
+      transform: translate3d(0,0,0) rotate(0deg) scale(1);
+      filter: none;
+    }
+    .hero-stack.swapping .hero-shot[data-pos="back-2"] {
+      transform: translate3d(4%, -3%, 0) rotate(2.4deg) scale(.965);
+      filter: brightness(.8) saturate(.9);
+    }
+    /* Controls block sits below the images. */
+    .hero-controls {
+      display: flex; align-items: center; gap: 14px;
+      font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+      letter-spacing: 0.08em;
+    }
+    .hero-progress {
+      flex: 1; height: 2px;
+      background: var(--fg);
+      border-radius: 2px; overflow: hidden;
+    }
+    .hero-progress > i {
+      display: block; height: 100%;
+      width: var(--p, 0%);
+      background: var(--accent);
+      transition: width .55s cubic-bezier(.2,.7,.2,1);
+    }
+    .hero-dots { display: flex; gap: 6px; align-items: center; }
+    .hero-dots .dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--fg-raised);
+      transition: background .3s ease, transform .3s ease;
+      cursor: pointer; border: none; padding: 0;
+    }
+    .hero-dots .dot.on { background: var(--accent); transform: scale(1.25); }
+    .hero-hint { white-space: nowrap; }
+
+    /* ── Editor mockup (legacy fallback) ──── */
+    .mockup {
+      width: 100%; aspect-ratio: 16 / 10; max-height: 460px;
+      background: var(--bg);
+      border: 1px solid var(--fg-raised);
+      border-radius: 10px; overflow: hidden;
+      display: flex; flex-direction: column;
+      box-shadow: 0 30px 60px -20px rgba(0,0,0,.5), 0 12px 24px -12px rgba(0,0,0,.4);
+      font-size: 12px;
+    }
+    .mockup .titlebar {
+      height: 30px; background: var(--fg); display: flex; align-items: center;
+      gap: 8px; padding: 0 12px; border-bottom: 1px solid #1c1d24;
+    }
+    .mockup .lights { display: flex; gap: 6px; }
+    .mockup .lights span { width: 10px; height: 10px; border-radius: 2px; }
+    .mockup .lights span:nth-child(1) { background: var(--red); }
+    .mockup .lights span:nth-child(2) { background: var(--yellow); }
+    .mockup .lights span:nth-child(3) { background: var(--accent); }
+    .mockup .title {
+      flex: 1; text-align: center; color: var(--text-muted);
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em;
+    }
+    .mockup .body { flex: 1; display: flex; min-height: 0; }
+    .mockup .rail {
+      width: 36px; background: var(--fg);
+      display: flex; flex-direction: column; align-items: center; padding-top: 10px; gap: 12px;
+      border-right: 1px solid #1c1d24;
+    }
+    .mockup .rail span {
+      width: 22px; height: 22px; border-radius: 4px;
+      border: 1px solid var(--fg-raised);
+      font-family: var(--mono); font-size: 9px; color: var(--text-dim);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .mockup .rail span.active {
+      background: var(--accent); color: var(--bg); border: none;
+    }
+    .mockup .panel {
+      width: 150px; background: var(--bg);
+      border-right: 1px solid var(--fg-raised);
+      padding: 10px 8px; display: flex; flex-direction: column; gap: 6px;
+    }
+    .mockup .panel.right { border-right: none; border-left: 1px solid var(--fg-raised); gap: 14px; }
+    .mockup .panel h4 {
+      color: var(--text-dim); font-family: var(--mono); font-size: 9px;
+      letter-spacing: 0.12em; margin: 0; font-weight: 400;
+    }
+    .mockup .row-item {
+      padding: 3px 6px; border-radius: 3px; color: var(--text-muted);
+      font-size: 11px; display: flex; align-items: center; gap: 8px;
+    }
+    .mockup .row-item.active { background: var(--plum); color: var(--text); }
+    .mockup .canvas-area {
+      flex: 1; background: #1b1c22; display: flex; flex-direction: column; min-width: 0;
+    }
+    .mockup .tabs {
+      height: 26px; display: flex; border-bottom: 1px solid var(--fg-raised); background: var(--fg);
+    }
+    .mockup .tabs span {
+      padding: 0 14px; display: flex; align-items: center; gap: 6px;
+      border-right: 1px solid var(--fg-raised); color: var(--text-dim);
+      font-family: var(--mono); font-size: 10px;
+    }
+    .mockup .tabs span.active { background: var(--bg); color: var(--text); }
+    .mockup .canvas {
+      flex: 1; position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden;
+    }
+    .mockup .checker {
+      position: absolute; inset: 0;
+      background-image:
+        linear-gradient(45deg, #2a2b32 25%, transparent 25%),
+        linear-gradient(-45deg, #2a2b32 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #2a2b32 75%),
+        linear-gradient(-45deg, transparent 75%, #2a2b32 75%);
+      background-size: 16px 16px;
+      background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+      opacity: 0.35;
+    }
+    .mockup .sprite {
+      position: relative; z-index: 1;
+      width: 200px; height: 200px;
+      background-image: url(img/fox.png);
+      background-size: 100% 100%;
+      image-rendering: pixelated;
+      outline: 1px solid var(--accent);
+      outline-offset: 12px;
+      filter: drop-shadow(0 12px 24px rgba(0,0,0,.4));
+    }
+    .mockup .infobar {
+      height: 22px; background: var(--fg); border-top: 1px solid var(--fg-raised);
+      display: flex; align-items: center; padding: 0 10px; gap: 14px;
+      font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+    }
+    .mockup .infobar .accent-dot { color: var(--accent); }
+    .mockup .palette-grid {
+      display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px;
+    }
+    .mockup .palette-grid div { aspect-ratio: 1; border-radius: 2px; }
+
+    /* ── Sections ─────────────────────── */
+    section.block {
+      padding: clamp(56px, 7vw, 88px) 0; border-top: 1px solid var(--fg);
+    }
+    h2.section {
+      font-weight: 700; font-size: clamp(28px, 3.5vw, 38px);
+      margin: 0 0 40px; max-width: 640px; color: var(--text);
+    }
+
+    .features {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+    }
+    .card {
+      background: var(--fg); border-radius: 10px; padding: 24px;
+      border: 1px solid var(--fg-raised);
+      transition: border-color .2s, transform .2s;
+    }
+    .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .card .icon {
+      width: 32px; height: 32px; padding: 5px;
+      background: var(--bg); border-radius: 4px; margin-bottom: 18px;
+    }
+    .card .icon > i {
+      display: block; width: 100%; height: 100%;
+    }
+    .card h3 {
+      font-weight: 600; font-size: 17px; margin: 0 0 8px;
+      font-family: var(--display);
+    }
+    .card p { margin: 0; font-size: 13.5px; color: var(--text-muted); line-height: 1.5; }
+
+    /* showcase */
+    .showcase {
+      display: grid; grid-template-columns: 1.6fr 1fr; gap: 20px;
+    }
+    .showcase .col { display: grid; gap: 20px; }
+    .ph {
+      width: 100%;
+      background-image: repeating-linear-gradient(45deg, var(--fg) 0 12px, var(--fg-raised) 12px 24px);
+      border: 1px solid var(--fg-raised); border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--text-dim); font-family: var(--mono); font-size: 13px;
+      letter-spacing: 0.05em;
+    }
+    .ph.tall { height: 360px; }
+    .ph.short { height: 170px; }
+
+    /* roadmap */
+    .roadmap {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+      counter-reset: rm;
+    }
+    .rm-card {
+      position: relative;
+      background: var(--fg);
+      border: 1px solid var(--fg-raised);
+      border-radius: 10px;
+      padding: 28px 24px 24px;
+      counter-increment: rm;
+      transition: border-color .2s ease, transform .2s ease;
+    }
+    .rm-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .rm-card::before {
+      content: counter(rm, decimal-leading-zero);
+      position: absolute; top: 18px; right: 22px;
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.16em;
+      color: var(--text-dim);
+    }
+    .rm-tag {
+      display: inline-block;
+      font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+      padding: 3px 8px; border-radius: 3px;
+      margin-bottom: 18px;
+    }
+    .rm-tag.now { background: rgba(47,179,135,.15); color: var(--accent); }
+    .rm-tag.next { background: rgba(110,150,200,.18); color: var(--blue); }
+    .rm-tag.later { background: rgba(214,199,130,.16); color: var(--yellow); }
+    .rm-card h3 {
+      font-family: var(--display); font-weight: 600; font-size: 17px;
+      margin: 0 0 8px;
+    }
+    .rm-card p {
+      margin: 0; font-size: 13.5px; color: var(--text-muted); line-height: 1.55;
+    }
+    .rm-foot {
+      margin-top: 28px;
+      font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+      letter-spacing: 0.04em;
+    }
+    .rm-foot a { color: var(--text-muted); }
+    .rm-foot a:hover { color: var(--accent); }
+
+    /* ── Footer ───────────────────────── */
+    footer.site {
+      border-top: 1px solid var(--fg);
+    }
+    footer.site .wrap {
+      padding-block: 48px 64px;
+      display: grid; grid-template-columns: 1.2fr repeat(3, 1fr); gap: 56px;
+    }
+    footer.site .meta {
+      font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+      line-height: 1.7; margin-top: 12px;
+    }
+    footer.site h5 {
+      font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+      letter-spacing: 0.12em; margin: 0 0 12px; font-weight: 400;
+    }
+    footer.site a {
+      display: block; padding: 3px 0; font-size: 13.5px;
+    }
+    footer.site a:hover { color: var(--accent); }
+
+    /* ── Responsive ───────────────────── */
+    @media (max-width: 880px) {
+      .hero-grid { grid-template-columns: 1fr; }
+      .features { grid-template-columns: repeat(2, 1fr); }
+      .roadmap { grid-template-columns: 1fr; }
+      footer.site { grid-template-columns: 1fr 1fr; gap: 32px; }
+      nav.top { display: none; }
+      nav.top.open {
+        display: flex; flex-direction: column; gap: 14px;
+        position: absolute; right: var(--pad); top: 64px;
+        background: var(--fg); border: 1px solid var(--fg-raised);
+        padding: 16px 20px; border-radius: 8px; z-index: 10;
+      }
+      .menu-toggle {
+        display: flex; align-items: center; justify-content: center;
+        width: 36px; height: 36px; background: var(--fg);
+        border: 1px solid var(--fg-raised); border-radius: 6px;
+        color: var(--text); font-family: var(--mono); cursor: pointer;
+      }
+      .mockup .panel { width: 110px; }
+    }
+    @media (max-width: 560px) {
+      .features { grid-template-columns: 1fr; }
+      footer.site { grid-template-columns: 1fr; }
+      .mockup .panel.right { display: none; }
+      .dl { padding: 14px 16px; flex: 1 1 auto; }
+    }
+
+  </style>
+</head>
+<body>
+  <!-- ─────── Header ─────── -->
+  <header class="site">
+    <div class="wrap row">
+      <a href="#" class="brand" aria-label="Pixi home">
+        <img src="img/icon.png" alt="" />
+        <span class="name">pixi</span>
+        <span class="ver" id="ver">v0.0.4 · zig 0.16</span>
+      </a>
+      <button class="menu-toggle" aria-label="Menu" onclick="document.querySelector('nav.top').classList.toggle('open')">≡</button>
+      <nav class="top">
+        <a href="#features">Features</a>
+        <a href="#roadmap">Roadmap</a>
+        <a href="#download">Download</a>
+        <a href="https://github.com/foxnne/pixi/wiki/User-Guide">User guide</a>
+        <a href="https://github.com/foxnne/pixi">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ─────── Hero ─────── -->
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <p class="eyebrow">● OPEN SOURCE · WRITTEN IN ZIG</p>
+        <h1 class="hero">
+          A pixel art editor<br />
+          <span class="muted">for creators.</span>
+        </h1>
+        <p class="lede">Cross-platform, open source, and focused on making pixel art fun. Manage your artwork in a customizable IDE where creating a new project is as simple as opening a folder.</p>
+
+        <div class="downloads" id="download">
+          <div class="dl-group" tabindex="0">
+            <a class="dl primary" href="https://github.com/foxnne/pixi/releases/latest">
+              <span class="dl-glyph" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M0 3.449L9.75 2.1v9.451H0M10.949 1.949L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-13.051-1.851"/></svg>
+              </span>
+              <span class="label">
+                <span>Download for Windows</span>
+                <span class="note">.exe</span>
+              </span>
+            </a>
+            <div class="dl-options" role="menu">
+              <a class="dl-option" role="menuitem" href="https://github.com/foxnne/pixi/releases/latest/download/pixi_windows_x86_64.exe">
+                <span>Intel / AMD</span><span class="arch">x86_64</span>
+              </a>
+              <a class="dl-option" role="menuitem" href="https://github.com/foxnne/pixi/releases/latest/download/pixi_windows_arm64.exe">
+                <span>ARM</span><span class="arch">arm64</span>
+              </a>
+            </div>
+          </div>
+
+          <div class="dl-group" tabindex="0">
+            <a class="dl" href="https://github.com/foxnne/pixi/releases/latest">
+              <span class="dl-glyph" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M17.05 12.04c-.03-3.16 2.58-4.7 2.7-4.77-1.47-2.15-3.76-2.45-4.58-2.48-1.95-.2-3.81 1.15-4.8 1.15-1.01 0-2.53-1.13-4.16-1.1-2.14.03-4.12 1.25-5.22 3.16-2.23 3.86-.57 9.57 1.6 12.7 1.06 1.54 2.32 3.26 3.97 3.2 1.6-.07 2.2-1.03 4.13-1.03 1.92 0 2.46 1.03 4.15 1 1.71-.03 2.79-1.55 3.83-3.1 1.21-1.78 1.7-3.51 1.73-3.6-.04-.02-3.31-1.27-3.35-5.04zM13.9 2.94c.87-1.06 1.46-2.53 1.3-4-1.25.05-2.78.83-3.69 1.88-.81.93-1.52 2.43-1.33 3.86 1.4.11 2.83-.71 3.72-1.74z"/></svg>
+              </span>
+              <span class="label">
+                <span>macOS</span>
+                <span class="note">.pkg</span>
+              </span>
+            </a>
+            <div class="dl-options" role="menu">
+              <a class="dl-option" role="menuitem" href="https://github.com/foxnne/pixi/releases/latest/download/pixi_macos_arm64.pkg">
+                <span>Apple Silicon</span><span class="arch">arm64</span>
+              </a>
+              <a class="dl-option" role="menuitem" href="https://github.com/foxnne/pixi/releases/latest/download/pixi_macos_x86_64.pkg">
+                <span>Intel</span><span class="arch">x86_64</span>
+              </a>
+            </div>
+          </div>
+
+          <div class="dl-group" tabindex="0">
+            <a class="dl" href="https://github.com/foxnne/pixi/releases/latest">
+              <span class="dl-glyph" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.83-.41 1.685-.287 2.489.04.265.108.524.2.78-.04.05-.07.105-.1.16-.235.41-.57.79-1.16 1.18-.59.39-1.74.94-2.43 1.18-.69.24-.94.94-.85 1.4.09.46.5.84 1.16.85.93.02 2.13-.39 3-.85.34-.18.65-.42.95-.7-.04.09-.07.18-.07.26-.05.65.34 1.18.95 1.51.61.33 1.43.5 2.27.5h7c.46 0 1.09-.2 1.55-.62.46-.42.79-1.07.79-1.93 0-.16-.04-.32-.1-.47.6-.27 1.13-.66 1.5-1.21.41-.61.62-1.39.6-2.27 0-.07 0-.14-.01-.21-.03-.49-.16-1.03-.36-1.6-.13-.36-.29-.73-.47-1.1-.11-.21-.21-.43-.29-.63-.34-.85-.58-1.74-.7-2.66-.16-1.21-.13-2.41-.13-3.61 0-1.32-.31-2.5-.95-3.4-.83-1.16-2.13-1.85-3.45-1.85zm-.95 5.4c.33.04.55.34.5.66-.04.32-.34.55-.66.5-.33-.04-.55-.34-.5-.66.04-.32.33-.55.66-.5zm1.84 0c.33-.04.62.18.66.5.04.33-.18.62-.5.66-.32.04-.62-.18-.66-.5-.04-.32.18-.62.5-.66z"/></svg>
+              </span>
+              <span class="label">
+                <span>Linux</span>
+                <span class="note">.AppImage</span>
+              </span>
+            </a>
+            <div class="dl-options" role="menu">
+              <a class="dl-option" role="menuitem" href="https://github.com/foxnne/pixi/releases/latest/download/pixi_linux_x86_64.AppImage">
+                <span>Intel / AMD</span><span class="arch">x86_64</span>
+              </a>
+              <a class="dl-option" role="menuitem" href="https://github.com/foxnne/pixi/releases/latest/download/pixi_linux_arm64.AppImage">
+                <span>ARM</span><span class="arch">arm64</span>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="release-line">
+          or <a href="https://github.com/foxnne/pixi/releases/latest">github.com/foxnne/pixi/releases/latest</a>
+        </div>
+      </div>
+
+      <!-- Editor screenshots: three stacked, click through. -->
+      <div class="hero-deck">
+        <div class="hero-stack" id="heroStack" role="button" tabindex="0" aria-label="Cycle to next screenshot">
+          <img src="img/editor-screenshot.png" class="hero-shot" data-pos="front"
+               alt="Pixi editor — assorted sprite sheet with food and torch animations, export dialog open." />
+          <img src="img/editor-screenshot-2.png" class="hero-shot" data-pos="back-1"
+               alt="Pixi editor — assorted.pixi open with the Animation export dialog and a torch preview." />
+          <img src="img/editor-screenshot-3.png" class="hero-shot" data-pos="back-2"
+               alt="Pixi editor in light mode — file tree on the left, sprite sheet on the right, palette below." />
+        </div>
+        <div class="hero-controls">
+          <div class="hero-dots" id="heroDots" aria-hidden="true"></div>
+          <div class="hero-progress" aria-hidden="true"><i id="heroProgress"></i></div>
+          <span class="hero-hint">click to cycle</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────── Features ─────── -->
+  <section class="block" id="features">
+    <div class="wrap">
+      <p class="eyebrow">FEATURES</p>
+      <h2 class="section">Everything is focused on being fun.</h2>
+      <div class="features">
+        <div class="card">
+          <div class="icon"><i style="background:var(--accent)"></i></div>
+          <h3>Tabs &amp; splits</h3>
+          <p>Open files in tabs, drag them into split views, reorder them however you want. The IDE workflow you already know — for sprites.</p>
+        </div>
+        <div class="card">
+          <div class="icon"><i style="background:var(--text)"></i></div>
+          <h3>A folder is a project</h3>
+          <p>Built-in file tree, search, and drag-to-import. No round-tripping through Finder, no project file to keep in sync.</p>
+        </div>
+        <div class="card">
+          <div class="icon"><i style="background:var(--blue)"></i></div>
+          <h3>Make it yours</h3>
+          <p>Light and dark themes, customizable layouts, and a drawing toolset that gets out of the way once you've set it up.</p>
+        </div>
+        <div class="card">
+          <div class="icon"><i style="background:var(--yellow)"></i></div>
+          <h3>Sprite packing built in</h3>
+          <p>Atlas generation with per-sprite origins, ready to drop into your game framework. No extra step in the pipeline.</p>
+        </div>
+        <div class="card">
+          <div class="icon"><i style="background:var(--red)"></i></div>
+          <h3>Bring your own sheets</h3>
+          <p>Drop in a downloaded or existing sprite sheet, slice it on a grid, and reorganize tiles whenever the layout stops making sense.</p>
+        </div>
+        <div class="card">
+          <div class="icon"><i style="background:var(--plum)"></i></div>
+          <h3>Animations with feel</h3>
+          <p>Animations are collections of frames with independent timings. Stretch a single frame, snap the rest tight — punchy or drawn out, you choose.</p>
+        </div>
+        <div class="card">
+          <div class="icon"><i style="background:var(--accent)"></i></div>
+          <h3>Themeable, transparent, alive</h3>
+          <p>Custom themes, transparent windows, and rich micro-animations on every interaction. The whole editor leans into the craft.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────── Roadmap ─────── -->
+  <section class="block" id="roadmap">
+    <div class="wrap">
+      <p class="eyebrow">ROADMAP</p>
+      <h2 class="section">Where Pixi is headed.</h2>
+      <div class="roadmap">
+        <div class="rm-card">
+          <span class="rm-tag next">UP NEXT</span>
+          <h3>A modular editor core</h3>
+          <p>We're generalizing Pixi into a modular editor that other gamedev tools can plug into — sprite work today, scene editing and more tomorrow.</p>
+        </div>
+        <div class="rm-card">
+          <span class="rm-tag next">UP NEXT</span>
+          <h3>Scene editor extension</h3>
+          <p>Place sprites and tilesets in a real scene, with the same tabs, splits, and themes you already use for art.</p>
+        </div>
+        <div class="rm-card">
+          <span class="rm-tag next">UP NEXT</span>
+          <h3>Extension API</h3>
+          <p>A first-class API so the community can ship their own editors and panels alongside the built-in ones.</p>
+        </div>
+        <div class="rm-card">
+          <span class="rm-tag later">LATER</span>
+          <h3>Tilemap &amp; level tools</h3>
+          <p>Auto-tiling, layer compositing, and per-cell metadata — designed to work with the same atlases you pack today.</p>
+        </div>
+        <div class="rm-card">
+          <span class="rm-tag later">LATER</span>
+          <h3>Animation graph</h3>
+          <p>State machines and transitions for animation sets, exported alongside frames so your engine can drive them directly.</p>
+        </div>
+        <div class="rm-card">
+          <span class="rm-tag later">LATER</span>
+          <h3>Collaboration &amp; live preview</h3>
+          <p>Run your game inside the editor, hot-reload art, and share workspaces with collaborators.</p>
+        </div>
+      </div>
+      <p class="rm-foot">Track progress on <a href="https://github.com/foxnne/pixi/issues">GitHub issues</a> · ideas welcome.</p>
+    </div>
+  </section>
+
+  <!-- ─────── Footer ─────── -->
+  <footer class="site">
+    <div class="wrap">
+      <div>
+        <div class="brand">
+          <img src="img/icon.png" alt="" />
+          <span class="name" style="font-size:18px">pixi</span>
+        </div>
+        <div class="meta">
+          MIT-licensed.<br />
+          Built with DVUI.<br />
+          © foxnne and contributors.
+        </div>
+      </div>
+      <div>
+        <h5>PROJECT</h5>
+        <a href="https://github.com/foxnne/pixi">GitHub</a>
+        <a href="https://github.com/foxnne/pixi/releases/latest">Releases</a>
+        <a href="https://github.com/foxnne/pixi/issues">Issues</a>
+        <a href="https://github.com/foxnne/pixi/blob/main/contributor.md">Contributing</a>
+      </div>
+      <div>
+        <h5>LEARN</h5>
+        <a href="https://github.com/foxnne/pixi/wiki/User-Guide">User guide</a>
+        <a href="https://github.com/foxnne/pixi/wiki">Wiki</a>
+      </div>
+      <div>
+        <h5>COMMUNITY</h5>
+        <a href="https://ko-fi.com/R5R4LL2PJ">Ko-fi</a>
+        <a href="#">Credits</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Render bundled pixi.hex palette in the mockup
+    const PIXI_HEX = ["#5d275d","#b13e53","#ef7d57","#ffcd75","#a7f070","#38b764","#257179","#29366f","#3b5dc9","#41a6f6"];
+    const grid = document.getElementById("palette-grid");
+    if (grid) PIXI_HEX.forEach((c, i) => {
+      const d = document.createElement("div");
+      d.style.background = c;
+      if (i === 2) { d.style.outline = "2px solid var(--text)"; d.style.outlineOffset = "1px"; }
+      grid.appendChild(d);
+    });
+
+    // Try to surface latest version tag (best-effort, GitHub Pages is same origin so CORS works)
+    fetch("https://api.github.com/repos/foxnne/pixi/releases/latest")
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (j && j.tag_name) document.getElementById("ver").textContent = j.tag_name + " · zig 0.16"; })
+      .catch(() => {});
+
+    // ── Hero stack: click-through cycle of 3 screenshots ──────
+    (function () {
+      const stack = document.getElementById("heroStack");
+      if (!stack) return;
+      const shots = Array.from(stack.querySelectorAll(".hero-shot"));
+      const progressEl = document.getElementById("heroProgress");
+      const dotsHost = document.getElementById("heroDots");
+      const N = shots.length;
+      // Order: which image index is at each visual position [front, back-1, back-2].
+      let order = shots.map((_, i) => i);
+      let lastSwapAt = 0;
+
+      // Build dots
+      const dots = shots.map((_, i) => {
+        const b = document.createElement("button");
+        b.className = "dot" + (i === 0 ? " on" : "");
+        b.setAttribute("aria-label", "Show screenshot " + (i + 1));
+        b.addEventListener("click", (e) => { e.stopPropagation(); goTo(i); });
+        dotsHost.appendChild(b);
+        return b;
+      });
+
+      function paintCards() {
+        const posNames = ["front", "back-1", "back-2"];
+        order.forEach((imgIdx, posIdx) => {
+          shots[imgIdx].dataset.pos = posNames[posIdx] || ("back-" + posIdx);
+        });
+      }
+      function paintIndicator(frontImg) {
+        dots.forEach((d, i) => d.classList.toggle("on", i === frontImg));
+        progressEl.style.setProperty("--p", (((frontImg + 1) / N) * 100).toFixed(1) + "%");
+      }
+      function paint() {
+        paintCards();
+        paintIndicator(order[0]);
+      }
+
+      function step(targetFront) {
+        const now = performance.now();
+        if (now - lastSwapAt < 650) return; // debounce mid-animation
+        lastSwapAt = now;
+        // Advance the indicator immediately on click; the cards finish shuffling
+        // afterwards, then we re-sync the data-pos attributes.
+        paintIndicator(targetFront);
+        stack.classList.add("swapping");
+        setTimeout(() => {
+          stack.classList.remove("swapping");
+          // Rotate order until targetFront is at index 0.
+          while (order[0] !== targetFront) order.push(order.shift());
+          paintCards();
+        }, 800);
+      }
+      function next() { step(order[1]); }
+      function goTo(idx) { if (order[0] !== idx) step(idx); }
+
+      stack.addEventListener("click", next);
+      stack.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); next(); }
+      });
+
+      paint();
+    })();
+
+    // ── Download button menus: click main button to toggle ───────
+    (function () {
+      const groups = document.querySelectorAll(".dl-group");
+      function closeAll(except) {
+        groups.forEach(g => { if (g !== except) g.classList.remove("open"); });
+      }
+      groups.forEach(group => {
+        const main = group.querySelector(".dl");
+        if (!main) return;
+        main.addEventListener("click", (e) => {
+          // Main button no longer navigates — it just toggles the menu.
+          e.preventDefault();
+          const willOpen = !group.classList.contains("open");
+          closeAll(group);
+          group.classList.toggle("open", willOpen);
+        });
+      });
+      // Click outside or Escape closes any open menu.
+      document.addEventListener("click", (e) => {
+        if (!e.target.closest(".dl-group")) closeAll(null);
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeAll(null);
+      });
+    })();
+
+  </script>
+</body>
+</html>
