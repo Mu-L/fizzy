@@ -7,7 +7,7 @@
     },
     .fingerprint = 0x3311781b569a8e73,
     .name = .fizzy,
-    .version = "0.0.6",
+    .version = "0.0.7",
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zig_objc = .{
@@ -26,8 +26,8 @@
             .lazy = true,
         },
         .dvui = .{
-            .url = "https://github.com/foxnne/dvui-dev/archive/0948ee4fcdb6b56a3b5a67552fe6b5d6e7923741.tar.gz",
-            .hash = "dvui-0.5.0-dev-AQFJma8T3wDPYIg-487pwJrOxP27Fz39FbNbeAVvEqth",
+            .url = "https://github.com/foxnne/dvui-dev/archive/8339528c846a53db61f18c841cac0fe9f5ddd89a.tar.gz",
+            .hash = "dvui-0.5.0-dev-AQFJme3m9QD8KR0pVuvm-m152BR1zGoDXBFr4MEoXwm2",
             //.path = "../dvui-dev",
         },
         .assetpack = .{

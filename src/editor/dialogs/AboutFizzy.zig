@@ -4,6 +4,7 @@ const fizzy = @import("../../fizzy.zig");
 const dvui = @import("dvui");
 const build_opts = @import("build_opts");
 const auto_update = @import("../../auto_update.zig");
+const assets = @import("assets");
 
 fn dialogButton(src: std.builtin.SourceLocation, label_text: []const u8, style: dvui.Theme.Style.Name, tab_idx: u16, id_extra: usize) bool {
     const opts: dvui.Options = .{
@@ -37,24 +38,10 @@ pub fn active(win: *dvui.Window) bool {
     return false;
 }
 
-var about_vpk_ver_buf: [128]u8 = undefined;
-var about_vpk_ver: []const u8 = "";
-
-fn primeAboutVelopackVersion(alloc: std.mem.Allocator) void {
-    about_vpk_ver = "";
-    if (!comptime auto_update.impl) return;
-    if (!auto_update.installLayoutSupported(dvui.io)) return;
-    const m = auto_update.openUpdateManager(dvui.io, alloc) catch return orelse return;
-    defer auto_update.freeUpdateManager(m);
-    const s = auto_update.getCurrentVersionInto(m, &about_vpk_ver_buf);
-    if (s.len > 0) about_vpk_ver = s;
-}
-
 pub fn request() void {
     if (active(dvui.currentWindow())) return;
     status_line = " ";
     update_ready_after_check = false;
-    primeAboutVelopackVersion(fizzy.app.allocator);
     var mutex = fizzy.dvui.dialog(@src(), .{
         .displayFn = dialog,
         .callafterFn = callAfter,
@@ -64,7 +51,7 @@ pub fn request() void {
         .resizeable = false,
         .default = .cancel,
         .hide_footer = true,
-        .max_size = .{ .w = 440, .h = 280 },
+        .max_size = .{ .w = 440, .h = 400 },
         .header_kind = .info,
     });
     mutex.mutex.unlock(dvui.io);
@@ -89,44 +76,68 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
 
     const body = dvui.Font.theme(.body);
     const body_small = body.larger(-1.0);
-    dvui.labelNoFmt(@src(), "Version", .{}, .{ .font = dvui.Font.theme(.heading) });
-    dvui.label(
-        @src(),
-        "{s}",
-        .{build_opts.app_version},
-        .{ .font = body },
-    );
+    const heading = dvui.Font.theme(.heading);
+
+    // Fox at the top, centered. Use a fixed natural size (96×96) so it
+    // doesn't blow out the dialog regardless of the source PNG's resolution.
+    if (fizzy.image.fromImageFileBytes("fox.png", assets.files.@"fox.png", .ptr)) |fox_src| {
+        _ = dvui.image(@src(), .{ .source = fox_src, .shrink = .ratio }, .{
+            .gravity_x = 0.5,
+            .min_size_content = .{ .w = 96, .h = 96 },
+        });
+    } else |_| {}
+
+    // Website link.
+    {
+        var link_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .none, .gravity_x = 0.5, .padding = .{ .y = 4, .h = 6 } });
+        defer link_row.deinit();
+        dvui.link(@src(), .{ .url = "https://fizzyed.it", .label = "fizzyed.it" }, .{
+            .font = heading,
+            .color_text = dvui.themeGet().color(.highlight, .fill),
+        });
+    }
+
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 8 } });
+
+    // Version block.
+    dvui.labelNoFmt(@src(), "Version", .{}, .{ .font = heading, .gravity_x = 0.5 });
+    dvui.label(@src(), "{s}", .{build_opts.app_version}, .{ .font = body, .gravity_x = 0.5 });
+
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 8 } });
 
     if (comptime auto_update.impl) {
-        if (auto_update.installLayoutSupported(dvui.io)) {
-            if (about_vpk_ver.len > 0) {
-                dvui.label(@src(), "Installed (Velopack): {s}", .{about_vpk_ver}, .{ .font = body_small });
-            }
-        } else if (builtin.os.tag == .macos) {
+        if (!auto_update.installLayoutSupported(dvui.io) and builtin.os.tag == .macos) {
             dvui.labelNoFmt(
                 @src(),
                 "In-app updates need a packaged .app (Velopack). A zig-out binary is not an app bundle.",
                 .{},
-                .{ .font = body_small },
+                .{ .font = body_small, .gravity_x = 0.5 },
             );
         }
 
+        // GitHub link (clickable).
         if (build_opts.app_repo_url.len > 0) {
-            dvui.label(@src(), "Updates: GitHub ({s})", .{build_opts.app_repo_url}, .{ .font = body_small });
+            var gh_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .none, .gravity_x = 0.5 });
+            defer gh_row.deinit();
+            dvui.labelNoFmt(@src(), "GitHub:", .{}, .{ .font = body_small, .gravity_y = 0.5, .padding = .{ .w = 6 } });
+            dvui.link(@src(), .{ .url = build_opts.app_repo_url, .label = build_opts.app_repo_url }, .{
+                .font = body_small,
+                .gravity_y = 0.5,
+            });
         } else {
-            dvui.labelNoFmt(@src(), "Updates: configure build with -Drepo-url", .{}, .{ .font = body_small });
+            dvui.labelNoFmt(@src(), "Updates: configure build with -Drepo-url", .{}, .{ .font = body_small, .gravity_x = 0.5 });
         }
     } else {
-        dvui.labelNoFmt(@src(), "Automatic updates are not included in this build.", .{}, .{ .font = body_small });
+        dvui.labelNoFmt(@src(), "Automatic updates are not included in this build.", .{}, .{ .font = body_small, .gravity_x = 0.5 });
     }
 
     if (std.c.getenv("FIZZY_AUTOUPDATE_URL")) |_| {
-        dvui.labelNoFmt(@src(), "FIZZY_AUTOUPDATE_URL is set (local/HTTP feed).", .{}, .{ .font = body_small });
+        dvui.labelNoFmt(@src(), "FIZZY_AUTOUPDATE_URL is set (local/HTTP feed).", .{}, .{ .font = body_small, .gravity_x = 0.5 });
     }
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 10 } });
 
-    dvui.labelNoFmt(@src(), status_line, .{}, .{ .font = body_small, .color_text = dvui.themeGet().color(.control, .text) });
+    dvui.labelNoFmt(@src(), status_line, .{}, .{ .font = body_small, .gravity_x = 0.5, .color_text = dvui.themeGet().color(.control, .text) });
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 12 } });
 
@@ -182,7 +193,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
                     error.InstallLayoutUnsupported => setStatus("On macOS, use the packaged .app to install updates."),
                     error.NoFeed => setStatus("No update feed configured."),
                     error.NoUpdateToInstall => setStatus("No update to install. Run “Check for updates” first."),
-                    error.CheckFailed, error.DownloadFailed => {
+                    error.CheckFailed, error.DownloadFailed, error.ApplyFailed => {
                         var eb: [320]u8 = undefined;
                         const es = auto_update.lastErrorSlice(&eb);
                         if (es.len > 0) {
@@ -212,6 +223,5 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
 
 pub fn callAfter(_: dvui.Id, _: dvui.enums.DialogResponse) !void {
     setStatus(" ");
-    about_vpk_ver = "";
     update_ready_after_check = false;
 }

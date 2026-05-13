@@ -115,8 +115,17 @@ pub fn checkAndMaybeApplyAtStartup(io: std.Io, allocator: std.mem.Allocator) !vo
 
             std.log.info("fizzy autoupdate: applying update and restarting", .{});
             const target_asset = u.TargetFullRelease;
-            // args: manager, asset, silent=true, restart=true (relaunch after apply), restartArgs=null, restartArgsLen=0
-            _ = Vpk.vpkc_wait_exit_then_apply_updates(castManager(mgr), target_asset, true, true, null, 0);
+            // args: manager, asset, silent=false (allow elevation prompt — /Applications
+            // is root-owned so the bundle swap needs admin rights; with silent=true
+            // UpdateMac refuses to ask and aborts), restart=true, restartArgs=null, len=0.
+            const applied = Vpk.vpkc_wait_exit_then_apply_updates(castManager(mgr), target_asset, false, true, null, 0);
+            if (!applied) {
+                // Helper failed to launch or rejected the asset. Don't exit —
+                // let the app start normally on the old version instead of
+                // tearing down silently and re-opening as the same version.
+                logVpkError("fizzy autoupdate: wait_exit_then_apply_updates failed at startup");
+                return error.UpdateApplyFailed;
+            }
             if (builtin.os.tag == .windows) {
                 const win32 = @import("win32");
                 win32.system.threading.Sleep(2000);
@@ -214,8 +223,17 @@ pub fn checkDownloadApplyAndExit(io: std.Io, allocator: std.mem.Allocator) Updat
                 return error.DownloadFailed;
             }
             const target_asset = u.TargetFullRelease;
-            // args: manager, asset, silent=true, restart=true (relaunch after apply), restartArgs=null, restartArgsLen=0
-            _ = Vpk.vpkc_wait_exit_then_apply_updates(castManager(mgr), target_asset, true, true, null, 0);
+            // args: manager, asset, silent=false (allow elevation prompt — /Applications
+            // is root-owned so the bundle swap needs admin rights; with silent=true
+            // UpdateMac refuses to ask and aborts), restart=true, restartArgs=null, len=0.
+            const applied = Vpk.vpkc_wait_exit_then_apply_updates(castManager(mgr), target_asset, false, true, null, 0);
+            if (!applied) {
+                // Helper failed to launch / asset rejected. Don't exit — let the
+                // caller surface the failure to the UI instead of silently bouncing
+                // the user back into the same app version (which looks like nothing happened).
+                logVpkError("fizzy autoupdate: wait_exit_then_apply_updates failed");
+                return error.ApplyFailed;
+            }
             if (builtin.os.tag == .windows) {
                 const win32 = @import("win32");
                 win32.system.threading.Sleep(2000);
@@ -238,5 +256,9 @@ pub const UpdateInstallError = error{
     InstallLayoutUnsupported,
     CheckFailed,
     DownloadFailed,
+    /// `vpkc_wait_exit_then_apply_updates` returned false — the helper rejected
+    /// the asset (commonly: code-signing mismatch, channel mismatch, or the helper
+    /// binary couldn't be spawned). See `vpkc_get_last_error` in the logs.
+    ApplyFailed,
     OutOfMemory,
 };
