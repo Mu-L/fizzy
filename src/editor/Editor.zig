@@ -621,10 +621,6 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
     editor.setTitlebarColor();
     editor.setWindowStyle();
 
-    editor.rebuildWorkspaces() catch {
-        dvui.log.err("Failed to rebuild workspaces", .{});
-    };
-
     fizzy.render.frame_index +%= 1;
     if (fizzy.perf.record) fizzy.perf.beginFrame();
     defer if (fizzy.perf.record) fizzy.perf.endFrameAndMaybeLog();
@@ -633,6 +629,14 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
     // workspace/file iteration so that a just-loaded file is visible to the rest of this frame.
     editor.processLoadingJobs();
     editor.processPackJob();
+
+    // Build workspaces AFTER reaping load jobs so a freshly-loaded file with a new grouping
+    // (e.g. "Open to the side") gets its workspace created on the same frame it lands.
+    // Otherwise the new pane only appears on the next frame, which won't happen until some
+    // unrelated event (mouse move, key) wakes the loop.
+    editor.rebuildWorkspaces() catch {
+        dvui.log.err("Failed to rebuild workspaces", .{});
+    };
 
     if (editor.pending_composite_warmup) {
         editor.pending_composite_warmup = false;
@@ -1631,7 +1635,12 @@ pub fn saving(editor: *Editor) bool {
 /// The editor doesn't care what type of file is being opened,
 /// File.fromPath will handle the file type
 /// Open `path` if needed, set its grouping, focus it, and return its index in `open_files`.
-pub fn openOrFocusFileAtGrouping(editor: *Editor, path: []const u8, grouping: u64) !usize {
+/// If the file at `path` is already open, reassigns its grouping and returns its `open_files`
+/// index. If it's not open, queues an async load with `grouping` as the target and returns
+/// `null` — callers must NOT treat that case as if the file is already present, since the
+/// worker hasn't landed it yet and there is no valid `open_files` index to act on. The async
+/// load will auto-focus once the worker completes (see `processLoadingJobs`).
+pub fn openOrFocusFileAtGrouping(editor: *Editor, path: []const u8, grouping: u64) !?usize {
     if (editor.getFileFromPath(path)) |file| {
         const idx = editor.open_files.getIndex(file.id) orelse return error.Unexpected;
         editor.open_files.values()[idx].editor.grouping = grouping;
@@ -1639,7 +1648,7 @@ pub fn openOrFocusFileAtGrouping(editor: *Editor, path: []const u8, grouping: u6
         return idx;
     }
     _ = try editor.openFilePath(path, grouping);
-    return editor.open_files.count() - 1;
+    return null;
 }
 
 /// After a workspace drop from the Files tree or when `tab_drag` ends; frees path and clears tree reorder stash.

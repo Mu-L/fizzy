@@ -764,13 +764,21 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
                         dvui.dragEnd();
                         dvui.refresh(null, @src(), data.id);
                         const new_g = fizzy.editor.newGroupingID();
-                        const idx = fizzy.editor.openOrFocusFileAtGrouping(path, new_g) catch {
+                        const maybe_idx = fizzy.editor.openOrFocusFileAtGrouping(path, new_g) catch {
                             fizzy.editor.clearFileTreeTabDragDropState();
                             continue :events_loop;
                         };
-                        repointWorkspacesAfterTabDrag(fizzy.editor, null, idx);
-                        // Same as tab strip: new grouping may not have a workspace ptr yet this frame.
-                        fizzy.editor.open_workspace_grouping = new_g;
+                        if (maybe_idx) |idx| {
+                            // File was already open and moved between groupings — repoint the
+                            // workspaces that were showing it, and focus the new pane now.
+                            repointWorkspacesAfterTabDrag(fizzy.editor, null, idx);
+                            fizzy.editor.open_workspace_grouping = new_g;
+                        }
+                        // Else: async load — leave `open_workspace_grouping` alone. Switching
+                        // to the not-yet-extant workspace would make `activeFile()` null and
+                        // collapse the bottom panel mid-load; `processLoadingJobs` will focus
+                        // the new pane once the worker lands the file, matching the
+                        // "Open to the side" menu action.
                         fizzy.editor.clearFileTreeTabDragDropState();
                     }
                 } else if (data.rectScale().r.contains(e.evt.mouse.p)) {
@@ -784,12 +792,17 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
                         e.handle(@src(), data);
                         dvui.dragEnd();
                         dvui.refresh(null, @src(), data.id);
-                        const idx = fizzy.editor.openOrFocusFileAtGrouping(path, self.grouping) catch {
+                        const maybe_idx = fizzy.editor.openOrFocusFileAtGrouping(path, self.grouping) catch {
                             fizzy.editor.clearFileTreeTabDragDropState();
                             continue :events_loop;
                         };
-                        repointWorkspacesAfterTabDrag(fizzy.editor, null, idx);
-                        self.open_file_index = idx;
+                        if (maybe_idx) |idx| {
+                            repointWorkspacesAfterTabDrag(fizzy.editor, null, idx);
+                            self.open_file_index = idx;
+                        }
+                        // Else: async load into this workspace's existing grouping. The
+                        // worker's `processLoadingJobs` focus handler will set the active
+                        // file once it lands.
                         fizzy.editor.clearFileTreeTabDragDropState();
                     }
                 }
