@@ -1,40 +1,31 @@
 name: Release
 
-# Triggered when a tag like v0.0.4 is pushed. The job runs on macos-latest
-# (the only runner that can cross-compile to *every* target — macOS in
-# particular requires running on macOS to build).
+# Triggered when a tag like v0.0.4 is pushed. Six native compile jobs package in
+# parallel (one Velopack channel each), then a final job stages assets and uploads
+# a draft GitHub release via scripts/release.sh.
 #
 # Flow:
-#   1. Operator edits VERSION on a branch, commits, tags v<VERSION>, pushes the tag.
-#   2. This workflow runs scripts/release.sh on macos-latest.
-#   3. The script runs `zig build packageall -Doptimize=ReleaseFast -Dfetch-msvc`.
-#      .NET 8 is installed for `vpk`; `-Dfetch-msvc` downloads MSVC + Windows SDK
-#      into .velopack-msvc/ on first use (needs network; can take several minutes).
-#   4. The script uploads installers, nupkgs, and manifests to a *draft* GitHub
-#      release named v<VERSION>.
-#   5. Operator reviews the draft release in the browser and clicks Publish.
-#      Auto-update only sees the release after it's published.
+#   1. Operator edits VERSION, commits, tags v<VERSION>, pushes the tag.
+#   2. Matrix builds (Linux / Windows ×2, macOS ×2) run zig build package for their
+#      target only. Windows runners run zig build msvcup-setup first (same velopack
+#      MSVC INI wiring as macOS-hosted cross-compile). macOS runners use optional
+#      signing secrets (environment fizzy_release).
+#   3. The assemble job downloads zig-out/<channel>/ from each artifact, runs
+#      FIZZY_RELEASE_SKIP_BUILD=1 ./scripts/release.sh (staging + gh release create).
+#   4. Operator reviews the draft and publishes when ready (auto-update only after publish).
 #
-# Signing (optional — falls back to unsigned macOS builds when secrets aren't set):
-#   Required secrets to enable macOS signing + notarization in CI:
-#     FIZZY_MACOS_CERT_P12_BASE64   - base64-encoded .p12 with Developer ID Application
-#                                    AND Developer ID Installer certs (combined)
-#     FIZZY_MACOS_CERT_PASSWORD     - the password for that .p12
-#     FIZZY_MACOS_SIGN_APP          - "Developer ID Application: NAME (TEAMID)"
-#     FIZZY_MACOS_SIGN_INSTALLER    - "Developer ID Installer: NAME (TEAMID)"
-#     FIZZY_APPLE_ID                - Apple ID email used for notarization
-#     FIZZY_APPLE_APP_PASSWORD      - app-specific password (appleid.apple.com)
-#     FIZZY_APPLE_TEAM_ID           - 10-char team ID
+# Signing (optional macOS builds when secrets unset):
+#   FIZZY_MACOS_CERT_P12_BASE64 / FIZZY_MACOS_CERT_PASSWORD
+#   FIZZY_MACOS_SIGN_APP / FIZZY_MACOS_SIGN_INSTALLER
+#   FIZZY_APPLE_ID / FIZZY_APPLE_APP_PASSWORD / FIZZY_APPLE_TEAM_ID
 #
-# GITHUB_TOKEN is provided automatically by Actions; the job sets GH_TOKEN so
-# `gh` in scripts/release.sh is authenticated without a separate login step.
+# windows-11-arm: public repos get native ARM Windows runners on GitHub-hosted;
+# private repos may need a fallback (larger runners or self-hosted).
 
 on:
   push:
     tags:
       - "v*"
-  # Also expose a manual trigger so we can re-run a release without retagging.
-  # The release tag must already exist on the repo when running this manually.
   workflow_dispatch:
     inputs:
       tag:
@@ -49,80 +40,142 @@ env:
   ZIG_VERSION: "0.16.0"
 
 jobs:
-  release:
-    runs-on: macos-latest
-    # Secrets for signing/notarization live in Settings → Environments → fizzy_release
-    # (repository-level Actions secrets work too if you prefer).
-    environment: fizzy_release
-    permissions:
-      contents: write # required for `gh release create`
+  # Linux + Windows: no fizzy_release environment (no signing secrets needed).
+  package:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: x86-64-linux
+            target: x86_64-linux-gnu
+            runner: ubuntu-latest
+          - channel: arm64-linux
+            target: aarch64-linux-gnu
+            runner: ubuntu-24.04-arm
+          - channel: x86-64-windows
+            target: x86_64-windows-msvc
+            runner: windows-latest
+          - channel: arm64-windows
+            target: aarch64-windows-msvc
+            runner: windows-11-arm
+    defaults:
+      run:
+        shell: bash
 
     env:
-      # Both Zig cache dirs are pinned to per-run paths (including
-      # github.run_id) so nothing carries over between release runs even
-      # if the action layer caches something. Combined with `use-cache:
-      # false` on setup-zig below, this guarantees a cold cache on every
-      # release. mlugg/setup-zig sets these env vars itself, but listing
-      # them at job scope makes the intent explicit and overrides any
-      # action-level default that might point at a stable shared path.
-      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache-${{ github.run_id }}
-      ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache-${{ github.run_id }}
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache-${{ github.run_id }}-${{ matrix.channel }}
+      ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache-${{ github.run_id }}-${{ matrix.channel }}-local
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+    permissions:
+      contents: read
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          # If triggered manually, check out the tag passed via input. For tag
-          # pushes, the default ref already points at the tag commit.
           ref: ${{ github.event.inputs.tag || github.ref }}
-          # The release script verifies the tag exists locally and points at
-          # HEAD, so we need the tag refs in the shallow clone.
           fetch-tags: true
           fetch-depth: 0
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          # Caching is intentionally OFF for release runs. The release
-          # pipeline runs rarely (only on tag pushes) and the seconds saved
-          # by a cache hit aren't worth the failure surface: stale package
-          # extractions in `.zig-cache/p/` can carry hash prefixes that no
-          # longer match what a fresh fetch from the same URL produces,
-          # leading to intermittent `hash mismatch` errors that flake half
-          # the time depending on what the previous run happened to cache.
-          # Disabling the action cache forces every release to compute
-          # hashes from scratch — slower but deterministic. CI test
-          # workflows still cache (they iterate constantly).
           use-cache: false
 
-      # mlugg/setup-zig overrides ZIG_GLOBAL_CACHE_DIR / ZIG_LOCAL_CACHE_DIR
-      # to `.zig-cache` for its caching layer, so the tmp/ pre-create has to
-      # happen AFTER that step (otherwise we create tmp/ under a path Zig
-      # never touches and the fetch still fails with FileNotFound).
-      #
-      # The bug being worked around: Zig 0.16's Fetch.zig#unzip calls
-      # createFile() on <cache>/tmp/<hex>.zip without ensuring tmp/ exists.
-      # The first zip-archive dependency (velopack libc here) trips it on
-      # fresh CI runners. Pre-creating tmp/ is the standard workaround.
+      - name: Pre-create Zig cache tmp/
+        run: |
+          mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
+          [[ "$ZIG_LOCAL_CACHE_DIR" != "$ZIG_GLOBAL_CACHE_DIR" ]] && mkdir -p "$ZIG_LOCAL_CACHE_DIR/tmp" || true
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0"
+
+      # MSVC payload + zig libc INIs for *-windows-msvc (matches scripts/release.sh on macOS).
+      - name: msvcup-setup (Windows only)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          if [[ ! -f .velopack-msvc/zig-libc-x64.ini || ! -f .velopack-msvc/zig-libc-arm64.ini ]]; then
+            echo "==> zig build msvcup-setup"
+            zig build msvcup-setup
+          else
+            echo "==> .velopack-msvc/ already present"
+          fi
+
+      - name: Fetch deps with retries
+        run: |
+          fetch() {
+            local args="$1"
+            local n=0
+            until [ "$n" -ge 5 ]; do
+              zig build --fetch $args && return 0
+              n=$((n+1))
+              echo "Fetch attempt $n ($args) failed, sleeping $((n*10))s..."
+              sleep $((n*10))
+            done
+            return 1
+          }
+          fetch "" || exit 1
+          fetch "-Dtarget=${{ matrix.target }}" || exit 1
+
+      - name: Package (${{ matrix.channel }})
+        run: |
+          set -euo pipefail
+          zig build package -Doptimize=ReleaseFast "-Dtarget=${{ matrix.target }}"
+
+      - name: Upload zig-out-${{ matrix.channel }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: zig-out-${{ matrix.channel }}
+          path: zig-out/${{ matrix.channel }}
+          if-no-files-found: error
+
+  package-macos:
+    runs-on: ${{ matrix.runner }}
+    environment: fizzy_release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: x86-64-macos
+            target: x86_64-macos
+            runner: macos-13
+          - channel: arm64-macos
+            target: aarch64-macos
+            runner: macos-14
+
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache-${{ github.run_id }}-${{ matrix.channel }}
+      ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache-${{ github.run_id }}-${{ matrix.channel }}-local
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-tags: true
+          fetch-depth: 0
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
       - name: Pre-create Zig cache tmp/
         shell: bash
         run: |
           mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
           [[ "$ZIG_LOCAL_CACHE_DIR" != "$ZIG_GLOBAL_CACHE_DIR" ]] && mkdir -p "$ZIG_LOCAL_CACHE_DIR/tmp" || true
 
-      - name: Setup .NET (for Velopack vpk)
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0"
 
-      # Pre-fetch dependencies separately from the release build so transient
-      # GitHub fetch flakes (HttpConnectionClosing) don't tank an otherwise
-      # working release. Zig 0.16 doesn't retry these internally.
-      # We fetch for both the native macOS target AND windows-msvc so the
-      # `packageall` step (which forks per-target `zig build package` runs)
-      # doesn't re-hit the network from a cold global cache.
       - name: Fetch deps with retries
         shell: bash
         run: |
@@ -137,30 +190,8 @@ jobs:
             done
             return 1
           }
-          fetch "" && fetch "-Dtarget=x86_64-windows-msvc"
-
-      # ----- macOS signing setup (optional) ------------------------------
-      # If the cert secrets are configured, import them into a temporary
-      # keychain that lives only for this job. If not, skip — release.sh
-      # detects unset FIZZY_MACOS_SIGN_APP and produces unsigned builds.
-      #
-      # Why the indirection via `signing_config` outputs instead of just
-      # `if: ${{ secrets.X != '' }}`: workflow validation fails with
-      # "Unrecognized named-value: 'secrets'" when secrets appear in an
-      # `if:` condition on a job that has `environment:` set. Reading
-      # secrets via a step's `env:` block IS allowed, so we read them
-      # there and emit booleans on $GITHUB_OUTPUT for later steps to gate
-      # on. This step also doubles as a diagnostic line: the next CI
-      # run's first signing-related output tells you immediately whether
-      # the secrets were detected.
-      #
-      # Why apple-actions/import-codesign-certs instead of rolling our
-      # own `security import` flow: the manual path has multiple
-      # footguns. `security import ... -t cert -f pkcs12` silently drops
-      # the private key from the .p12 (then `set-key-partition-list`
-      # fails with `SecItemCopyMatching: item could not be found`).
-      # Partition list and search list ordering also have to be exact
-      # or codesign / productsign can't find the identity later.
+          fetch "" || exit 1
+          fetch "-Dtarget=${{ matrix.target }}" || exit 1
 
       - name: Check signing config
         id: signing_config
@@ -170,16 +201,7 @@ jobs:
         run: |
           echo "cert=$HAS_CERT" >> "$GITHUB_OUTPUT"
           echo "notary=$HAS_NOTARY" >> "$GITHUB_OUTPUT"
-          if [[ "$HAS_CERT" == "true" ]]; then
-            echo "macOS signing: ENABLED"
-          else
-            echo "macOS signing: disabled (FIZZY_MACOS_CERT_P12_BASE64 not set)"
-          fi
-          if [[ "$HAS_NOTARY" == "true" ]]; then
-            echo "Notarization:  ENABLED"
-          else
-            echo "Notarization:  disabled (FIZZY_APPLE_ID not set)"
-          fi
+          if [[ "$HAS_CERT" == "true" ]]; then echo "macOS signing: ENABLED"; else echo "macOS signing: disabled"; fi
 
       - name: Import signing certificate
         if: steps.signing_config.outputs.cert == 'true'
@@ -187,8 +209,7 @@ jobs:
         with:
           p12-file-base64: ${{ secrets.FIZZY_MACOS_CERT_P12_BASE64 }}
           p12-password: ${{ secrets.FIZZY_MACOS_CERT_PASSWORD }}
-          # One-shot keychain unique to this job; torn down at job end.
-          keychain: fizzy-release
+          keychain: fizzy-release-${{ matrix.channel }}
           create-keychain: true
 
       - name: Configure notarytool credentials
@@ -199,28 +220,68 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.FIZZY_APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          xcrun notarytool store-credentials "fizzy-ci-notary" \
+          xcrun notarytool store-credentials "fizzy-ci-notary-${{ matrix.channel }}" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_PASSWORD" \
             --team-id "$APPLE_TEAM_ID"
-          # Tell release.sh to pass this profile to vpk for notarization.
-          # Done via $GITHUB_ENV rather than a step env entry on the next
-          # step because the latter would have to be a ternary on a
-          # `secrets.*` expression, which fails validation under
-          # `environment:`. This way the env var only exists when the
-          # profile was actually created, which is what release.sh expects.
-          echo "FIZZY_MACOS_NOTARY_PROFILE=fizzy-ci-notary" >> "$GITHUB_ENV"
+          echo "FIZZY_MACOS_NOTARY_PROFILE=fizzy-ci-notary-${{ matrix.channel }}" >> "$GITHUB_ENV"
 
-      # ----- run the release ---------------------------------------------
-
-      - name: Run release script
+      - name: Package (${{ matrix.channel }})
         env:
           FIZZY_MACOS_SIGN_APP: ${{ secrets.FIZZY_MACOS_SIGN_APP }}
           FIZZY_MACOS_SIGN_INSTALLER: ${{ secrets.FIZZY_MACOS_SIGN_INSTALLER }}
-          # FIZZY_MACOS_NOTARY_PROFILE is set by the notarytool step via
-          # $GITHUB_ENV when notarization is enabled, otherwise it stays
-          # unset and release.sh skips the --notaryProfile vpk flag.
-          # Leave the release as a draft so the operator publishes manually.
-          # Set FIZZY_RELEASE_PUBLISH=1 here once you trust the pipeline end-to-end.
+        run: |
+          set -euo pipefail
+          zig build package -Doptimize=ReleaseFast "-Dtarget=${{ matrix.target }}"
+
+      - name: Upload zig-out-${{ matrix.channel }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: zig-out-${{ matrix.channel }}
+          path: zig-out/${{ matrix.channel }}
+          if-no-files-found: error
+
+  assemble:
+    needs: [package, package-macos]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-tags: true
+          fetch-depth: 0
+
+      # Each package job uploads zig-out/<channel>; merge into zig-out/<channel>/ for release.sh.
+      - name: Download all channel outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: zig-out-*
+          path: _artifacts
+          merge-multiple: false
+
+      - name: Layout zig-out for release script
+        run: |
+          set -euo pipefail
+          mkdir -p zig-out
+          for d in _artifacts/zig-out-*; do
+            [[ -d "$d" ]] || continue
+            base="$(basename "$d")"
+            ch="${base#zig-out-}"
+            mkdir -p "zig-out/$ch"
+            mv "$d"/* "zig-out/$ch/"
+          done
+          ls -la zig-out/*/
+
+      - name: Run release script (stage + gh release)
+        shell: bash
+        env:
+          FIZZY_RELEASE_SKIP_BUILD: "1"
           FIZZY_RELEASE_PUBLISH: "0"
         run: ./scripts/release.sh

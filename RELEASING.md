@@ -65,15 +65,35 @@ The tag push triggers `.github/workflows/release.yml`.
 
 ### Option A: Let CI do it
 
-When the tag is pushed, the workflow runs on `macos-latest`, cross-compiles
-all 6 targets, packages with `vpk`, and uploads to a **draft** release named
-`v0.0.4`. Open the draft in the GitHub UI, fill in release notes, and click
-**Publish release**. Auto-update on existing installs only sees the new
-version after publishing.
+When the tag is pushed, `.github/workflows/release.yml` runs **six parallel
+native package jobs** (one Velopack channel each), then an **assemble** job
+that downloads `zig-out/<channel>/` from every job and runs
+`FIZZY_RELEASE_SKIP_BUILD=1 ./scripts/release.sh` to stage assets and create
+a **draft** release named `v0.0.4`. Open the draft in the GitHub UI, fill in
+release notes, and click **Publish release**. Auto-update on existing installs
+only sees the new version after publishing.
+
+| Channel (output dir) | Runner (native)   | Zig target              |
+| -------------------- | ----------------- | ----------------------- |
+| `x86-64-linux`       | `ubuntu-latest`   | `x86_64-linux-gnu`      |
+| `arm64-linux`        | `ubuntu-24.04-arm` | `aarch64-linux-gnu`    |
+| `x86-64-macos`       | `macos-13`        | `x86_64-macos`          |
+| `arm64-macos`        | `macos-14`        | `aarch64-macos`         |
+| `x86-64-windows`     | `windows-latest`  | `x86_64-windows-msvc`   |
+| `arm64-windows`      | `windows-11-arm`  | `aarch64-windows-msvc`  |
+
+Windows jobs run `zig build msvcup-setup` before `zig build package` so
+`.velopack-msvc/` and existing `build.zig` MSVC/`--libc` linking match a
+local macOS `packageall` run. macOS jobs use the **`fizzy_release`**
+environment for optional signing secrets (see below).
 
 If you don't have the signing secrets set up (see below), the macOS builds
 will be unsigned — Gatekeeper will warn users. The release still goes out
 fine; you'd just want to sign before announcing it widely.
+
+For a **single-machine** build (e.g. on a Mac), `zig build packageall` is
+unchanged and still builds all six targets sequentially; CI parallelism is
+only in the workflow.
 
 ### Option B: Run locally
 

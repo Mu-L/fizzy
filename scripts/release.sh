@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fizzy release script — runs from macOS, builds + signs + uploads to GitHub.
+# fizzy release script — local: full build + upload; CI assemble: stage + upload only.
 #
 # Workflow:
 #   1. Edit VERSION (e.g. 0.0.3 -> 0.0.4), commit it.
@@ -9,8 +9,11 @@
 # What this does:
 #   - Reads VERSION as the source of truth for the release version.
 #   - Confirms HEAD has a tag matching v<VERSION>.
-#   - Builds all 6 targets in release mode via `zig build packageall`.
-#   - Signs + notarizes macOS bundles if signing env vars are set.
+#   - Unless FIZZY_RELEASE_SKIP_BUILD=1: runs msvcup-setup (if needed) then
+#     `zig build packageall` for all 6 targets (typical on a Mac).
+#   - GitHub Actions instead builds each target in parallel and sets
+#     FIZZY_RELEASE_SKIP_BUILD=1 with zig-out/<channel>/ pre-populated.
+#   - Signs + notarizes macOS bundles if signing env vars are set (local or macOS package job).
 #   - Renames installers to fizzy_<os>_<arch>.<ext> for human download.
 #   - Leaves *.nupkg and releases.<channel>.json under their canonical names
 #     (Velopack auto-update looks for those literally; do not rename).
@@ -27,8 +30,8 @@
 #   GITHUB_TOKEN               - for `gh` (or use `gh auth login` once)
 #   FIZZY_RELEASE_NOTES         - free-form notes; default: "Release v<VERSION>"
 #   FIZZY_RELEASE_PUBLISH       - if "1", publishes the release (otherwise draft)
-#   FIZZY_RELEASE_SKIP_BUILD    - if "1", skip `zig build packageall`
-#                                (assumes zig-out is already populated)
+#   FIZZY_RELEASE_SKIP_BUILD    - if "1", skip zig/dotnet checks, msvcup-setup,
+#                                and packageall (expects zig-out/<channel>/ from CI)
 
 set -euo pipefail
 
@@ -55,18 +58,17 @@ if ! command -v gh >/dev/null 2>&1; then
     echo "error: GitHub CLI (gh) not found; install with \`brew install gh\` and run \`gh auth login\`" >&2
     exit 1
 fi
-if ! gh auth status >/dev/null 2>&1; then
-    echo "error: gh not authenticated; run \`gh auth login\`" >&2
-    exit 1
+gh_authed=0
+if gh auth status >/dev/null 2>&1; then
+    gh_authed=1
+elif [[ -n "${GITHUB_ACTIONS:-}" ]] && { [[ -n "${GH_TOKEN:-}" ]] || [[ -n "${GITHUB_TOKEN:-}" ]]; }; then
+    # Actions: token in env works for API calls even when `gh auth status` is empty.
+    if gh api user >/dev/null 2>&1; then
+        gh_authed=1
+    fi
 fi
-
-if ! command -v zig >/dev/null 2>&1; then
-    echo "error: zig not on PATH" >&2
-    exit 1
-fi
-
-if ! command -v dotnet >/dev/null 2>&1; then
-    echo "error: dotnet not on PATH (Velopack's vpk needs it)" >&2
+if [[ "$gh_authed" != "1" ]]; then
+    echo "error: gh not authenticated; run \`gh auth login\` (or set GH_TOKEN / GITHUB_TOKEN in CI)" >&2
     exit 1
 fi
 
@@ -107,6 +109,16 @@ fi
 # ----- build all 6 targets -------------------------------------------------
 
 if [[ "${FIZZY_RELEASE_SKIP_BUILD:-0}" != "1" ]]; then
+    if ! command -v zig >/dev/null 2>&1; then
+        echo "error: zig not on PATH" >&2
+        exit 1
+    fi
+
+    if ! command -v dotnet >/dev/null 2>&1; then
+        echo "error: dotnet not on PATH (Velopack's vpk needs it)" >&2
+        exit 1
+    fi
+
     # MSVC SDK setup is run as its OWN step, not just via -Dfetch-msvc on
     # packageall. The reason: build.zig wires msvcup_before_compile as a
     # dependency of the root compile artifacts only (exe, tests). Transitive
@@ -207,7 +219,7 @@ uploads=()
 for ch in "${channels[@]}"; do
     out="$repo_root/zig-out/$ch"
     if [[ ! -d "$out" ]]; then
-        echo "error: missing $out — did `zig build packageall` actually run?" >&2
+        echo "error: missing $out — run \`zig build packageall\` locally or CI matrix + FIZZY_RELEASE_SKIP_BUILD=1" >&2
         exit 1
     fi
 
