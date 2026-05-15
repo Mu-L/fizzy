@@ -141,7 +141,18 @@ jobs:
           sudo apt-get install -y ciopfs
           mkdir -p .velopack-msvc-real .velopack-msvc
           ciopfs .velopack-msvc-real .velopack-msvc
-          zig build msvcup-setup
+          # msvcup pulls ~50 cab files from download.visualstudio.microsoft.com;
+          # individual TLS handshakes occasionally fail with TlsInitializationFailed.
+          # setup-msvc.sh's needs_install check is keyed on kernel32.Lib presence, so
+          # retrying resumes from a partial extraction rather than starting over.
+          n=0
+          until [ "$n" -ge 5 ]; do
+            zig build msvcup-setup && break
+            n=$((n + 1))
+            echo "msvcup-setup attempt $n failed, sleeping $((n * 15))s..."
+            sleep $((n * 15))
+          done
+          [ "$n" -lt 5 ] || { echo "msvcup-setup failed after 5 attempts"; exit 1; }
 
       - name: Package (${{ matrix.channel }})
         run: |
