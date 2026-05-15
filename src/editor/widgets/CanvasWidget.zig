@@ -50,20 +50,25 @@ pub fn recenter(self: *CanvasWidget) void {
 
     const file_width: f32 = self.init_opts.data_size.w;
     const file_height: f32 = self.init_opts.data_size.h;
-    const target_width = parent.w;
-    const target_height = parent.h;
 
-    // Center the canvas within the viewport
     self.scroll_info.virtual_size.w = file_width * self.scale;
     self.scroll_info.virtual_size.h = file_height * self.scale;
 
-    // Calculate the amount of blank space for centering
-    const view_w = target_width;
-    const view_h = target_height;
+    // Reset the scroll position alongside the origin. `deinit` adds pan slack each frame by
+    // outsetting `virtual_size` and bumping `viewport.x/y` by the pad — so in steady state the
+    // scroll position is non-zero. Recenter ignored that, leaving the scaler at `offset_y` in
+    // virtual coords but rendered at `offset_y - viewport.y` on screen, shifting the content up
+    // by exactly the pad. Zeroing the viewport here keeps `origin` and the scroll position in
+    // sync; the next `deinit` re-establishes the pan slack symmetrically.
+    self.scroll_info.viewport.x = 0;
+    self.scroll_info.viewport.y = 0;
+
+    const view_w = parent.w;
+    const view_h = parent.h;
+
     const virt_w = self.scroll_info.virtual_size.w;
     const virt_h = self.scroll_info.virtual_size.h;
 
-    // Center by default if content is smaller than viewport, else 0
     const offset_x = (view_w - virt_w) * 0.5;
     const offset_y = (view_h - virt_h) * 0.5;
 

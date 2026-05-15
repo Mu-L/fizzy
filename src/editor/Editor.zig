@@ -1814,9 +1814,30 @@ pub fn drawLoadingOverlay(editor: *Editor) void {
     // small files. If every in-flight job is still under the threshold, render nothing.
     const toast_threshold_ms: i64 = 150;
     var visible_count: usize = 0;
+    var earliest_pending_start_ns: ?i128 = null;
     var it_count = editor.loading_jobs.valueIterator();
     while (it_count.next()) |job_ptr| {
-        if (job_ptr.*.elapsedExceeds(toast_threshold_ms)) visible_count += 1;
+        if (job_ptr.*.elapsedExceeds(toast_threshold_ms)) {
+            visible_count += 1;
+        } else {
+            const start = job_ptr.*.started_at_ns;
+            if (earliest_pending_start_ns == null or start < earliest_pending_start_ns.?) {
+                earliest_pending_start_ns = start;
+            }
+        }
+    }
+    // If we have pending jobs that haven't crossed the threshold yet, the app would otherwise
+    // sleep on the click event that started them and the overlay would never appear until some
+    // unrelated input (mouse move, etc.) ticks a frame. Schedule a wakeup at the threshold
+    // boundary so the overlay shows on time even with the cursor parked.
+    if (earliest_pending_start_ns) |start_ns| {
+        const elapsed_ms = @divTrunc(@import("../gfx/perf.zig").nanoTimestamp() - start_ns, std.time.ns_per_ms);
+        const remaining_ms: i64 = toast_threshold_ms - @as(i64, @intCast(elapsed_ms));
+        if (remaining_ms > 0) {
+            dvui.timer(dvui.currentWindow().data().id, @intCast(remaining_ms * std.time.us_per_ms));
+        } else {
+            dvui.refresh(null, @src(), dvui.currentWindow().data().id);
+        }
     }
     if (visible_count == 0) return;
 
