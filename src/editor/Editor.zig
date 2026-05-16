@@ -732,12 +732,13 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             const window_rect_natural = dvui.windowRect();
             const scale = dvui.windowNaturalScale();
             const title_strip_h = fizzy.editor.settings.titlebar_top_buffer + fizzy.editor.settings.titlebar_height;
-            fizzy.backend.pushTitleBarDragRect(.{
-                .x = 0,
-                .y = 0,
-                .w = window_rect_natural.w * scale,
-                .h = title_strip_h * scale,
-            });
+            // Backend derives the drag strip's width live from GetClientRect; we only cache its height
+            // and the client width as it stood this frame so right-anchored caption buttons survive
+            // a one-frame staleness window after a resize.
+            fizzy.backend.setTitleBarStrip(
+                title_strip_h * scale,
+                @intFromFloat(window_rect_natural.w * scale),
+            );
         } else if (builtin.os.tag == .macos and !fizzy.backend.isMaximized(dvui.currentWindow())) {
             var titlebar_box = dvui.box(
                 @src(),
