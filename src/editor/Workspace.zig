@@ -1828,63 +1828,54 @@ pub fn drawHomePage(_: *Workspace, canvas_vbox: *dvui.BoxWidget) !void {
     }
 }
 
-pub fn drawBubble(rect: dvui.Rect, rs: dvui.RectScale, color: [4]u8, id_extra: usize) !void {
-    var new_rect = dvui.Rect{
-        .x = rect.x - (1 / dvui.currentWindow().rectScale().s),
-        .y = rect.y - rect.h,
-        .w = rect.w + (1 / dvui.currentWindow().rectScale().s),
-        .h = rect.h,
-    };
-
+pub fn drawBubble(rect: dvui.Rect, rs: dvui.RectScale, color: [4]u8, _: usize) !void {
+    var bubble_h: f32 = rect.h;
     for (dvui.events()) |evt| {
         switch (evt.evt) {
             .mouse => |me| {
                 const dx = @abs(me.p.x - (rs.r.x + rs.r.w * 0.5)) / rs.s;
                 const dy = @abs(me.p.y - (rs.r.y - rs.r.h * 0.5)) / rs.s;
                 const distance = @sqrt(dx * dx + dy * dy);
-
-                const min_h: f32 = 0;
-                const max_h: f32 = rect.h;
-
                 const max_distance: f32 = rect.h * 2.0;
 
                 var t = distance / max_distance;
                 if (t > 1.0) t = 1.0;
                 if (t < 0.0) t = 0.0;
-                const scaled_h = max_h - (max_h - min_h) * t;
-
-                new_rect.h = @ceil(scaled_h);
-                new_rect.y = @ceil(rect.y - new_rect.h);
+                bubble_h = @ceil(rect.h - rect.h * t);
             },
             else => {},
         }
     }
 
-    const corner_radius: dvui.Rect = .{ .x = rs.r.w / 2.0, .y = rs.r.h / 2.0 };
-
-    var box = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .rect = new_rect,
-        .id_extra = id_extra,
-        .color_fill = .{ .r = color[0], .g = color[1], .b = color[2], .a = color[3] },
-    });
+    // Derive the pill's physical rect directly from the base's physical rect
+    // (no dvui.box layout round-trip). This guarantees identical left/right
+    // edges between base and pill at any scale or splitter ratio.
+    const base_phys = rs.r.outsetAll(1);
+    const bubble_h_phys = @ceil(bubble_h * rs.s);
+    const bubble_phys = dvui.Rect.Physical{
+        .x = base_phys.x,
+        .y = rs.r.y - bubble_h_phys,
+        .w = base_phys.w,
+        .h = bubble_h_phys,
+    };
 
     var path = dvui.Path.Builder.init(dvui.currentWindow().lifo());
     defer path.deinit();
 
-    const rad = corner_radius;
-    const r = box.data().contentRectScale().r;
-    box.deinit();
-    const tl = dvui.Point.Physical{ .x = r.x + rad.x, .y = r.y + rad.x };
-    const bl = dvui.Point.Physical{ .x = r.x + rad.h, .y = r.y + r.h - rad.h };
-    const br = dvui.Point.Physical{ .x = r.x + r.w - rad.w, .y = r.y + r.h - rad.w };
-    const tr = dvui.Point.Physical{ .x = r.x + r.w - rad.y, .y = r.y + rad.y };
-    path.addRect(rs.r.outsetAll(1), dvui.Rect.Physical.all(0));
+    path.addRect(base_phys, dvui.Rect.Physical.all(0));
 
-    if (new_rect.h > 0) {
-        path.addArc(tl, rad.x, dvui.math.pi * 1.5, dvui.math.pi, true);
-        path.addArc(bl, rad.h, dvui.math.pi, dvui.math.pi * 0.5, true);
-        path.addArc(br, rad.w, dvui.math.pi * 0.5, 0, true);
-        path.addArc(tr, rad.y, dvui.math.pi * 2.0, dvui.math.pi * 1.5, false);
+    if (bubble_phys.h > 0) {
+        const rad_x = rs.r.w / 2.0;
+        const rad_y = rs.r.h / 2.0;
+        const r = bubble_phys;
+        const tl = dvui.Point.Physical{ .x = r.x + rad_x, .y = r.y + rad_x };
+        const bl = dvui.Point.Physical{ .x = r.x, .y = r.y + r.h };
+        const br = dvui.Point.Physical{ .x = r.x + r.w, .y = r.y + r.h };
+        const tr = dvui.Point.Physical{ .x = r.x + r.w - rad_y, .y = r.y + rad_y };
+        path.addArc(tl, rad_x, dvui.math.pi * 1.5, dvui.math.pi, true);
+        path.addArc(bl, 0, dvui.math.pi, dvui.math.pi * 0.5, true);
+        path.addArc(br, 0, dvui.math.pi * 0.5, 0, true);
+        path.addArc(tr, rad_y, dvui.math.pi * 2.0, dvui.math.pi * 1.5, false);
     }
 
     path.build().fillConvex(.{ .color = .{ .r = color[0], .g = color[1], .b = color[2], .a = color[3] }, .fade = 1.0 });
