@@ -606,6 +606,11 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
 
     // Drain any "Save and Close" requests whose async save has settled.
     editor.tickPendingSaveCloses();
+    var needs_save_status_anim_tick = false;
+    for (editor.open_files.values()) |*f| {
+        f.tickSaveDoneFlash();
+        if (f.showsSaveStatusIndicator()) needs_save_status_anim_tick = true;
+    }
     // Re-poll the quit walker while saves are in flight on worker threads.
     if (editor.quit_saves_in_flight.count() > 0) editor.pending_quit_continue = true;
     if (editor.pending_quit_continue) {
@@ -614,6 +619,11 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
     }
 
     const wd = dvui.currentWindow().data();
+    // Save spinner + finish animation are time-based; without input the loop would sleep and
+    // frames would not advance (same pattern as `drawLoadingOverlay`).
+    if (needs_save_status_anim_tick and dvui.timerDoneOrNone(wd.id)) {
+        dvui.timer(wd.id, 16_000);
+    }
     for (dvui.events()) |*e| {
         if (e.handled) continue;
         if (!dvui.eventMatchSimple(e, wd)) continue;
@@ -2202,7 +2212,7 @@ pub fn drawLoadingOverlay(editor: *Editor) void {
             .gravity_y = 0.5,
             .color_text = dvui.themeGet().color(.content, .text),
             .padding = .{ .w = 8 },
-        });
+        }, .{});
 
         const basename = std.fs.path.basename(job.path);
         const phase = job.currentPhase();

@@ -145,6 +145,15 @@ pub const EditorData = struct {
     selected_frame_indices: std.ArrayListUnmanaged(usize) = .empty,
     selected_frame_indices_for_animation_id: u64 = 0,
     frame_selection_anchor: ?usize = null,
+
+    /// Last frame's `isSaving()` — used on the GUI thread to detect save-finished transitions.
+    was_saving: bool = false,
+    /// Set from any thread in `setSaving(false)`; main-thread `tickSaveDoneFlash` arms the flash.
+    save_complete: std.atomic.Value(bool) = .init(false),
+    /// Monotonic deadline (`fizzy.perf.nanoTimestamp`): save-complete affordance in tab / tree.
+    save_complete_show_duration: ?i128 = null,
+    /// Set with `save_complete_show_duration` when the flash arms (`isSaving` → false).
+    save_complete_show_start: ?i128 = null,
 };
 
 pub const History = @import("History.zig");
@@ -234,12 +243,68 @@ pub fn height(file: *const File) u32 {
 /// strip spinner. `monotonic` is sufficient — we don't synchronize any other data through this
 /// flag, just publish the boolean.
 pub fn setSaving(file: *File, v: bool) void {
+    const was = file.isSaving();
+    if (was == v) return;
     @atomicStore(bool, &file.editor.saving, v, .monotonic);
+    if (v) {
+        file.editor.save_complete.store(false, .monotonic);
+        file.editor.save_complete_show_duration = null;
+        file.editor.save_complete_show_start = null;
+    } else {
+        file.editor.save_complete.store(true, .monotonic);
+    }
 }
 
 /// Atomic-load counterpart to `setSaving`. Safe to call from any thread.
 pub fn isSaving(file: *const File) bool {
     return @atomicLoad(bool, &file.editor.saving, .monotonic);
+}
+
+const save_done_flash_duration_ns: i128 = 2 * std.time.ns_per_s;
+
+/// Call once per frame from the main thread. Arms save-complete feedback when
+/// `isSaving()` falls from true to false.
+pub fn tickSaveDoneFlash(file: *File) void {
+    const now = fizzy.perf.nanoTimestamp();
+    const saving = file.isSaving();
+    const pending = file.editor.save_complete.swap(false, .monotonic);
+    if (!saving and (pending or file.editor.was_saving)) {
+        file.editor.save_complete_show_start = now;
+        file.editor.save_complete_show_duration = now + save_done_flash_duration_ns;
+    }
+    if (saving) {
+        file.editor.save_complete_show_duration = null;
+        file.editor.save_complete_show_start = null;
+        file.editor.save_complete.store(false, .monotonic);
+    }
+    file.editor.was_saving = saving;
+    if (file.editor.save_complete_show_duration) |until| {
+        if (now >= until) {
+            file.editor.save_complete_show_duration = null;
+            file.editor.save_complete_show_start = null;
+        }
+    }
+}
+
+/// Tab / tree slot should show the bubble spinner (saving, finish animation, or until flash arms).
+pub fn showsSaveStatusIndicator(file: *const File) bool {
+    if (file.isSaving()) return true;
+    if (timeSinceSaveComplete(file) != null) return true;
+    return file.editor.save_complete.load(.monotonic);
+}
+
+pub fn showSaveDoneFlash(file: *const File) bool {
+    return timeSinceSaveComplete(file) != null;
+}
+
+/// Nanoseconds since save finished (`null` when inactive). Drives [`fizzy.dvui.bubbleSpinner`]'s
+/// finish animation (sync → pop → check).
+pub fn timeSinceSaveComplete(file: *const File) ?i128 {
+    const until = file.editor.save_complete_show_duration orelse return null;
+    const st = file.editor.save_complete_show_start orelse return null;
+    const now = fizzy.perf.nanoTimestamp();
+    if (now >= until) return null;
+    return @max(@as(i128, 0), now - st);
 }
 
 /// Width × height of the artwork in pixels, taken from the first layer. This matches the in-memory

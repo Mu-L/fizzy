@@ -71,6 +71,15 @@ pub const DialogHeaderKind = enum(u8) {
 /// Yellow for `.warning` header glyphs (readable in light and dark themes).
 pub const dialog_header_warning_fill: dvui.Color = .{ .r = 234, .g = 179, .b = 8 };
 
+/// Emerald success green for save-complete checkmarks (not theme `.highlight`).
+pub fn saveDoneCheckFill(alpha: f32) dvui.Color {
+    const c: dvui.Color = if (dvui.themeGet().dark)
+        .{ .r = 74, .g = 222, .b = 128 }
+    else
+        .{ .r = 22, .g = 163, .b = 74 };
+    return c.opacity(alpha);
+}
+
 pub const DialogOptions = struct {
     window: ?*dvui.Window = null,
     id_extra: usize = 0,
@@ -612,19 +621,37 @@ pub fn toastDisplay(id: dvui.Id) !void {
     }
 }
 
+pub const BubbleSpinnerInit = struct {
+    complete_elapsed_ns: ?i128 = null,
+};
+
+/// Finish animation after save (wall-clock, driven by the file flash timer):
+/// 1. **Sync** — bubbles around the ring sequentially grow to the same size, filling the ring.
+/// 2. **Pop** — ring radius expands quickly while dots shrink and fade.
+/// 3. **Check** — only the highlight checkmark until the flash window ends.
+const bubble_save_sync_ns: i128 = 400 * std.time.ns_per_ms;
+const bubble_save_pop_ns: i128 = 160 * std.time.ns_per_ms;
+pub const bubble_save_transition_ns: i128 = bubble_save_sync_ns + bubble_save_pop_ns;
+
+/// True when save-complete feedback is showing the check (tab close may appear on hover).
+pub fn bubbleSpinnerSaveInCheckPhase(complete_elapsed_ns: i128) bool {
+    return complete_elapsed_ns >= bubble_save_transition_ns;
+}
+const bubble_save_check_fade_ns: i128 = 120 * std.time.ns_per_ms;
+const bubble_spinner_period_micros: i32 = 1_050_000;
+const bubble_dot_count: u32 = 9;
+
 /// Fizzy-themed bubble spinner. N small filled dots arranged on a ring; each pulses size
 /// and alpha in a sine wave with a phase offset around the circle, giving a wave of
-/// brightness that rotates — like bubbles rising in a fizzy drink. Uses dvui's animation
-/// loop for the time base, so dvui keeps refreshing on its own while the spinner is alive.
+/// brightness that rotates — like bubbles rising in a fizzy drink.
 ///
-/// `options.color(.text)` is the dot colour. The widget self-sizes to `min_size_content`
-/// (default 50×50); the ring fills the inner content rect.
-pub fn bubbleSpinner(src: std.builtin.SourceLocation, opts: dvui.Options) void {
-    const dot_count: u32 = 7;
-    // ~1s wave feels lively without buzzing. dvui's stock spinner is 3s; this is brisker so
-    // it reads as "active progress" rather than "thinking".
-    const period_micros: i32 = 1_050_000;
-
+/// When `init.save_done_elapsed_ns` is set, plays the save-complete finish (sync → pop → check)
+/// instead of the looping wave. `options.color(.text)` is the dot colour.
+pub fn bubbleSpinner(
+    src: std.builtin.SourceLocation,
+    opts: dvui.Options,
+    init: BubbleSpinnerInit,
+) void {
     var defaults: dvui.Options = .{
         .name = "BubbleSpinner",
         .min_size_content = .{ .w = 50, .h = 50 },
@@ -637,12 +664,42 @@ pub fn bubbleSpinner(src: std.builtin.SourceLocation, opts: dvui.Options) void {
     if (wd.rect.empty()) return;
 
     const rs = wd.contentRectScale();
-    const r = rs.r;
+    const text_color = options.color(.text);
 
-    // Loop the time base seamlessly: when the previous cycle's animation expires, start the
-    // next one at the same instant so the wave wraps without skipping a beat.
+    if (init.complete_elapsed_ns) |elapsed_ns| {
+        if (elapsed_ns >= bubble_save_transition_ns) {
+            const check_elapsed = elapsed_ns - bubble_save_transition_ns;
+            const check_alpha = if (check_elapsed >= bubble_save_check_fade_ns)
+                1.0
+            else
+                @as(f32, @floatFromInt(check_elapsed)) / @as(f32, @floatFromInt(bubble_save_check_fade_ns));
+            bubbleSpinnerPaintCheck(rs, check_alpha);
+            return;
+        }
+        if (elapsed_ns < bubble_save_sync_ns) {
+            var spin_t: f32 = 0;
+            const anim: dvui.Animation = .{ .end_time = bubble_spinner_period_micros };
+            if (dvui.animationGet(wd.id, "_t")) |a| {
+                var aa = a;
+                if (aa.done()) {
+                    aa = anim;
+                    aa.start_time = a.end_time;
+                    aa.end_time += a.end_time;
+                    dvui.animation(wd.id, "_t", aa);
+                }
+                spin_t = aa.value();
+            } else {
+                dvui.animation(wd.id, "_t", anim);
+            }
+            bubbleSpinnerPaintSaveSync(rs.r, spin_t, text_color, elapsed_ns);
+            return;
+        }
+        bubbleSpinnerPaintSavePop(rs.r, text_color, elapsed_ns - bubble_save_sync_ns);
+        return;
+    }
+
     var t: f32 = 0;
-    const anim: dvui.Animation = .{ .end_time = period_micros };
+    const anim: dvui.Animation = .{ .end_time = bubble_spinner_period_micros };
     if (dvui.animationGet(wd.id, "_t")) |a| {
         var aa = a;
         if (aa.done()) {
@@ -656,37 +713,83 @@ pub fn bubbleSpinner(src: std.builtin.SourceLocation, opts: dvui.Options) void {
         dvui.animation(wd.id, "_t", anim);
     }
 
-    const center = r.center();
-    // Ring radius eats most of the box; dot radius is the remaining budget. `0.78 / 0.18`
-    // leaves a sliver of breathing room around the dots at their peak size.
-    const bounding_radius = @min(r.w, r.h) * 0.5;
-    const ring_radius = bounding_radius * 0.78;
-    const dot_max_radius = bounding_radius * 0.18;
-    const dot_min_scale: f32 = 0.35;
+    bubbleSpinnerPaintSpin(rs.r, t, text_color);
+}
 
-    const text_color = options.color(.text);
+fn bubbleSpinnerGeom(r: dvui.Rect.Physical) struct {
+    center: dvui.Point.Physical,
+    ring_radius: f32,
+    dot_max_radius: f32,
+} {
+    const bounding_radius = @min(r.w, r.h) * 0.5;
+    return .{
+        .center = r.center(),
+        .ring_radius = bounding_radius * 0.78,
+        .dot_max_radius = bounding_radius * 0.18,
+    };
+}
+
+/// Centered in the same content rect as the bubble ring (not a child `icon` widget).
+fn bubbleSpinnerPaintCheck(rs: dvui.RectScale, alpha: f32) void {
+    // Match tab close X (`expand = .ratio` in the same slot). Lucide `check` has a bit more
+    // viewbox padding than `x`, so render slightly larger than the content square.
+    const slot = @min(rs.r.w, rs.r.h);
+    const side = slot * 1.08;
+    const cx = rs.r.x + rs.r.w * 0.5;
+    const cy = rs.r.y + rs.r.h * 0.5;
+    const icon_rs: dvui.RectScale = .{
+        .r = .{
+            .x = cx - side * 0.5,
+            .y = cy - side * 0.5,
+            .w = side,
+            .h = side,
+        },
+        .s = rs.s,
+    };
+    const check_color = saveDoneCheckFill(alpha);
+    dvui.renderIcon("bubble_save_done", icons.tvg.lucide.check, icon_rs, .{}, .{
+        .stroke_color = check_color,
+        .fill_color = check_color,
+    }) catch |err| {
+        dvui.logError(@src(), err, "bubble save check icon", .{});
+    };
+}
+
+fn bubbleSpinnerPaintDot(
+    center: dvui.Point.Physical,
+    ring_radius: f32,
+    angle: f32,
+    dot_radius: f32,
+    color: dvui.Color,
+) void {
+    const dot_center: dvui.Point.Physical = .{
+        .x = center.x + ring_radius * @cos(angle),
+        .y = center.y + ring_radius * @sin(angle),
+    };
+    var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
+    defer path.deinit();
+    path.addArc(dot_center, dot_radius, 2 * std.math.pi, 0, true);
+    path.build().fillConvex(.{ .color = color });
+}
+
+fn bubbleSpinnerSmoothstep(edge0: f32, edge1: f32, x: f32) f32 {
+    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0, 1);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn bubbleSpinnerPaintSpin(r: dvui.Rect.Physical, t: f32, text_color: dvui.Color) void {
+    const geom = bubbleSpinnerGeom(r);
+    const dot_min_scale: f32 = 0.35;
     const base_alpha_f: f32 = @floatFromInt(text_color.a);
+    const n = @as(f32, @floatFromInt(bubble_dot_count));
 
     var i: u32 = 0;
-    while (i < dot_count) : (i += 1) {
-        // Angle around the ring (12 o'clock = -π/2). Phase offset = i / N so the wave
-        // travels around in one full period.
-        const angle = -std.math.pi * 0.5 + 2 * std.math.pi * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(dot_count));
-        const phase = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(dot_count));
+    while (i < bubble_dot_count) : (i += 1) {
+        const angle = -std.math.pi * 0.5 + 2 * std.math.pi * @as(f32, @floatFromInt(i)) / n;
+        const phase = @as(f32, @floatFromInt(i)) / n;
         const local_t = @mod(t + phase, 1.0);
-        // sin(π·x) is 0 → 1 → 0 over x ∈ [0,1]; gives each dot a smooth grow/shrink pulse
-        // with no abrupt edge at the cycle boundary.
         const pulse = @sin(std.math.pi * local_t);
-
-        const dot_radius = dot_max_radius * (dot_min_scale + (1.0 - dot_min_scale) * pulse);
-        const dot_center: dvui.Point.Physical = .{
-            .x = center.x + ring_radius * @cos(angle),
-            .y = center.y + ring_radius * @sin(angle),
-        };
-
-        // Alpha rides the same pulse curve, biased so dots never disappear entirely — they
-        // bottom out around 25% of the source alpha so the ring stays visible as a faint
-        // outline even between peaks.
+        const dot_radius = geom.dot_max_radius * (dot_min_scale + (1.0 - dot_min_scale) * pulse);
         const alpha_floor: f32 = 0.25;
         const alpha_mul = alpha_floor + (1.0 - alpha_floor) * pulse;
         const dot_color: dvui.Color = .{
@@ -695,16 +798,74 @@ pub fn bubbleSpinner(src: std.builtin.SourceLocation, opts: dvui.Options) void {
             .b = text_color.b,
             .a = @intFromFloat(base_alpha_f * alpha_mul),
         };
-
-        var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
-        defer path.deinit();
-        // Full sweep = filled circle. dvui's `addArc` walks `a` *decreasing* from `start`
-        // toward `end`, so the arc must go from 2π down to 0 (not 0 → 2π — that produces a
-        // single point and fillConvex draws nothing). `skip_end=true` avoids duplicating the
-        // start vertex (since end angle 0 and start angle 2π are the same point).
-        path.addArc(dot_center, dot_radius, 2 * std.math.pi, 0, true);
-        path.build().fillConvex(.{ .color = dot_color });
+        bubbleSpinnerPaintDot(geom.center, geom.ring_radius, angle, dot_radius, dot_color);
     }
+}
+
+/// Sequential sync: each bubble in turn reaches full size so the ring reads as filled.
+fn bubbleSpinnerPaintSaveSync(r: dvui.Rect.Physical, spin_t: f32, text_color: dvui.Color, elapsed_ns: i128) void {
+    const geom = bubbleSpinnerGeom(r);
+    const dot_min_scale: f32 = 0.35;
+    const fill_scale: f32 = 1.08; // slightly oversized so adjacent dots meet on the ring
+    const base_alpha_f: f32 = @floatFromInt(text_color.a);
+    const n = @as(f32, @floatFromInt(bubble_dot_count));
+    const sync_p = @as(f32, @floatFromInt(elapsed_ns)) / @as(f32, @floatFromInt(bubble_save_sync_ns));
+
+    var i: u32 = 0;
+    while (i < bubble_dot_count) : (i += 1) {
+        const angle = -std.math.pi * 0.5 + 2 * std.math.pi * @as(f32, @floatFromInt(i)) / n;
+        const phase = @as(f32, @floatFromInt(i)) / n;
+        const local_t = @mod(spin_t + phase, 1.0);
+        const wave = @sin(std.math.pi * local_t);
+
+        const slot = (@as(f32, @floatFromInt(i)) + 0.5) / n;
+        const lock = bubbleSpinnerSmoothstep(slot - 0.12, slot + 0.08, sync_p);
+        const pulse = wave * (1.0 - lock) + lock;
+        const dot_radius = geom.dot_max_radius * (dot_min_scale + (1.0 - dot_min_scale) * pulse * fill_scale);
+        const alpha_floor: f32 = 0.25;
+        const alpha_mul = alpha_floor + (1.0 - alpha_floor) * pulse;
+        const dot_color: dvui.Color = .{
+            .r = text_color.r,
+            .g = text_color.g,
+            .b = text_color.b,
+            .a = @intFromFloat(base_alpha_f * alpha_mul),
+        };
+        bubbleSpinnerPaintDot(geom.center, geom.ring_radius, angle, dot_radius, dot_color);
+    }
+}
+
+/// Ring expands outward while dots shrink and vanish.
+fn bubbleSpinnerPaintSavePop(r: dvui.Rect.Physical, text_color: dvui.Color, pop_elapsed_ns: i128) void {
+    const geom = bubbleSpinnerGeom(r);
+    const base_alpha_f: f32 = @floatFromInt(text_color.a);
+    const n = @as(f32, @floatFromInt(bubble_dot_count));
+    const pop_p = std.math.clamp(
+        @as(f32, @floatFromInt(pop_elapsed_ns)) / @as(f32, @floatFromInt(bubble_save_pop_ns)),
+        0,
+        1,
+    );
+    const pop_ease = 1.0 - std.math.pow(f32, 1.0 - pop_p, 3.0);
+    const ring_mul = 1.0 + 0.62 * pop_ease;
+    const dot_scale = 1.08 * (1.0 - pop_ease);
+    const alpha_mul = 1.0 - pop_ease;
+
+    var i: u32 = 0;
+    while (i < bubble_dot_count) : (i += 1) {
+        const angle = -std.math.pi * 0.5 + 2 * std.math.pi * @as(f32, @floatFromInt(i)) / n;
+        const dot_radius = geom.dot_max_radius * dot_scale;
+        const dot_color: dvui.Color = .{
+            .r = text_color.r,
+            .g = text_color.g,
+            .b = text_color.b,
+            .a = @intFromFloat(base_alpha_f * alpha_mul),
+        };
+        bubbleSpinnerPaintDot(geom.center, geom.ring_radius * ring_mul, angle, dot_radius, dot_color);
+    }
+}
+
+/// Paints the fizzy ring (same geometry as [`bubbleSpinner`]) for compositing with other layers.
+pub fn bubbleSpinnerPaintDots(r: dvui.Rect.Physical, t: f32, text_color: dvui.Color) void {
+    bubbleSpinnerPaintSpin(r, t, text_color);
 }
 
 /// Subwindow id used for save-complete toasts. Distinct from the canvas subwindow so

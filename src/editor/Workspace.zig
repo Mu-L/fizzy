@@ -395,8 +395,15 @@ fn drawTabs(self: *Workspace) void {
                 // button so the layout doesn't shift when saving starts/ends. `editor.saving`
                 // can be written by a background save worker (`saveZip`), so we read it with an
                 // atomic load — the write side uses an atomic store in matching `save*` paths.
-                const is_saving = @atomicLoad(bool, &file.editor.saving, .monotonic);
-                if (is_saving) {
+                const save_flash_elapsed = file.timeSinceSaveComplete();
+                const save_in_check_phase = if (save_flash_elapsed) |elapsed|
+                    fizzy.dvui.bubbleSpinnerSaveInCheckPhase(elapsed)
+                else
+                    false;
+                const save_blocks_tab_close = file.isSaving() or
+                    (file.showsSaveStatusIndicator() and !save_in_check_phase);
+
+                if (save_blocks_tab_close) {
                     fizzy.dvui.bubbleSpinner(@src(), .{
                         .id_extra = i *% 16 + 5,
                         .expand = .none,
@@ -404,6 +411,19 @@ fn drawTabs(self: *Workspace) void {
                         .gravity_x = 0.5,
                         .gravity_y = 0.5,
                         .color_text = dvui.themeGet().color(.window, .text),
+                    }, .{
+                        .complete_elapsed_ns = save_flash_elapsed,
+                    });
+                } else if (save_in_check_phase and !tab_hovered) {
+                    fizzy.dvui.bubbleSpinner(@src(), .{
+                        .id_extra = i *% 16 + 5,
+                        .expand = .none,
+                        .min_size_content = .{ .w = close_inner, .h = close_inner },
+                        .gravity_x = 0.5,
+                        .gravity_y = 0.5,
+                        .color_text = dvui.themeGet().color(.window, .text),
+                    }, .{
+                        .complete_elapsed_ns = save_flash_elapsed,
                     });
                 } else if (tab_hovered) {
                     var tab_close_button: dvui.ButtonWidget = undefined;

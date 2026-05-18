@@ -123,38 +123,19 @@ pub fn drawFiles(path: []const u8, tree: *fizzy.dvui.TreeWidget) !void {
         .animation_easing = dvui.easing.outBack,
     }, .{
         .id_extra = 0,
-        .expand = .horizontal,
+        .expand = .both,
         .color_fill = .transparent,
         .margin = dvui.Rect.all(0),
         .padding = dvui.Rect.all(1),
     });
     defer branch.deinit();
 
-    { // Add right click context menu for item options
+    { // Project root row: close / reveal / new items (same actions as folder rows, plus Close)
         var context = dvui.context(@src(), .{ .rect = branch.button.data().borderRectScale().r }, .{});
         defer context.deinit();
 
         if (context.activePoint()) |point| {
-            var fw2 = dvui.floatingMenu(@src(), .{ .from = dvui.Rect.Natural.fromPoint(point) }, .{ .box_shadow = .{
-                .color = .black,
-                .offset = .{ .x = 0, .y = 0 },
-                .shrink = 0,
-                .fade = 10,
-                .alpha = 0.15,
-            } });
-            defer fw2.deinit();
-
-            if ((dvui.menuItemLabel(@src(), "Close", .{}, .{
-                .expand = .horizontal,
-            })) != null) {
-                if (fizzy.editor.folder) |f| {
-                    fizzy.editor.ignore.deinit(fizzy.app.allocator);
-                    fizzy.app.allocator.free(f);
-                    fizzy.editor.folder = null;
-                }
-
-                fw2.close();
-            }
+            try showRootProjectContextMenu(point, path, tree);
         }
     }
 
@@ -197,13 +178,92 @@ pub fn drawFiles(path: []const u8, tree: *fizzy.dvui.TreeWidget) !void {
         var box = dvui.box(@src(), .{
             .dir = .vertical,
         }, .{
-            .expand = .horizontal,
+            .expand = .both,
             .background = false,
-            .gravity_y = 0.2,
+            .gravity_y = 0,
         });
         defer box.deinit();
 
         try recurseFiles(path, tree, unique_id, filter_text);
+
+        // Fill remaining explorer height so empty projects (or short trees) still receive clicks;
+        // context is registered after file rows so row menus keep priority.
+        var filler = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .expand = .both,
+            .background = false,
+        });
+        defer filler.deinit();
+
+        {
+            var blank_ctx = dvui.context(@src(), .{ .rect = filler.data().borderRectScale().r }, .{});
+            defer blank_ctx.deinit();
+
+            if (blank_ctx.activePoint()) |point| {
+                try showRootProjectContextMenu(point, path, tree);
+            }
+        }
+    }
+}
+
+/// Context menu for the project root directory: close project, reveal on disk, new file / folder.
+fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u8, tree: *fizzy.dvui.TreeWidget) !void {
+    var fw2 = dvui.floatingMenu(@src(), .{ .from = dvui.Rect.Natural.fromPoint(point) }, .{ .box_shadow = .{
+        .color = .black,
+        .offset = .{ .x = 0, .y = 0 },
+        .shrink = 0,
+        .fade = 10,
+        .alpha = 0.15,
+    } });
+    defer fw2.deinit();
+
+    const root_branch_id = dvui.Id.update(tree.data().id, project_path);
+
+    if ((dvui.menuItemLabel(@src(), "Close", .{}, .{
+        .expand = .horizontal,
+    })) != null) {
+        if (fizzy.editor.folder) |f| {
+            fizzy.editor.ignore.deinit(fizzy.app.allocator);
+            fizzy.app.allocator.free(f);
+            fizzy.editor.folder = null;
+        }
+
+        fw2.close();
+    }
+
+    _ = dvui.separator(@src(), .{ .expand = .horizontal });
+
+    if ((dvui.menuItemLabel(@src(), open_message, .{}, .{ .expand = .horizontal })) != null) {
+        fizzy.editor.openInFileBrowser(project_path) catch {
+            dvui.log.err("Failed to open file browser", .{});
+        };
+
+        fw2.close();
+    }
+
+    if ((dvui.menuItemLabel(@src(), "New File...", .{}, .{ .expand = .horizontal })) != null) {
+        defer fw2.close();
+
+        const parent_owned = try dvui.currentWindow().arena().dupe(u8, project_path);
+        var mutex = fizzy.dvui.dialog(@src(), .{
+            .displayFn = fizzy.Editor.Dialogs.NewFile.dialog,
+            .callafterFn = fizzy.Editor.Dialogs.NewFile.callAfter,
+            .title = "New File...",
+            .ok_label = "Create",
+            .cancel_label = "Cancel",
+            .resizeable = false,
+            .header_kind = .info,
+            .default = .ok,
+            .id_extra = root_branch_id.asUsize(),
+        });
+        dvui.dataSetSlice(null, mutex.id, "_parent_path", parent_owned);
+        mutex.mutex.unlock(dvui.io);
+    }
+
+    if ((dvui.menuItemLabel(@src(), "New Folder...", .{}, .{ .expand = .horizontal })) != null) {
+        const new_folder_path = try std.fs.path.join(dvui.currentWindow().arena(), &.{ project_path, "New Folder" });
+        std.Io.Dir.createDirAbsolute(dvui.io, new_folder_path, .default_dir) catch dvui.log.err("Failed to create folder: {s}", .{new_folder_path});
+
+        fw2.close();
     }
 }
 
@@ -335,6 +395,7 @@ pub fn editableLabel(id_extra: usize, label: []const u8, color: dvui.Color, kind
             .margin = dvui.Rect.all(0),
             .id_extra = id_extra,
             .font = font,
+            .expand = .horizontal,
             .gravity_y = 0.5,
         });
     }
@@ -711,11 +772,17 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *fizzy.dvui.TreeWidg
                             // multiple files are flushing in parallel. `isSaving` reads via an
                             // atomic load so the background `saveZip` worker can flip the flag
                             // safely from another thread.
-                            if (file.isSaving()) {
+                            const save_flash_elapsed = file.timeSinceSaveComplete();
+                            if (file.showsSaveStatusIndicator()) {
                                 fizzy.dvui.bubbleSpinner(@src(), .{
+                                    .id_extra = inner_id_extra.* +% 4001,
+                                    .expand = .none,
                                     .min_size_content = .{ .w = 14, .h = 14 },
+                                    .gravity_x = 1.0,
                                     .gravity_y = 0.5,
                                     .color_text = dvui.themeGet().color(.window, .text),
+                                }, .{
+                                    .complete_elapsed_ns = save_flash_elapsed,
                                 });
                             } else if (file.dirty()) {
                                 _ = dvui.icon(
@@ -723,7 +790,11 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *fizzy.dvui.TreeWidg
                                     "DirtyIcon",
                                     icons.tvg.lucide.@"circle-small",
                                     .{ .stroke_color = dvui.themeGet().color(.window, .text) },
-                                    .{ .gravity_y = 0.5 },
+                                    .{
+                                        .expand = .none,
+                                        .gravity_x = 1.0,
+                                        .gravity_y = 0.5,
+                                    },
                                 );
                             }
                         }

@@ -490,7 +490,10 @@ pub const Branch = struct {
             dvui.parentSet(self.widget());
         }
 
-        self.button.init(@src(), .{ .draw_focus = false }, wrapInner(self.options).override(.{ .expand = self.options.expand }));
+        // Branch.layout stacks the header row and the expander vertically. Only one child may use
+        // vertical expand; the hbox row below uses `.both`, so the button must stay horizontal-only
+        // even when the Branch outer widget uses `.expand = .both` (fills the tree from the parent).
+        self.button.init(@src(), .{ .draw_focus = false }, wrapInner(self.options).override(.{ .expand = .horizontal }));
         if (self.init_options.process_events) {
             self.button.processEvents();
         }

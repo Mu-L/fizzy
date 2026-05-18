@@ -365,7 +365,7 @@ fn packProjectButton(packing: bool) bool {
             .gravity_x = 1.0,
             .gravity_y = 0.5,
             .padding = .{ .w = 4 },
-        }));
+        }), .{});
     }
 
     bw.drawFocus();
