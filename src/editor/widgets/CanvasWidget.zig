@@ -27,16 +27,32 @@ prev_scale: f32 = 0.0,
 // but `install()` runs before the new scroll area's layout has settled — so the first
 // `recenter()` pass uses a stale/empty viewport and the canvas appears at the wrong position
 // for one frame, then "snaps" to centered on the second frame. We absorb this by tracking
-// settlement explicitly and hiding the visible canvas behind a cover rect (see `settled()`
-// usage in `deinit`) until both passes complete, then fading the cover out via a dvui
-// `Animation` keyed off the canvas id.
+// settlement explicitly and fading the canvas contents in via `dvui.alpha` (the canvas is
+// invisible until centering has settled, then fades up via a dvui `Animation` keyed off the
+// canvas id).
+//
+// A fixed two-pass count isn't enough on app startup / first file open: the surrounding
+// workspace layout (status bar, tab bar, side panes) can take more than two frames to
+// reach its final size, so both recenter passes can fire against a still-changing parent
+// rect and the canvas ends up biased (typically slightly low). To handle that, we only
+// decrement the pass counters on frames where the parent rect matches the previous
+// frame's — i.e. layout has actually stopped moving — and we force an extra recenter on
+// any frame where the parent rect changed since last frame.
 first_center: bool = true,
 second_center: bool = true,
+prev_parent_rect: dvui.Rect = .{},
 
 // Set to false on a reset (new file / size change / explicit recenter) so `install` kicks off
 // a fresh fade-in animation exactly once per reset. dvui's animation system drives the value
 // and the per-frame refresh internally.
 fade_started: bool = false,
+// One-frame latch: on a reset we wait a single frame before registering the reveal
+// animation, so the very first install (where parent rect is most likely stale) is hidden
+// behind a fully-opaque cover, and the fade then begins on the next frame — overlapping
+// with any remaining settle frames instead of waiting for full settlement.
+fade_pending: bool = false,
+// Saved between `install` and `deinit` so the parent alpha is restored exactly.
+prev_alpha: f32 = 1.0,
 hovered: bool = false,
 
 pub const InitOptions = struct {
@@ -75,11 +91,18 @@ pub fn recenter(self: *CanvasWidget) void {
     self.origin.x = -offset_x;
     self.origin.y = -offset_y;
 
-    if (self.first_center) {
-        self.first_center = false;
-    } else if (self.second_center) {
-        self.second_center = false;
+    // Only count this pass as making progress toward "settled" if the parent rect
+    // actually matched last frame's — otherwise the layout is still moving under us and
+    // this offset will be wrong by the next frame.
+    const parent_stable = parent.w == self.prev_parent_rect.w and parent.h == self.prev_parent_rect.h;
+    if (parent_stable) {
+        if (self.first_center) {
+            self.first_center = false;
+        } else if (self.second_center) {
+            self.second_center = false;
+        }
     }
+    self.prev_parent_rect = parent;
 }
 
 pub fn rescale(self: *CanvasWidget) void {
@@ -112,20 +135,47 @@ pub fn install(self: *CanvasWidget, src: std.builtin.SourceLocation, init_opts: 
         self.first_center = true;
         self.second_center = true;
         self.fade_started = false;
+        self.fade_pending = false;
     }
-    if (size_changed or self.second_center or self.init_opts.center) {
+    // While still in the settle phase, force another recenter whenever the parent rect
+    // changed since last frame: the workspace layout may still be moving (e.g. status bar
+    // / tab bar laying out on first open) and a recenter against a stale parent rect
+    // leaves the canvas visibly off-center. Once settled, parent-rect changes (e.g. user
+    // resizing the window) must NOT re-center — the user's pan/zoom state is preserved.
+    const parent_rect_now = dvui.parentGet().data().rect;
+    const parent_changed_while_unsettled = !self.settled() and
+        (parent_rect_now.w != self.prev_parent_rect.w or parent_rect_now.h != self.prev_parent_rect.h);
+    if (size_changed or self.second_center or self.init_opts.center or parent_changed_while_unsettled) {
         self.rescale();
         self.recenter();
         dvui.refresh(null, @src(), self.id);
     }
 
+    // Wait one frame before starting the fade so the most-stale (frame 1) recenter is
+    // hidden (alpha == 0), then begin fading on the next install — overlapping with any
+    // further settle frames rather than waiting for full settlement.
     if (!self.fade_started) {
-        dvui.animation(self.id, "canvas_reveal", .{
-            .start_time = 0,
-            .end_time = fade_duration_micros,
-        });
-        self.fade_started = true;
+        if (self.fade_pending) {
+            dvui.animation(self.id, "canvas_reveal", .{
+                .start_time = 0,
+                .end_time = fade_duration_micros,
+            });
+            self.fade_started = true;
+        } else {
+            self.fade_pending = true;
+            dvui.refresh(null, @src(), self.id);
+        }
     }
+
+    // Compute the current reveal value [0,1] and fade the canvas contents in by
+    // multiplying the dvui alpha. Saved in `prev_alpha` so `deinit` can restore it.
+    const reveal: f32 = if (!self.fade_started)
+        0.0
+    else if (dvui.animationGet(self.id, "canvas_reveal")) |a|
+        std.math.clamp(a.value(), 0.0, 1.0)
+    else
+        1.0;
+    self.prev_alpha = dvui.alpha(reveal);
 
     // Decide scrollbar visibility from last frame's viewport + this frame's scale. The bars are
     // misleading when virtual_size is artificially inflated by the pan-slack pad (deinit), so we
@@ -182,34 +232,17 @@ pub fn fitContentContainInHost(self: *CanvasWidget, content: dvui.Size, host: dv
 
 /// True once both centering passes have completed. While unsettled, the canvas contents are
 /// positioned with a stale viewport, so callers should treat coordinate transforms as
-/// preliminary. `deinit` paints a cover rect over the canvas to hide the visible misalignment.
+/// preliminary. The canvas alpha is held at 0 until settled so the misalignment is invisible.
 pub fn settled(self: *const CanvasWidget) bool {
     return !self.first_center and !self.second_center;
 }
 
 pub fn deinit(self: *CanvasWidget) void {
     self.scaler.deinit();
-
-    // Read the reveal animation. `null` means the animation already expired (or was never
-    // started) — treat as fully revealed. Linear easing is the default in `dvui.Animation`.
-    const reveal: f32 = if (dvui.animationGet(self.id, "canvas_reveal")) |a|
-        std.math.clamp(a.value(), 0.0, 1.0)
-    else
-        1.0;
-
-    // Cover rect with (1 - reveal) opacity. Drawn after `scaler.deinit` so the rect is in
-    // screen-space (not scaled), and before `scroll.deinit` so it lives inside the scroll
-    // container's clip rect. Color matches the window backdrop, so blending against it visually
-    // matches "canvas content fading in from invisible".
-    if (reveal < 1.0) {
-        const cover_alpha = 1.0 - reveal;
-        var color = dvui.themeGet().color(.window, .fill);
-        color.a = @intFromFloat(@as(f32, @floatFromInt(color.a)) * cover_alpha);
-        const rs = self.scroll_container.data().rectScale();
-        rs.r.fill(.{}, .{ .color = color });
-    }
-
     self.scroll.deinit();
+    // Restore the alpha multiplied in `install`. Done after the children deinit so any
+    // sibling content drawn by the caller between `install` and `deinit` is also faded.
+    dvui.alphaSet(self.prev_alpha);
 }
 
 pub fn dataFromScreenPoint(self: *CanvasWidget, screen: dvui.Point.Physical) dvui.Point {
