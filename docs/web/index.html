@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" style="height: 100%;">
   <head>
     <meta charset="utf-8" />
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
@@ -40,7 +40,9 @@
         outline: none;
         caret-color: transparent;
       }
-      #loading, #error-panel {
+      /* Do not set `display: flex` on [hidden] panels — it overrides the hidden attribute. */
+      #loading:not(.is-hidden),
+      #error-panel:not([hidden]) {
         position: absolute;
         inset: 0;
         display: flex;
@@ -52,10 +54,17 @@
         text-align: center;
         background: var(--bg);
         z-index: 2;
+      }
+      #loading:not(.is-hidden) {
         pointer-events: none;
       }
-      #error-panel { pointer-events: auto; }
-      #loading.hidden { display: none; }
+      #error-panel:not([hidden]) {
+        pointer-events: auto;
+      }
+      #loading.is-hidden,
+      #error-panel[hidden] {
+        display: none !important;
+      }
       .brand {
         font-family: "Comfortaa", system-ui, sans-serif;
         font-weight: 700;
@@ -86,8 +95,9 @@
       .home-link:hover { text-decoration: underline; }
     </style>
   </head>
-  <body>
+  <body style="height: 100%; margin: 0; padding: 0;">
     <div id="app-root">
+      <canvas id="dvui-canvas" tabIndex="1" style="display: block; width: 100%; height: 100%; outline: none; caret-color: transparent;"></canvas>
       <div id="loading" aria-live="polite">
         <div class="brand">fizzy</div>
         <div class="spinner" aria-hidden="true"></div>
@@ -98,16 +108,18 @@
         <p class="status" id="error-message"></p>
         <a class="home-link" href="/">Back to fizzyed.it</a>
       </div>
-      <canvas id="dvui-canvas" tabIndex="1" style="width: 100%; height: 100%;"></canvas>
     </div>
     <script type="module">
       const loadingEl = document.getElementById("loading");
       const errorPanel = document.getElementById("error-panel");
       const errorMessage = document.getElementById("error-message");
-      const canvas = document.getElementById("dvui-canvas");
+
+      function hideLoading() {
+        loadingEl.classList.add("is-hidden");
+      }
 
       function showError(message) {
-        loadingEl.classList.add("hidden");
+        hideLoading();
         errorMessage.textContent = message;
         errorPanel.hidden = false;
       }
@@ -117,18 +129,24 @@
         return !!(probe.getContext("webgl2") || probe.getContext("webgl"));
       }
 
+      /** Wait until layout has settled so clientWidth/Height are correct. */
+      function waitForLayout() {
+        return new Promise((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        });
+      }
+
       if (!hasWebGl()) {
         showError("This browser does not support WebGL, which fizzy needs to run.");
       } else {
         const wasmUrl = "web.wasm?cache-buster=TEMPLATE_HASH_WITH_PADDING__ITS_64_BYTES_LONG_THE_SAME_AS_SHA256";
-        import("./web.js?cache-buster=TEMPLATE_HASH_WITH_PADDING__ITS_64_BYTES_LONG_THE_SAME_AS_SHA256")
+        waitForLayout()
+          .then(() => import("./web.js?cache-buster=TEMPLATE_HASH_WITH_PADDING__ITS_64_BYTES_LONG_THE_SAME_AS_SHA256"))
           .then(({ dvui }) => dvui("#dvui-canvas", wasmUrl))
           .then((app) => {
-            // Canvas must be laid out (not `hidden`) before dvui reads clientWidth/Height.
-            // On production we saw 300×150 px backing store while the shell still showed loading.
             window.dispatchEvent(new Event("resize"));
             app.requestRender();
-            loadingEl.classList.add("hidden");
+            hideLoading();
           })
           .catch((err) => {
             console.error(err);
