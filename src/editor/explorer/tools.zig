@@ -975,10 +975,12 @@ pub fn drawColors() !void {
     var clicked: bool = false;
     {
         var primary_button: dvui.ButtonWidget = undefined;
-        primary_button.init(@src(), .{ .touch_drag = true }, button_opts);
+        primary_button.init(@src(), .{}, button_opts);
         defer primary_button.deinit();
 
-        try drawColorPicker(primary_button.data().rectScale().r, &fizzy.editor.colors.primary, 0);
+        if (try drawColorPicker(primary_button.data().rectScale().r, &fizzy.editor.colors.primary, 0)) {
+            clicked = true;
+        }
 
         primary_button.processEvents();
         primary_button.drawBackground();
@@ -988,10 +990,12 @@ pub fn drawColors() !void {
 
     {
         var secondary_button: dvui.ButtonWidget = undefined;
-        secondary_button.init(@src(), .{ .touch_drag = true }, button_opts.override(secondary_overrider));
+        secondary_button.init(@src(), .{}, button_opts.override(secondary_overrider));
         defer secondary_button.deinit();
 
-        try drawColorPicker(secondary_button.data().rectScale().r, &fizzy.editor.colors.secondary, 1);
+        if (try drawColorPicker(secondary_button.data().rectScale().r, &fizzy.editor.colors.secondary, 1)) {
+            clicked = true;
+        }
 
         secondary_button.processEvents();
         secondary_button.drawBackground();
@@ -1004,7 +1008,7 @@ pub fn drawColors() !void {
     }
 }
 
-fn drawColorPicker(rect: dvui.Rect.Physical, backing_color: *[4]u8, id_extra: usize) !void {
+fn drawColorPicker(rect: dvui.Rect.Physical, backing_color: *[4]u8, id_extra: usize) !bool {
     var context = dvui.context(@src(), .{ .rect = rect }, .{ .id_extra = id_extra });
     defer context.deinit();
 
@@ -1040,6 +1044,8 @@ fn drawColorPicker(rect: dvui.Rect.Physical, backing_color: *[4]u8, id_extra: us
             };
         }
     }
+
+    return context.tapOccurred();
 }
 
 pub fn drawPaletteControls() !void {
