@@ -104,14 +104,33 @@ fn drawWeb() !void {
     var tree = fizzy.dvui.TreeWidget.tree(@src(), .{}, .{ .background = false, .expand = .both });
     defer tree.deinit();
 
-    dvui.labelNoFmt(
-        @src(),
-        "No project folder in the browser. Open files from your device.",
-        .{},
-        .{ .color_text = dvui.themeGet().color(.control, .text) },
-    );
+    const viewport_w = fizzy.editor.explorer.scroll_info.viewport.w;
+    const wrap_w: f32 = if (viewport_w > 0) viewport_w else 200;
 
-    if (dvui.button(@src(), "Open Files", .{ .draw_focus = false }, .{ .expand = .horizontal, .style = .highlight })) {
+    {
+        var wrap_box = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .expand = .horizontal,
+            .max_size_content = .{ .w = wrap_w, .h = std.math.floatMax(f32) },
+            .background = false,
+        });
+        defer wrap_box.deinit();
+
+        const tl = dvui.textLayout(@src(), .{}, .{
+            .expand = .horizontal,
+            .background = false,
+        });
+        tl.addText(
+            "Open files from your device to begin.",
+            .{ .color_text = dvui.themeGet().color(.control, .text) },
+        );
+        tl.deinit();
+    }
+
+    if (dvui.button(@src(), "Open Files", .{ .draw_focus = false }, .{
+        .expand = .horizontal,
+        .style = .highlight,
+        .min_size_content = .{ .w = 110, .h = 0 },
+    })) {
         fizzy.backend.showOpenFileDialog(
             struct {
                 fn cb(_: ?[][:0]const u8) void {}
