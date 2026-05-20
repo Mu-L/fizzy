@@ -6,6 +6,13 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8765", "--directory", "zig-out/web"],
       "port": 8765
+    },
+    {
+      "name": "fizzy-docs",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "python3 -m http.server \"$PORT\" --directory docs"],
+      "port": 8767,
+      "autoPort": true
     }
   ]
 }

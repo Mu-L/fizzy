@@ -78,9 +78,19 @@
     .brand .ver {
       font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-left: 6px;
     }
-    nav.top { display: flex; gap: 28px; font-size: 14px; }
+    nav.top { display: flex; gap: 28px; font-size: 14px; align-items: center; }
     nav.top a { padding: 4px 0; }
     nav.top a:hover { color: var(--text); }
+    nav.top a.nav-cta {
+      padding: 6px 14px; border-radius: 6px;
+      background: var(--accent); color: var(--bg);
+      font-weight: 600;
+      transition: background .15s ease, transform .15s ease;
+    }
+    nav.top a.nav-cta:hover {
+      background: var(--accent-hover); color: var(--bg);
+      transform: translateY(-1px);
+    }
     .menu-toggle { display: none; }
 
     /* ── Hero ─────────────────────────── */
@@ -578,9 +588,9 @@
       </a>
       <button class="menu-toggle" aria-label="Menu" onclick="document.querySelector('nav.top').classList.toggle('open')">☰</button>
       <nav class="top">
+        <a class="nav-cta" href="/app/">Try online</a>
         <a href="#features">Features</a>
         <a href="#roadmap">Roadmap</a>
-        <a href="/app/">Try online</a>
         <a href="#download">Download</a>
         <a href="https://github.com/foxnne/fizzy/wiki/User-Guide">User guide</a>
         <a href="https://github.com/foxnne/fizzy">GitHub</a>
@@ -602,10 +612,16 @@
         <div class="downloads" id="download">
           <a class="dl primary" href="/app/">
             <span class="dl-glyph" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              <svg viewBox="0 0 24 24" style="fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round">
+                <circle cx="12" cy="12" r="9"/>
+                <path d="M3 12h18"/>
+                <ellipse cx="12" cy="12" rx="4" ry="9"/>
+                <path d="M5 7.5c2 1.2 4.4 1.9 7 1.9s5-.7 7-1.9"/>
+                <path d="M5 16.5c2-1.2 4.4-1.9 7-1.9s5 .7 7 1.9"/>
+              </svg>
             </span>
             <span class="label">
-              <span>Give it a try</span>
+              <span>Web</span>
               <span class="note">in your browser</span>
             </span>
           </a>
