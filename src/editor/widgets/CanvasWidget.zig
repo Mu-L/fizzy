@@ -55,6 +55,21 @@ fade_pending: bool = false,
 prev_alpha: f32 = 1.0,
 hovered: bool = false,
 
+// Two-finger pan + pinch zoom (web/mobile touch). One finger continues to draw — the
+// gesture only kicks in once a second finger touches. We mark the gesture sticky until
+// every finger lifts so the remaining finger after a multi-touch doesn't suddenly start
+// drawing mid-stroke. While the gesture is active we capture to the scaler so drawing
+// tools' `scroll_container.matchEvent` returns false and they skip the touch.
+touches: [10]TouchSlot = @splat(.{}),
+gesture_active: bool = false,
+last_centroid: dvui.Point.Physical = .{},
+last_pinch: f32 = 0.0,
+
+const TouchSlot = struct {
+    active: bool = false,
+    p: dvui.Point.Physical = .{},
+};
+
 pub const InitOptions = struct {
     id: dvui.Id,
     data_size: dvui.Size,
@@ -197,6 +212,151 @@ pub fn install(self: *CanvasWidget, src: std.builtin.SourceLocation, init_opts: 
     self.scaler = dvui.scale(src, .{ .scale = &self.scale }, .{ .rect = .{ .x = -self.origin.x, .y = -self.origin.y } });
 
     self.syncTransformCachesFromWidgets();
+
+    // Process two-finger gesture BEFORE any drawing tool event loop so we can capture the
+    // touches and prevent the brush from drawing during pan/pinch.
+    self.updateTouchGesture();
+}
+
+fn activeTouchCount(self: *CanvasWidget) usize {
+    var n: usize = 0;
+    for (self.touches) |t| {
+        if (t.active) n += 1;
+    }
+    return n;
+}
+
+fn touchCentroid(self: *CanvasWidget) dvui.Point.Physical {
+    var x: f32 = 0;
+    var y: f32 = 0;
+    var n: f32 = 0;
+    for (self.touches) |t| {
+        if (t.active) {
+            x += t.p.x;
+            y += t.p.y;
+            n += 1;
+        }
+    }
+    if (n == 0) return .{};
+    return .{ .x = x / n, .y = y / n };
+}
+
+fn touchPinchDistance(self: *CanvasWidget) f32 {
+    var a: ?dvui.Point.Physical = null;
+    var b: ?dvui.Point.Physical = null;
+    for (self.touches) |t| {
+        if (!t.active) continue;
+        if (a == null) {
+            a = t.p;
+        } else {
+            b = t.p;
+            break;
+        }
+    }
+    if (a == null or b == null) return 0;
+    const dx = a.?.x - b.?.x;
+    const dy = a.?.y - b.?.y;
+    return @sqrt(dx * dx + dy * dy);
+}
+
+/// Iterate touch events: track active fingers, drive pan + pinch zoom once ≥2 are down,
+/// and stay in that mode until every finger lifts. While active, claim each touch event
+/// against the scaler so the scroll container's built-in touch-to-scroll and the drawing
+/// tools' event loops both see it as captured-by-another-widget and skip.
+pub fn updateTouchGesture(self: *CanvasWidget) void {
+    var zoom: f32 = 1.0;
+    var zoomP: dvui.Point.Physical = self.last_centroid;
+
+    for (dvui.events()) |*e| {
+        if (e.evt != .mouse) continue;
+        const me = e.evt.mouse;
+        if (!me.button.touch()) continue;
+
+        const slot_signed = @intFromEnum(me.button) - @intFromEnum(dvui.enums.Button.touch0);
+        if (slot_signed < 0 or slot_signed >= self.touches.len) continue;
+        const slot: usize = @intCast(slot_signed);
+
+        // For a press to belong to this canvas the touch must land in our scroll
+        // container's rect; afterwards matchEvent honors the capture and keeps returning true
+        // for the captured target. While gesture_active we accept events unconditionally.
+        const in_area = self.scroll_container.matchEvent(e);
+
+        switch (me.action) {
+            .press => {
+                if (!in_area and !self.gesture_active) continue;
+                self.touches[slot] = .{ .active = true, .p = me.p };
+
+                if (self.activeTouchCount() >= 2 and !self.gesture_active) {
+                    self.gesture_active = true;
+                    self.last_centroid = self.touchCentroid();
+                    self.last_pinch = self.touchPinchDistance();
+                    dvui.captureMouse(self.scaler.data(), e.num);
+                }
+                if (self.gesture_active) {
+                    e.handle(@src(), self.scaler.data());
+                }
+            },
+            .release => {
+                if (self.touches[slot].active) self.touches[slot].active = false;
+                if (self.gesture_active) {
+                    e.handle(@src(), self.scaler.data());
+
+                    if (self.activeTouchCount() == 0) {
+                        self.gesture_active = false;
+                        if (dvui.captured(self.scaler.data().id)) {
+                            dvui.captureMouse(null, e.num);
+                        }
+                    } else {
+                        // Re-baseline so the remaining fingers don't cause a jump.
+                        self.last_centroid = self.touchCentroid();
+                        self.last_pinch = self.touchPinchDistance();
+                    }
+                }
+            },
+            .motion => {
+                if (self.touches[slot].active) {
+                    self.touches[slot].p = me.p;
+                }
+                if (self.gesture_active) {
+                    e.handle(@src(), self.scaler.data());
+
+                    const new_c = self.touchCentroid();
+                    const dx_centroid = new_c.x - self.last_centroid.x;
+                    const dy_centroid = new_c.y - self.last_centroid.y;
+                    const rs = self.scroll_rect_scale;
+                    if (rs.s > 0) {
+                        self.scroll_info.viewport.x -= dx_centroid / rs.s;
+                        self.scroll_info.viewport.y -= dy_centroid / rs.s;
+                    }
+
+                    const new_d = self.touchPinchDistance();
+                    if (self.last_pinch > 1.0 and new_d > 1.0) {
+                        const ratio = new_d / self.last_pinch;
+                        zoom *= ratio;
+                        zoomP = new_c;
+                    }
+
+                    self.last_centroid = new_c;
+                    self.last_pinch = new_d;
+                    dvui.refresh(null, @src(), self.scroll_container.data().id);
+                }
+            },
+            else => {},
+        }
+    }
+
+    if (zoom != 1.0) {
+        // Same scale-around-point math as the wheel-zoom path in processEvents.
+        const prevP = self.dataFromScreenPoint(zoomP);
+        var pp = prevP.scale(1 / self.scale, dvui.Point);
+        self.scale *= zoom;
+        pp = pp.scale(self.scale, dvui.Point);
+        const newP = self.screenFromDataPoint(pp);
+        const diff = self.viewportFromScreenPoint(newP).diff(self.viewportFromScreenPoint(zoomP));
+        self.scroll_info.viewport.x += diff.x;
+        self.scroll_info.viewport.y += diff.y;
+        dvui.refresh(null, @src(), self.scroll_container.data().id);
+    }
 }
 
 /// Re-read scroll/scaler `RectScale` and `rect` from the widget tree. Call at end of `install`, or
