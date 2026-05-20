@@ -479,6 +479,21 @@ pub fn processEvents(self: *CanvasWidget) void {
     var zoom: f32 = 1;
     var zoomP: dvui.Point.Physical = .{};
 
+    // Suppress DVUI's built-in single-touch auto-pan inside the canvas. By this point in the
+    // frame the drawing tools have already consumed any single-finger touches, and the scroll
+    // container's processEvents runs at scroll.deinit (which comes after this) — so claiming
+    // here makes its `me.button.touch()` branches see the event as handled and skip the pan.
+    // Two-finger gestures are already captured to the scaler by `updateTouchGesture`, which
+    // takes precedence here via matchEvent returning false for them.
+    for (dvui.events()) |*e| {
+        if (e.evt != .mouse) continue;
+        const me = e.evt.mouse;
+        if (!me.button.touch()) continue;
+        if (self.scroll_container.matchEvent(e)) {
+            e.handle(@src(), self.scroll_container.data());
+        }
+    }
+
     // process scroll area events after boxes so the boxes get first pick (so
     // the button works)
     for (dvui.events()) |*e| {
