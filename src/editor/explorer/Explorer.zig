@@ -28,11 +28,21 @@ scroll_info: dvui.ScrollInfo = .{
     .horizontal = .auto,
 },
 rect: dvui.Rect = .{},
+rect_screen: dvui.Rect.Physical = .{},
 open_branches: std.AutoHashMap(dvui.Id, void) = undefined,
 pinned_palettes: bool = false,
 layers_ratio: f32 = 0.5,
 animations_ratio: f32 = 0.5,
 closed: bool = false,
+
+/// Peek state: when the explorer is collapsed (small window), a sidebar tap slides the
+/// explorer fully in. It stays open until `peek_duration_ns` pass with no pointer input
+/// inside the explorer rect, then slides back out. Sidebar taps during peek refresh the
+/// deadline rather than retriggering the animation.
+peek_open: bool = false,
+peek_deadline_ns: i128 = 0,
+
+const peek_duration_ns: i128 = 2_000_000_000;
 
 pub const Pane = enum(u32) {
     files,
@@ -73,7 +83,15 @@ pub fn close(explorer: *Explorer) void {
 }
 
 pub fn open(explorer: *Explorer) void {
-    if (explorer.paned.collapsed()) return;
+    if (explorer.paned.collapsed()) {
+        // Re-pressing the sidebar while peeking just refreshes the timer.
+        if (explorer.peek_open) {
+            explorer.peekRefresh();
+        } else {
+            explorer.peekOpen();
+        }
+        return;
+    }
 
     if (fizzy.editor.settings.explorer_ratio > 0.0) {
         explorer.paned.animateSplit(fizzy.editor.settings.explorer_ratio, dvui.easing.outBack);
@@ -84,6 +102,49 @@ pub fn open(explorer: *Explorer) void {
     explorer.closed = false;
 }
 
+pub fn peekOpen(explorer: *Explorer) void {
+    explorer.paned.animateSplit(1.0, dvui.easing.outBack);
+    explorer.peek_open = true;
+    explorer.peek_deadline_ns = dvui.currentWindow().frame_time_ns + peek_duration_ns;
+    explorer.closed = false;
+}
+
+pub fn peekRefresh(explorer: *Explorer) void {
+    explorer.peek_deadline_ns = dvui.currentWindow().frame_time_ns + peek_duration_ns;
+}
+
+pub fn peekClose(explorer: *Explorer) void {
+    explorer.peek_open = false;
+    explorer.paned.animateSplit(0.0, dvui.easing.outQuint);
+    explorer.closed = true;
+}
+
+/// Called once per frame after `draw`. While peeking, any pointer event landing inside the
+/// explorer's screen rect refreshes the deadline; once the deadline expires the peek closes.
+pub fn updatePeek(explorer: *Explorer) void {
+    if (!explorer.peek_open) return;
+
+    for (dvui.events()) |*e| {
+        switch (e.evt) {
+            .mouse => |me| {
+                if (explorer.rect_screen.contains(me.p)) {
+                    explorer.peekRefresh();
+                    break;
+                }
+            },
+            else => {},
+        }
+    }
+
+    const now = dvui.currentWindow().frame_time_ns;
+    if (now >= explorer.peek_deadline_ns) {
+        explorer.peekClose();
+    } else {
+        // Keep the frame loop ticking so the deadline fires even without input.
+        dvui.refresh(null, @src(), null);
+    }
+}
+
 pub fn draw(explorer: *Explorer) !dvui.App.Result {
     const vbox = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .both,
@@ -92,6 +153,7 @@ pub fn draw(explorer: *Explorer) !dvui.App.Result {
     defer vbox.deinit();
 
     explorer.rect = vbox.data().rect;
+    explorer.rect_screen = vbox.data().rectScale().r;
 
     try drawHeader(explorer);
 

@@ -977,10 +977,17 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
 
         if (dvui.firstFrame(editor.explorer.paned.wd.id)) {
             editor.explorer.paned.split_ratio.* = 0.0;
-            editor.explorer.paned.animateSplit(fizzy.editor.settings.explorer_ratio, dvui.easing.outBack);
 
-            if (fizzy.editor.settings.explorer_ratio < 0.01) {
+            // When the window is below the paned widget's collapse threshold (mobile / narrow
+            // web viewport), start closed instead of animating open to the saved desktop ratio —
+            // the user can sidebar-tap to peek the explorer in.
+            const avail_w = editor.explorer.paned.wd.contentRect().w;
+            const start_collapsed = avail_w < fizzy.editor.settings.min_window_size[0];
+
+            if (start_collapsed or fizzy.editor.settings.explorer_ratio < 0.01) {
                 editor.explorer.closed = true;
+            } else {
+                editor.explorer.paned.animateSplit(fizzy.editor.settings.explorer_ratio, dvui.easing.outBack);
             }
         } else if (editor.explorer.paned.dragging) {
             editor.settings.explorer_ratio = editor.explorer.paned.split_ratio.*;
@@ -1001,6 +1008,8 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
                 }
             }
         }
+
+        editor.explorer.updatePeek();
 
         if (editor.explorer.paned.showSecond()) {
             const bg_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
