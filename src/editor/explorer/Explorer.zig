@@ -187,16 +187,10 @@ pub fn draw(explorer: *Explorer) !dvui.App.Result {
 
 fn drawCollapseButton(explorer: *Explorer) void {
     // Styled to match the floating Edit pill (see `Workspace.drawEditPill`): circular
-    // background, same content.fill / content.text color pair, same drop shadow. Sized
-    // to the pill *bar*'s overall height (button_size + 2 * pill_padding from the pill)
-    // so the affordance feels equally prominent. The icon is pinned to the exact same
-    // physical size as the pill action icons via fixed padding math rather than a ratio.
+    // background, same content.fill / content.text color pair, same drop shadow.
     const button_size: f32 = 48;
     const btn_radius: f32 = button_size / 2;
-    // Match the pill icon footprint: pill button is 36 with 0.33 padding ⇒ icon ≈ 12 px.
-    const target_icon_size: f32 = 12;
-    const icon_padding: f32 = (button_size - target_icon_size) / 2;
-    const margin: f32 = 10;
+    const margin: f32 = 8;
     const wr = dvui.windowRect();
 
     const anim_id = dvui.Id.update(explorer.paned.data().id, "collapse_btn");
@@ -237,6 +231,7 @@ fn drawCollapseButton(explorer: *Explorer) void {
         .color_fill_hover = dvui.themeGet().color(.content, .fill).lighten(if (dvui.themeGet().dark) 10.0 else -10.0),
         .color_border = .transparent,
         .padding = .all(0),
+        .margin = .all(margin),
         .min_size_content = .{ .w = button_size, .h = button_size },
         .box_shadow = .{
             .color = .black,
@@ -261,7 +256,7 @@ fn drawCollapseButton(explorer: *Explorer) void {
             .gravity_x = 0.5,
             .gravity_y = 0.5,
             .min_size_content = .{ .w = 1.0, .h = 1.0 },
-            .padding = dvui.Rect.all(icon_padding),
+            .padding = .all(6),
         },
     );
 
