@@ -17,7 +17,14 @@ pub fn deinit() void {
     // TODO: Free memory
 }
 
-pub fn draw(_: Sidebar) !bool {
+/// What the sidebar wants Editor.zig to do this frame. We defer the call out to Editor
+/// because the sidebar runs *before* `editor.explorer.paned` is re-created for this
+/// frame — dereferencing `explorer.paned` (e.g. via `peekClose`/`open`) from inside the
+/// sidebar click handler would touch last frame's freed widget, which on wasm32 trips
+/// "reached unreachable code".
+pub const Action = enum { none, open, close };
+
+pub fn draw(_: Sidebar) !Action {
     const vbox = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .vertical,
         .background = false,
@@ -35,20 +42,19 @@ pub fn draw(_: Sidebar) !bool {
         .{ .pane = .settings, .icon = dvui.entypo.cog },
     };
 
-    var ret: bool = false;
+    var ret: Action = .none;
 
     for (options) |option| {
-        if (try drawOption(option.pane, option.icon, 20)) {
-            ret = true;
-        }
+        const a = try drawOption(option.pane, option.icon, 20);
+        if (a != .none) ret = a;
     }
 
     return ret;
 }
 
-fn drawOption(option: Pane, icon: []const u8, size: f32) !bool {
+fn drawOption(option: Pane, icon: []const u8, size: f32) !Action {
     const selected = option == fizzy.editor.explorer.pane;
-    var ret: bool = false;
+    var ret: Action = .none;
 
     const theme = dvui.themeGet();
 
@@ -83,16 +89,17 @@ fn drawOption(option: Pane, icon: []const u8, size: f32) !bool {
     );
 
     if (bw.clicked()) {
-        // Tapping the icon for the pane that's already showing closes the explorer —
-        // same effect as the floating collapse button. Only fall through to the "open"
-        // path (setting `pane` + returning true so the caller calls `explorer.open()`)
-        // when the user is either switching panes or the explorer is currently hidden.
+        // Tapping the icon for the pane that's already showing toggles the explorer
+        // closed (same effect as the floating collapse button). We *report* the intent
+        // here; Editor.zig invokes `peekClose` / `open` after `editor.explorer.paned` has
+        // been recreated for this frame. Doing the call directly here would dereference
+        // last frame's freed paned widget and crash on wasm.
         const explorer_visible = fizzy.editor.explorer.peek_open or !fizzy.editor.explorer.closed;
         if (selected and explorer_visible) {
-            fizzy.editor.explorer.peekClose();
+            ret = .close;
         } else {
             fizzy.editor.explorer.pane = option;
-            ret = true;
+            ret = .open;
         }
         dvui.refresh(null, @src(), null);
     }

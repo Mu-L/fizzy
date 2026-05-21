@@ -1686,21 +1686,43 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
 
     const pill_w: f32 = collapsed_w + (expanded_w - collapsed_w) * anim_value;
 
-    // Offset by the ruler thickness so the pill never overlaps the rulers (they're drawn
-    // along the top/left edges of the canvas vbox). Falls back to 0 when rulers are off
-    // or haven't laid out yet, in which case the `margin` alone is the padding.
+    // Compute the scroll-area rect — the canvas region inside the rulers. We pull this
+    // off the live `canvas_vbox` (so the values are this frame's, not a stale latch) and
+    // subtract the ruler thickness from the top/left. Anchoring against this rect means
+    // the pill follows the workspace exactly: as a split is dragged shut the canvas area
+    // shrinks, and once it's narrower than the collapsed pill we bail and draw nothing
+    // this frame — so closing splits cleanly hides the menu.
+    //
+    // FloatingWidget breaks out of parent clipping by design, so we can't do true partial
+    // clipping at the edges; clamping `pill_x` to never overlap the rulers + hiding under
+    // the threshold gives the requested behavior without a full subwindow rewrite.
+    const wb = canvas_vbox.data().rectScale().r.toNatural();
     const ruler_top: f32 = if (fizzy.editor.settings.show_rulers) self.horizontal_ruler_height else 0;
     const ruler_left: f32 = if (fizzy.editor.settings.show_rulers) self.vertical_ruler_width else 0;
-    _ = ruler_left; // pill anchors to the right edge, no horizontal ruler conflict.
+    const canvas_nat = dvui.Rect{
+        .x = wb.x + ruler_left,
+        .y = wb.y + ruler_top,
+        .w = wb.w - ruler_left,
+        .h = wb.h - ruler_top,
+    };
 
-    const cr = canvas_vbox.data().rectScale().r.toNatural();
+    const min_visible: f32 = collapsed_w + 2 * margin;
+    if (canvas_nat.w < min_visible or canvas_nat.h < pill_h + 2 * margin) return;
+
+    const pill_x: f32 = canvas_nat.x + canvas_nat.w - margin - pill_w;
+    const pill_y: f32 = canvas_nat.y + margin;
+
+    // Clamp the left edge so the pill never visually crosses into the vertical ruler.
+    const min_pill_x: f32 = canvas_nat.x + margin;
+    const effective_pill_x: f32 = @max(pill_x, min_pill_x);
+    const effective_pill_w: f32 = pill_w - (effective_pill_x - pill_x);
 
     var fw: dvui.FloatingWidget = undefined;
     fw.init(@src(), .{}, .{
         .rect = .{
-            .x = cr.x + cr.w - margin - pill_w,
-            .y = cr.y + ruler_top + margin,
-            .w = pill_w,
+            .x = effective_pill_x,
+            .y = pill_y,
+            .w = effective_pill_w,
             .h = pill_h,
         },
         .expand = .none,

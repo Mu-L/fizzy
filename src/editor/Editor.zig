@@ -939,8 +939,11 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
 
         // Sidebar area
         // Since sidebar is drawn before the explorer, and we want to allow expanding the explorer
-        // from clicking a sidebar option, we need to check if the sidebar was pressed
-        const sidebar_pressed = editor.sidebar.draw() catch {
+        // from clicking a sidebar option, we need to check if the sidebar was pressed. The
+        // sidebar can't safely touch `editor.explorer.paned` itself — it runs before this
+        // frame's paned widget is allocated below — so it reports an `Action` and we dispatch
+        // after the paned is in place.
+        const sidebar_action = editor.sidebar.draw() catch {
             dvui.log.err("Failed to draw sidebar", .{});
             return false;
         };
@@ -1000,8 +1003,10 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             editor.markSettingsDirty();
         }
 
-        if (sidebar_pressed) {
-            editor.explorer.open();
+        switch (sidebar_action) {
+            .open => editor.explorer.open(),
+            .close => editor.explorer.peekClose(),
+            .none => {},
         }
 
         if (editor.explorer.paned.showFirst()) {
