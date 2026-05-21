@@ -1655,7 +1655,7 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
     // which is roughly 60% of the prior icon footprint.
     const icon_padding: f32 = button_size * 0.33;
 
-    const Action = enum { undo, redo, copy, paste, transform, grid_layout };
+    const Action = enum { save, exportd, undo, redo, copy, paste, transform, grid_layout };
     const Entry = struct {
         action: Action,
         tvg: []const u8,
@@ -1663,6 +1663,8 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
     };
 
     const entries = [_]Entry{
+        .{ .action = .save, .tvg = icons.tvg.lucide.save, .tooltip = "Save" },
+        .{ .action = .exportd, .tvg = icons.tvg.lucide.@"file-output", .tooltip = "Export" },
         .{ .action = .undo, .tvg = icons.tvg.lucide.undo, .tooltip = "Undo" },
         .{ .action = .redo, .tvg = icons.tvg.lucide.redo, .tooltip = "Redo" },
         .{ .action = .copy, .tvg = icons.tvg.lucide.copy, .tooltip = "Copy" },
@@ -1671,11 +1673,15 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
         .{ .action = .grid_layout, .tvg = icons.tvg.lucide.@"layout-grid", .tooltip = "Grid Layout" },
     };
 
-    const collapsed_w: f32 = button_size + 2 * pill_padding;
-    const expanded_w: f32 = @as(f32, @floatFromInt(entries.len + 1)) * button_size +
+    // Vertical pill: width is fixed (one button + padding), height animates between a
+    // single-button "collapsed" state and the full-stack "expanded" state. Most screens
+    // have more vertical real estate than horizontal, so growing the pill downward keeps
+    // it from eating into the canvas's working width.
+    const pill_w: f32 = button_size + 2 * pill_padding;
+    const collapsed_h: f32 = button_size + 2 * pill_padding;
+    const expanded_h: f32 = @as(f32, @floatFromInt(entries.len + 1)) * button_size +
         @as(f32, @floatFromInt(entries.len)) * button_gap + 2 * pill_padding;
-    const pill_h: f32 = button_size + 2 * pill_padding;
-    const pill_radius: f32 = pill_h / 2;
+    const pill_radius: f32 = pill_w / 2;
     const btn_radius: f32 = button_size / 2;
 
     // Drive the expand/collapse with a dvui animation. Look up the current value, and on
@@ -1684,18 +1690,14 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
     var anim_value: f32 = if (self.edit_pill_expanded) 1.0 else 0.0;
     if (dvui.animationGet(anim_id, "_t")) |a| anim_value = std.math.clamp(a.value(), 0.0, 1.0);
 
-    const pill_w: f32 = collapsed_w + (expanded_w - collapsed_w) * anim_value;
+    const pill_h: f32 = collapsed_h + (expanded_h - collapsed_h) * anim_value;
 
     // Compute the scroll-area rect — the canvas region inside the rulers. We pull this
     // off the live `canvas_vbox` (so the values are this frame's, not a stale latch) and
     // subtract the ruler thickness from the top/left. Anchoring against this rect means
     // the pill follows the workspace exactly: as a split is dragged shut the canvas area
-    // shrinks, and once it's narrower than the collapsed pill we bail and draw nothing
-    // this frame — so closing splits cleanly hides the menu.
-    //
-    // FloatingWidget breaks out of parent clipping by design, so we can't do true partial
-    // clipping at the edges; clamping `pill_x` to never overlap the rulers + hiding under
-    // the threshold gives the requested behavior without a full subwindow rewrite.
+    // shrinks, and once it's narrower than the pill we bail and draw nothing this frame —
+    // so closing splits cleanly hides the menu.
     const wb = canvas_vbox.data().rectScale().r.toNatural();
     const ruler_top: f32 = if (fizzy.editor.settings.show_rulers) self.horizontal_ruler_height else 0;
     const ruler_left: f32 = if (fizzy.editor.settings.show_rulers) self.vertical_ruler_width else 0;
@@ -1706,24 +1708,23 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
         .h = wb.h - ruler_top,
     };
 
-    const min_visible: f32 = collapsed_w + 2 * margin;
-    if (canvas_nat.w < min_visible or canvas_nat.h < pill_h + 2 * margin) return;
+    if (canvas_nat.w < pill_w + 2 * margin or canvas_nat.h < collapsed_h + 2 * margin) return;
 
     const pill_x: f32 = canvas_nat.x + canvas_nat.w - margin - pill_w;
     const pill_y: f32 = canvas_nat.y + margin;
 
-    // Clamp the left edge so the pill never visually crosses into the vertical ruler.
-    const min_pill_x: f32 = canvas_nat.x + margin;
-    const effective_pill_x: f32 = @max(pill_x, min_pill_x);
-    const effective_pill_w: f32 = pill_w - (effective_pill_x - pill_x);
+    // Clamp the bottom edge so the expanded pill never spills past the canvas area —
+    // FloatingWidget bypasses parent clipping, so we cap the height explicitly.
+    const max_pill_h: f32 = canvas_nat.h - 2 * margin;
+    const effective_pill_h: f32 = @min(pill_h, max_pill_h);
 
     var fw: dvui.FloatingWidget = undefined;
     fw.init(@src(), .{}, .{
         .rect = .{
-            .x = effective_pill_x,
+            .x = pill_x,
             .y = pill_y,
-            .w = effective_pill_w,
-            .h = pill_h,
+            .w = pill_w,
+            .h = effective_pill_h,
         },
         .expand = .none,
         .background = true,
@@ -1739,23 +1740,23 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
     });
     defer fw.deinit();
 
-    var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
+    var vbox = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .both,
         .background = false,
         .padding = dvui.Rect.all(pill_padding),
     });
-    defer hbox.deinit();
+    defer vbox.deinit();
 
-    // Hamburger toggle is always present; sits on the right edge of the pill so the row
-    // of actions grows leftward from it as the pill expands.
+    // Hamburger toggle is always present at the top of the pill; the stack of action
+    // buttons grows downward beneath it as the pill expands.
     {
         var btn: dvui.ButtonWidget = undefined;
         btn.init(@src(), .{}, .{
             .id_extra = entries.len, // distinct from action button ids below
             .min_size_content = .{ .w = button_size, .h = button_size },
             .expand = .none,
-            .gravity_y = 0.5,
-            .gravity_x = 1.0,
+            .gravity_x = 0.5,
+            .gravity_y = 0.0,
             .background = true,
             .corner_radius = dvui.Rect.all(btn_radius),
             .color_fill = dvui.themeGet().color(.content, .fill),
@@ -1802,10 +1803,11 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
         }
     }
 
-    // Action buttons. We draw them all and let the FloatingWidget's tight rect clip the
-    // ones that overflow during the animation.
+    // Action buttons stacked below the hamburger. We draw them all and let the
+    // FloatingWidget's tight rect clip the ones that overflow during the animation.
     for (entries, 0..) |entry, i| {
         const enabled: bool = switch (entry.action) {
+            .save => file.dirty(),
             .undo => file.history.undo_stack.items.len > 0,
             .redo => file.history.redo_stack.items.len > 0,
             else => true,
@@ -1816,14 +1818,14 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
             .id_extra = i,
             .min_size_content = .{ .w = button_size, .h = button_size },
             .expand = .none,
-            .gravity_y = 0.5,
+            .gravity_x = 0.5,
             .background = true,
             .corner_radius = dvui.Rect.all(btn_radius),
             .color_fill = dvui.themeGet().color(.content, .fill),
             .color_fill_hover = dvui.themeGet().color(.content, .fill).lighten(if (dvui.themeGet().dark) 10.0 else -10.0),
             .color_border = .transparent,
             .padding = .all(0),
-            .margin = if (i == 0) .{} else .{ .x = button_gap },
+            .margin = .{ .y = button_gap },
             .box_shadow = .{
                 .color = .black,
                 .alpha = 0.2,
@@ -1857,6 +1859,24 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
         const fully_expanded = anim_value >= 0.999;
         if (btn.clicked() and enabled and fully_expanded) {
             switch (entry.action) {
+                .save => fizzy.editor.save() catch {
+                    dvui.log.err("Failed to save", .{});
+                },
+                .exportd => {
+                    // Open the Export dialog (same configuration the `export` keybind uses).
+                    var mutex = fizzy.dvui.dialog(@src(), .{
+                        .displayFn = fizzy.Editor.Dialogs.Export.dialog,
+                        .callafterFn = fizzy.Editor.Dialogs.Export.callAfter,
+                        .title = "Export...",
+                        .ok_label = "Export",
+                        .cancel_label = "Cancel",
+                        .resizeable = false,
+                        .modal = false,
+                        .header_kind = .info,
+                        .default = .ok,
+                    });
+                    mutex.mutex.unlock(dvui.io);
+                },
                 .undo => file.history.undoRedo(file, .undo) catch {
                     dvui.log.err("Failed to undo", .{});
                 },

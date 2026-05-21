@@ -186,8 +186,17 @@ pub fn draw(explorer: *Explorer) !dvui.App.Result {
 }
 
 fn drawCollapseButton(explorer: *Explorer) void {
-    const button_size: f32 = 55;
-    const margin: f32 = 4;
+    // Styled to match the floating Edit pill (see `Workspace.drawEditPill`): circular
+    // background, same content.fill / content.text color pair, same drop shadow. Sized
+    // to the pill *bar*'s overall height (button_size + 2 * pill_padding from the pill)
+    // so the affordance feels equally prominent. The icon is pinned to the exact same
+    // physical size as the pill action icons via fixed padding math rather than a ratio.
+    const button_size: f32 = 48;
+    const btn_radius: f32 = button_size / 2;
+    // Match the pill icon footprint: pill button is 36 with 0.33 padding ⇒ icon ≈ 12 px.
+    const target_icon_size: f32 = 12;
+    const icon_padding: f32 = (button_size - target_icon_size) / 2;
+    const margin: f32 = 10;
     const wr = dvui.windowRect();
 
     const anim_id = dvui.Id.update(explorer.paned.data().id, "collapse_btn");
@@ -222,27 +231,37 @@ fn drawCollapseButton(explorer: *Explorer) void {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
         .expand = .both,
-        .corner_radius = .all(button_size / 2),
+        .corner_radius = dvui.Rect.all(btn_radius),
         .background = true,
-        .color_fill = dvui.themeGet().color(.highlight, .fill),
-        .color_fill_hover = dvui.themeGet().color(.highlight, .fill).lighten(if (dvui.themeGet().dark) 6 else -6),
+        .color_fill = dvui.themeGet().color(.content, .fill),
+        .color_fill_hover = dvui.themeGet().color(.content, .fill).lighten(if (dvui.themeGet().dark) 10.0 else -10.0),
         .color_border = .transparent,
+        .padding = .all(0),
         .min_size_content = .{ .w = button_size, .h = button_size },
+        .box_shadow = .{
+            .color = .black,
+            .alpha = 0.2,
+            .fade = 4,
+            .offset = .{ .x = 0, .y = 2 },
+            .corner_radius = dvui.Rect.all(btn_radius),
+        },
     });
     defer bw.deinit();
     bw.processEvents();
     bw.drawBackground();
 
+    const icon_color = dvui.themeGet().color(.content, .text);
     dvui.icon(
         @src(),
         "collapse_explorer",
-        icons.tvg.lucide.@"arrow-left-to-line",
-        .{ .stroke_color = dvui.themeGet().color(.content, .fill), .fill_color = dvui.themeGet().color(.content, .fill) },
+        icons.tvg.lucide.@"panel-left-close",
+        .{ .stroke_color = icon_color, .fill_color = icon_color },
         .{
             .expand = .ratio,
             .gravity_x = 0.5,
             .gravity_y = 0.5,
-            .margin = .all(margin),
+            .min_size_content = .{ .w = 1.0, .h = 1.0 },
+            .padding = dvui.Rect.all(icon_padding),
         },
     );
 
