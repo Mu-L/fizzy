@@ -43,6 +43,10 @@ vertical_scroll_info: dvui.ScrollInfo = .{ .vertical = .given, .horizontal = .gi
 horizontal_ruler_height: f32 = 0.0,
 vertical_ruler_width: f32 = 0.0,
 
+/// Floating Edit-pill quick-access bar collapse state. Starts collapsed (single
+/// hamburger button); the user toggles to expand the full action row.
+edit_pill_expanded: bool = false,
+
 /// Physical-pixel content rect of this workspace's canvas vbox, captured each frame during
 /// `drawCanvas` / `drawProject`. `null` until the workspace has rendered at least once. Used
 /// by the editor-level load/save toast overlays to center cards over the area the user is
@@ -882,6 +886,7 @@ pub fn drawCanvas(self: *Workspace) !void {
         }
 
         self.drawTransformDialog(canvas_vbox);
+        self.drawEditPill(canvas_vbox);
 
         if (self.grouping != file.editor.grouping) return;
 
@@ -1628,6 +1633,224 @@ pub fn drawTransformDialog(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void 
                 fizzy.editor.accept() catch {
                     dvui.log.err("Failed to accept transform", .{});
                 };
+            }
+        }
+    }
+}
+
+/// Floating rounded-pill quick-access bar anchored to the top-right of the workspace
+/// canvas. Mirrors the Edit menu (Undo / Redo / Copy / Paste / Transform / Grid Layout)
+/// with icon-only round buttons sized to match the toolbox buttons. Starts collapsed as a
+/// single hamburger circle; tapping toggles the row of action buttons in/out with a
+/// width animation.
+pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
+    const file = fizzy.editor.activeFile() orelse return;
+
+    const button_size: f32 = 36;
+    const button_gap: f32 = 6;
+    const pill_padding: f32 = 6;
+    const margin: f32 = 10;
+    // Icons render at ~60% of their previous size — previous padding was 0.22 (icon
+    // ≈ 56% of button); new padding is 0.33 so the icon ends up ≈ 34% of the button,
+    // which is roughly 60% of the prior icon footprint.
+    const icon_padding: f32 = button_size * 0.33;
+
+    const Action = enum { undo, redo, copy, paste, transform, grid_layout };
+    const Entry = struct {
+        action: Action,
+        tvg: []const u8,
+        tooltip: []const u8,
+    };
+
+    const entries = [_]Entry{
+        .{ .action = .undo, .tvg = icons.tvg.lucide.undo, .tooltip = "Undo" },
+        .{ .action = .redo, .tvg = icons.tvg.lucide.redo, .tooltip = "Redo" },
+        .{ .action = .copy, .tvg = icons.tvg.lucide.copy, .tooltip = "Copy" },
+        .{ .action = .paste, .tvg = icons.tvg.lucide.@"clipboard-paste", .tooltip = "Paste" },
+        .{ .action = .transform, .tvg = icons.tvg.lucide.scaling, .tooltip = "Transform" },
+        .{ .action = .grid_layout, .tvg = icons.tvg.lucide.@"layout-grid", .tooltip = "Grid Layout" },
+    };
+
+    const collapsed_w: f32 = button_size + 2 * pill_padding;
+    const expanded_w: f32 = @as(f32, @floatFromInt(entries.len + 1)) * button_size +
+        @as(f32, @floatFromInt(entries.len)) * button_gap + 2 * pill_padding;
+    const pill_h: f32 = button_size + 2 * pill_padding;
+    const pill_radius: f32 = pill_h / 2;
+    const btn_radius: f32 = button_size / 2;
+
+    // Drive the expand/collapse with a dvui animation. Look up the current value, and on
+    // a toggle click kick off a new animation between the current value and the target.
+    const anim_id = dvui.Id.update(canvas_vbox.data().id, "edit_pill_expand");
+    var anim_value: f32 = if (self.edit_pill_expanded) 1.0 else 0.0;
+    if (dvui.animationGet(anim_id, "_t")) |a| anim_value = std.math.clamp(a.value(), 0.0, 1.0);
+
+    const pill_w: f32 = collapsed_w + (expanded_w - collapsed_w) * anim_value;
+
+    // Offset by the ruler thickness so the pill never overlaps the rulers (they're drawn
+    // along the top/left edges of the canvas vbox). Falls back to 0 when rulers are off
+    // or haven't laid out yet, in which case the `margin` alone is the padding.
+    const ruler_top: f32 = if (fizzy.editor.settings.show_rulers) self.horizontal_ruler_height else 0;
+    const ruler_left: f32 = if (fizzy.editor.settings.show_rulers) self.vertical_ruler_width else 0;
+    _ = ruler_left; // pill anchors to the right edge, no horizontal ruler conflict.
+
+    const cr = canvas_vbox.data().rectScale().r.toNatural();
+
+    var fw: dvui.FloatingWidget = undefined;
+    fw.init(@src(), .{}, .{
+        .rect = .{
+            .x = cr.x + cr.w - margin - pill_w,
+            .y = cr.y + ruler_top + margin,
+            .w = pill_w,
+            .h = pill_h,
+        },
+        .expand = .none,
+        .background = true,
+        .color_fill = dvui.themeGet().color(.window, .fill),
+        .corner_radius = dvui.Rect.all(pill_radius),
+        .box_shadow = .{
+            .color = .black,
+            .alpha = 0.25,
+            .fade = 10,
+            .offset = .{ .x = 0, .y = 3 },
+            .corner_radius = dvui.Rect.all(pill_radius),
+        },
+    });
+    defer fw.deinit();
+
+    var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .both,
+        .background = false,
+        .padding = dvui.Rect.all(pill_padding),
+    });
+    defer hbox.deinit();
+
+    // Hamburger toggle is always present; sits on the right edge of the pill so the row
+    // of actions grows leftward from it as the pill expands.
+    {
+        var btn: dvui.ButtonWidget = undefined;
+        btn.init(@src(), .{}, .{
+            .id_extra = entries.len, // distinct from action button ids below
+            .min_size_content = .{ .w = button_size, .h = button_size },
+            .expand = .none,
+            .gravity_y = 0.5,
+            .gravity_x = 1.0,
+            .background = true,
+            .corner_radius = dvui.Rect.all(btn_radius),
+            .color_fill = dvui.themeGet().color(.content, .fill),
+            .color_fill_hover = dvui.themeGet().color(.content, .fill).lighten(if (dvui.themeGet().dark) 10.0 else -10.0),
+            .color_border = .transparent,
+            .padding = .all(0),
+            .margin = .{},
+            .box_shadow = .{
+                .color = .black,
+                .alpha = 0.2,
+                .fade = 4,
+                .offset = .{ .x = 0, .y = 2 },
+                .corner_radius = dvui.Rect.all(btn_radius),
+            },
+        });
+        defer btn.deinit();
+        btn.processEvents();
+        btn.drawBackground();
+
+        const icon_color = dvui.themeGet().color(.content, .text);
+        dvui.icon(
+            @src(),
+            "edit_pill_toggle",
+            icons.tvg.lucide.menu,
+            .{ .stroke_color = icon_color, .fill_color = icon_color },
+            .{
+                .expand = .ratio,
+                .gravity_x = 0.5,
+                .gravity_y = 0.5,
+                .min_size_content = .{ .w = 1.0, .h = 1.0 },
+                .padding = dvui.Rect.all(icon_padding),
+            },
+        );
+
+        if (btn.clicked()) {
+            self.edit_pill_expanded = !self.edit_pill_expanded;
+            const target: f32 = if (self.edit_pill_expanded) 1.0 else 0.0;
+            dvui.animation(anim_id, "_t", .{
+                .start_val = anim_value,
+                .end_val = target,
+                .end_time = 250_000,
+                .easing = dvui.easing.outBack,
+            });
+        }
+    }
+
+    // Action buttons. We draw them all and let the FloatingWidget's tight rect clip the
+    // ones that overflow during the animation.
+    for (entries, 0..) |entry, i| {
+        const enabled: bool = switch (entry.action) {
+            .undo => file.history.undo_stack.items.len > 0,
+            .redo => file.history.redo_stack.items.len > 0,
+            else => true,
+        };
+
+        var btn: dvui.ButtonWidget = undefined;
+        btn.init(@src(), .{}, .{
+            .id_extra = i,
+            .min_size_content = .{ .w = button_size, .h = button_size },
+            .expand = .none,
+            .gravity_y = 0.5,
+            .background = true,
+            .corner_radius = dvui.Rect.all(btn_radius),
+            .color_fill = dvui.themeGet().color(.content, .fill),
+            .color_fill_hover = dvui.themeGet().color(.content, .fill).lighten(if (dvui.themeGet().dark) 10.0 else -10.0),
+            .color_border = .transparent,
+            .padding = .all(0),
+            .margin = if (i == 0) .{} else .{ .x = button_gap },
+            .box_shadow = .{
+                .color = .black,
+                .alpha = 0.2,
+                .fade = 4,
+                .offset = .{ .x = 0, .y = 2 },
+                .corner_radius = dvui.Rect.all(btn_radius),
+            },
+        });
+        defer btn.deinit();
+        btn.processEvents();
+        btn.drawBackground();
+
+        const icon_color = if (enabled) dvui.themeGet().color(.content, .text) else dvui.themeGet().color(.content, .text).opacity(0.35);
+
+        dvui.icon(
+            @src(),
+            entry.tooltip,
+            entry.tvg,
+            .{ .stroke_color = icon_color, .fill_color = icon_color },
+            .{
+                .expand = .ratio,
+                .gravity_x = 0.5,
+                .gravity_y = 0.5,
+                .min_size_content = .{ .w = 1.0, .h = 1.0 },
+                .padding = dvui.Rect.all(icon_padding),
+            },
+        );
+
+        // Suppress activation while collapsed (or mid-animation) so a stray tap on a
+        // partially-visible button doesn't fire an Edit action behind the hamburger.
+        const fully_expanded = anim_value >= 0.999;
+        if (btn.clicked() and enabled and fully_expanded) {
+            switch (entry.action) {
+                .undo => file.history.undoRedo(file, .undo) catch {
+                    dvui.log.err("Failed to undo", .{});
+                },
+                .redo => file.history.undoRedo(file, .redo) catch {
+                    dvui.log.err("Failed to redo", .{});
+                },
+                .copy => fizzy.editor.copy() catch {
+                    dvui.log.err("Failed to copy", .{});
+                },
+                .paste => fizzy.editor.paste() catch {
+                    dvui.log.err("Failed to paste", .{});
+                },
+                .transform => fizzy.editor.transform() catch {
+                    dvui.log.err("Failed to start transform", .{});
+                },
+                .grid_layout => fizzy.editor.requestGridLayoutDialog(),
             }
         }
     }
