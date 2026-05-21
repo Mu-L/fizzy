@@ -454,7 +454,12 @@ pub fn undoRedo(self: *History, file: *fizzy.Internal.File, action: Action) !voi
     var change = active_stack.pop().?;
 
     defer {
-        const id_mutex = dvui.toastAdd(dvui.currentWindow(), @src(), @intCast(@divTrunc(fizzy.perf.nanoTimestamp(), 1000)), file.editor.canvas.id, fizzy.dvui.toastDisplay, 2_000_000);
+        // Microseconds-since-epoch (~1.7e15) overflows a 32-bit `usize` on wasm32, so a
+        // direct `@intCast` to `usize` crashes the safe-mode build with an "integer cast
+        // truncates value" panic every time the user undoes/redoes. `id_extra` only needs
+        // to be a salt that varies between toasts, so truncate via u128 → low bits of usize.
+        const ts_us: u128 = @intCast(@divTrunc(fizzy.perf.nanoTimestamp(), 1000));
+        const id_mutex = dvui.toastAdd(dvui.currentWindow(), @src(), @truncate(ts_us), file.editor.canvas.id, fizzy.dvui.toastDisplay, 2_000_000);
         const id = id_mutex.id;
         const action_text = switch (action) {
             .undo => "Undo:",
