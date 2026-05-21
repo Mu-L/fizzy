@@ -83,9 +83,18 @@ fn drawOption(option: Pane, icon: []const u8, size: f32) !bool {
     );
 
     if (bw.clicked()) {
-        fizzy.editor.explorer.pane = option;
+        // Tapping the icon for the pane that's already showing closes the explorer —
+        // same effect as the floating collapse button. Only fall through to the "open"
+        // path (setting `pane` + returning true so the caller calls `explorer.open()`)
+        // when the user is either switching panes or the explorer is currently hidden.
+        const explorer_visible = fizzy.editor.explorer.peek_open or !fizzy.editor.explorer.closed;
+        if (selected and explorer_visible) {
+            fizzy.editor.explorer.peekClose();
+        } else {
+            fizzy.editor.explorer.pane = option;
+            ret = true;
+        }
         dvui.refresh(null, @src(), null);
-        ret = true;
     }
 
     if (!selected) {

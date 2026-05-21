@@ -1015,8 +1015,6 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             }
         }
 
-        editor.explorer.updatePeek();
-
         if (editor.explorer.paned.showSecond()) {
             const bg_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
             defer bg_box.deinit();

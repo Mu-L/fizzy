@@ -37,17 +37,11 @@ animations_ratio: f32 = 0.5,
 closed: bool = false,
 
 /// Peek state: when the explorer is collapsed (small window), a sidebar tap slides the
-/// explorer fully in. It stays open until `peek_duration_ns` pass with no pointer input
-/// inside the explorer rect, then slides back out. Sidebar taps during peek refresh the
-/// deadline rather than retriggering the animation.
+/// explorer fully in and it stays open until the user clicks the floating collapse button
+/// at the bottom-right. No auto-close timer — that path caused a per-frame refresh that
+/// kept the app from settling after the open animation finished.
 peek_open: bool = false,
-peek_deadline_ns: i128 = 0,
 collapse_btn_anim_started: bool = false,
-
-/// Set during `draw` when an explorer `dvui.context()` menu is visible this frame.
-context_menu_open: bool = false,
-
-const peek_duration_ns: i128 = 2_000_000_000;
 
 pub const Pane = enum(u32) {
     files,
@@ -89,12 +83,10 @@ pub fn close(explorer: *Explorer) void {
 
 pub fn open(explorer: *Explorer) void {
     if (explorer.paned.collapsed()) {
-        // Re-pressing the sidebar while peeking just refreshes the timer.
-        if (explorer.peek_open) {
-            explorer.peekRefresh();
-        } else {
-            explorer.peekOpen();
-        }
+        // Already peeking: do nothing. The peek stays open until the floating collapse
+        // button is clicked — sidebar taps don't toggle it back closed (and we no longer
+        // need to refresh any timer).
+        if (!explorer.peek_open) explorer.peekOpen();
         return;
     }
 
@@ -110,66 +102,17 @@ pub fn open(explorer: *Explorer) void {
 pub fn peekOpen(explorer: *Explorer) void {
     explorer.paned.animateSplit(1.0, dvui.easing.outBack);
     explorer.peek_open = true;
-    explorer.peek_deadline_ns = dvui.currentWindow().frame_time_ns + peek_duration_ns;
     explorer.closed = false;
-}
-
-pub fn peekRefresh(explorer: *Explorer) void {
-    explorer.peek_deadline_ns = dvui.currentWindow().frame_time_ns + peek_duration_ns;
-}
-
-/// Called when an explorer context menu is being shown (`context.activePoint() != null`).
-pub fn markContextMenuOpen(explorer: *Explorer) void {
-    explorer.context_menu_open = true;
 }
 
 pub fn peekClose(explorer: *Explorer) void {
     explorer.peek_open = false;
-    explorer.context_menu_open = false;
     explorer.paned.animateSplit(0.0, dvui.easing.outQuint);
     explorer.closed = true;
     explorer.collapse_btn_anim_started = false;
 }
 
-/// Called once per frame after `draw`. While peeking, a press inside the explorer's first
-/// pane refreshes the deadline; once the deadline expires the peek closes. Position/hover
-/// events are deliberately ignored — otherwise the per-frame synthetic position event over
-/// the explorer rect would refresh the deadline forever and the peek would never close.
-pub fn updatePeek(explorer: *Explorer) void {
-    if (!explorer.peek_open) return;
-
-    // Paused while an explorer context menu is visible (set during `draw` from
-    // `context.activePoint()` checks in tools/files).
-    if (explorer.context_menu_open) {
-        explorer.peekRefresh();
-        dvui.refresh(null, @src(), null);
-        return;
-    }
-
-    for (dvui.events()) |*e| {
-        switch (e.evt) {
-            .mouse => |me| {
-                if (me.action != .press) continue;
-                if (!explorer.rect_screen.contains(me.p)) continue;
-                explorer.peekRefresh();
-                break;
-            },
-            else => {},
-        }
-    }
-
-    const now = dvui.currentWindow().frame_time_ns;
-    if (now >= explorer.peek_deadline_ns) {
-        explorer.peekClose();
-    } else {
-        // Keep the frame loop ticking so the deadline fires even without input.
-        dvui.refresh(null, @src(), null);
-    }
-}
-
 pub fn draw(explorer: *Explorer) !dvui.App.Result {
-    explorer.context_menu_open = false;
-
     const vbox = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .both,
         .background = false,

@@ -1013,7 +1013,6 @@ fn drawColorPicker(rect: dvui.Rect.Physical, backing_color: *[4]u8, id_extra: us
     defer context.deinit();
 
     if (context.activePoint()) |point| {
-        fizzy.editor.explorer.markContextMenuOpen();
         var fw2 = dvui.floatingMenu(@src(), .{ .from = dvui.Rect.Natural.fromPoint(point) }, .{ .box_shadow = .{
             .color = .black,
             .offset = .{ .x = 0, .y = 0 },
