@@ -96,6 +96,14 @@ touch_eval_press_p: dvui.Point.Physical = .{},
 touch_eval_released: bool = false,
 touch_eval_release_p: dvui.Point.Physical = .{},
 
+// Timestamp of the most recent touch press. While we're inside the post-press grace
+// window we force a refresh every frame so dvui.ContextWidget's hold-timer check
+// actually re-runs in time to open the menu. (ContextWidget itself doesn't request
+// refreshes during a hold — it only re-evaluates the elapsed time inside
+// processEvents.) Without this, on idle touch-only hardware the app settles after the
+// press frame and the hold-to-open menu never fires.
+last_touch_press_ns: i128 = std.math.minInt(i128),
+
 const TouchSlot = struct {
     active: bool = false,
     p: dvui.Point.Physical = .{},
@@ -343,11 +351,20 @@ pub fn updateTouchGesture(self: *CanvasWidget) void {
         }
     }
     if (saw_touch_press) {
-        const win = dvui.currentWindow();
-        // Convert the configured hold duration from ns → µs (dvui.timer takes i32 µs)
-        // and add a small pad so the elapsed comparison resolves on the wake-up frame.
-        const micros: i32 = @intCast(@divTrunc(win.hold_menu_duration_ns, std.time.ns_per_us));
-        dvui.timer(self.id, micros + 1_000);
+        self.last_touch_press_ns = dvui.currentWindow().frame_time_ns;
+    }
+
+    // Refresh every frame for the first hold-duration + small buffer after each touch
+    // press. This is the only reliable way I've found to keep `ContextWidget.updateHold`
+    // ticking on touch — a single one-shot `dvui.timer` *should* work in theory, but in
+    // practice the menu never opens on web/wasm without forcing frames continuously.
+    // Idle cost is bounded: the refresh stops once the grace window elapses.
+    {
+        const now = dvui.currentWindow().frame_time_ns;
+        const grace_ns: i128 = dvui.currentWindow().hold_menu_duration_ns + std.time.ns_per_ms * 100;
+        if (now - self.last_touch_press_ns < grace_ns) {
+            dvui.refresh(null, @src(), null);
+        }
     }
 
     for (dvui.events()) |*e| {
