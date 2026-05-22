@@ -116,7 +116,6 @@ touch_eval_press_p: dvui.Point.Physical = .{},
 touch_eval_released: bool = false,
 touch_eval_release_p: dvui.Point.Physical = .{},
 
-
 const TouchSlot = struct {
     active: bool = false,
     p: dvui.Point.Physical = .{},
@@ -250,6 +249,18 @@ pub fn install(self: *CanvasWidget, src: std.builtin.SourceLocation, init_opts: 
         self.scroll_info.viewport.y = self.stable_viewport.y;
         self.scroll_info.virtual_size = self.stable_virtual_size;
         self.origin = self.stable_origin;
+    }
+
+    // Even on stable frames, eagerly grow `virtual_size` to cover `viewport.{x,y} +
+    // parent_rect.{w,h}` so `ScrollContainerWidget.processVelocity`'s bounce-back never
+    // fires. That bounce is the underlying dvui behavior responsible for the canvas
+    // visibly scrolling downward whenever the workspace's parent rect grows (explorer
+    // toggle, bottom-panel slider drag, window resize).
+    {
+        const needed_h = self.scroll_info.viewport.y + parent_rect_now.h;
+        if (self.scroll_info.virtual_size.h < needed_h) self.scroll_info.virtual_size.h = needed_h;
+        const needed_w = self.scroll_info.viewport.x + parent_rect_now.w;
+        if (self.scroll_info.virtual_size.w < needed_w) self.scroll_info.virtual_size.w = needed_w;
     }
     // `init_opts.center` is driven by workspace split / bottom-panel tray animation. If the
     // workspace subtree was not drawn (explorer peek/collapse), `drawWorkspaces` may not run
