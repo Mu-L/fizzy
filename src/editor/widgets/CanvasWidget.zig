@@ -42,6 +42,26 @@ first_center: bool = true,
 second_center: bool = true,
 prev_parent_rect: dvui.Rect = .{},
 
+/// Parent rect captured during the previous `install` call (regardless of whether
+/// `recenter` ran). Lets us detect "the workspace pane is mid-animation right now" so
+/// we can skip the pan-slack viewport/origin mutation in `processEvents` — running it
+/// while the parent is still resizing causes the canvas to drift downward a few pixels
+/// each open/close cycle of the explorer in collapsed (mobile) mode.
+prev_install_parent_rect: dvui.Rect = .{},
+/// Number of consecutive frames the parent rect has been unchanged. Pan-slack only
+/// runs after a few stable frames — otherwise easing animations (which can briefly
+/// repeat a value between two different ones) sneak a pan-slack run mid-animation and
+/// it leaks pixels of drift.
+stable_parent_rect_frames: u32 = 0,
+/// Snapshot of the scroll-info viewport / virtual_size / origin taken on the last
+/// truly-stable frame. Restored every install while the parent rect is still moving,
+/// so any mid-frame mutations to those fields (the scroll container's processVelocity
+/// bounce-back, an aborted pan-slack adjustment, etc.) don't leak across frames.
+stable_viewport: dvui.Rect = .{},
+stable_virtual_size: dvui.Size = .{},
+stable_origin: dvui.Point = .{},
+has_stable_snapshot: bool = false,
+
 // Set to false on a reset (new file / size change / explicit recenter) so `install` kicks off
 // a fresh fade-in animation exactly once per reset. dvui's animation system drives the value
 // and the per-frame refresh internally.
@@ -202,6 +222,35 @@ pub fn install(self: *CanvasWidget, src: std.builtin.SourceLocation, init_opts: 
     const parent_rect_now = dvui.parentGet().data().rect;
     const parent_changed_while_unsettled = !self.settled() and
         (parent_rect_now.w != self.prev_parent_rect.w or parent_rect_now.h != self.prev_parent_rect.h);
+
+    // Track parent-rect stability across consecutive installs. Pan-slack and any
+    // discretionary mutation of scroll_info only runs when we've seen `stable_threshold`
+    // identical-rect frames in a row — easing animations sometimes repeat a value
+    // between two different ones, and a single pan-slack run mid-animation drifts
+    // `viewport.y` / `origin.y` a couple of pixels that never get restored, which is
+    // what was sliding the canvas off-screen over many open/close cycles in collapsed mode.
+    const stable_threshold: u32 = 3;
+    const rect_eq = std.math.approxEqAbs(f32, parent_rect_now.w, self.prev_install_parent_rect.w, 0.5) and
+        std.math.approxEqAbs(f32, parent_rect_now.h, self.prev_install_parent_rect.h, 0.5);
+    if (rect_eq) {
+        self.stable_parent_rect_frames = @min(self.stable_parent_rect_frames + 1, stable_threshold);
+    } else {
+        self.stable_parent_rect_frames = 0;
+    }
+    self.prev_install_parent_rect = parent_rect_now;
+
+    const parent_is_stable = self.stable_parent_rect_frames >= stable_threshold;
+
+    // While the parent is moving, restore the scroll/origin snapshot from the last
+    // confirmed stable frame. This freezes the canvas's pan/zoom state during animations
+    // so mid-frame mutations (scroll container bounce-back, scrollbar visibility flips
+    // shrinking the viewport, etc.) don't accumulate drift.
+    if (self.settled() and !parent_is_stable and self.has_stable_snapshot) {
+        self.scroll_info.viewport.x = self.stable_viewport.x;
+        self.scroll_info.viewport.y = self.stable_viewport.y;
+        self.scroll_info.virtual_size = self.stable_virtual_size;
+        self.origin = self.stable_origin;
+    }
     // `init_opts.center` is driven by workspace split / bottom-panel tray animation. If the
     // workspace subtree was not drawn (explorer peek/collapse), `drawWorkspaces` may not run
     // for many frames and `center` can stay true — ignore it once the canvas has settled so
@@ -539,6 +588,17 @@ pub fn deinit(self: *CanvasWidget) void {
     self.prev_hovered = self.hovered;
     self.prev_gesture_active = self.gesture_active;
     self.prev_last_input_was_touch = self.last_input_was_touch;
+
+    // Snapshot the (post-pan-slack) scroll state on confirmed-stable frames. The next
+    // mid-animation install will restore from this snapshot so the canvas's pan/zoom
+    // doesn't drift across explorer toggles.
+    if (self.settled() and self.stable_parent_rect_frames >= 3) {
+        self.stable_viewport = self.scroll_info.viewport;
+        self.stable_virtual_size = self.scroll_info.virtual_size;
+        self.stable_origin = self.origin;
+        self.has_stable_snapshot = true;
+    }
+
     self.scaler.deinit();
     self.scroll.deinit();
     // Restore the alpha multiplied in `install`. Done after the children deinit so any
@@ -738,7 +798,16 @@ pub fn processEvents(self: *CanvasWidget) void {
 
     // // don't mess with scrolling if we aren't being shown (prevents weirdness
     // // when starting out)
-    if (!self.scroll_info.viewport.empty()) {
+    //
+    // Also skip while the workspace pane is mid-animation. The pan-slack bbox math
+    // adjusts `viewport.y` / `origin.y` to keep the canvas centered in its scroll area,
+    // but the math assumes the parent rect is stable. When the explorer is peeking
+    // open/closed in collapsed mode, the workspace's rect changes every frame for the
+    // duration of the animation and any pan-slack run mid-animation leaks pixels of
+    // drift that accumulate into the canvas sliding off-screen over many open/close
+    // cycles. We require N stable frames before allowing pan-slack to run again.
+    const parent_is_stable_now = self.stable_parent_rect_frames >= 3;
+    if (!self.scroll_info.viewport.empty() and !(self.settled() and !parent_is_stable_now)) {
         // Pad strategy depends on whether the content rect overflows the viewport:
         //   - Overflow (zoomed in): use a tiny pad so virtual_size tracks the content rect.
         //     Scrollbars stay anchored to the artwork bounds and don't dance around as the user
