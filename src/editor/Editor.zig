@@ -2937,7 +2937,18 @@ pub fn save(editor: *Editor) !void {
         Dialogs.FlatRasterSaveWarning.request(file.id, .editor_save);
         return;
     }
+    if (comptime builtin.target.cpu.arch == .wasm32) {
+        editor.requestWebSaveDialog(.save);
+        return;
+    }
     try file.saveAsync();
+}
+
+/// Browser: pick download filename/extension before encoding (`processPendingSaveAs`).
+pub fn requestWebSaveDialog(editor: *Editor, kind: Dialogs.WebSaveAs.Kind) void {
+    if (comptime builtin.target.cpu.arch != .wasm32) return;
+    const file = editor.activeFile() orelse return;
+    Dialogs.WebSaveAs.request(std.fs.path.basename(file.path), kind);
 }
 
 /// Kick off an async save for every dirty file with a recognized extension.

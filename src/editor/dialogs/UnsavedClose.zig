@@ -99,6 +99,13 @@ fn onCancel() void {
 /// the worker settles, so the GUI thread never blocks on the save.
 fn beginSaveAndClose(file: *fizzy.Internal.File, file_id: u64) !void {
     if (file.isSaving()) return;
+    if (comptime @import("builtin").target.cpu.arch == .wasm32) {
+        const idx = fizzy.editor.open_files.getIndex(file_id) orelse return;
+        fizzy.editor.setActiveFile(idx);
+        fizzy.editor.pending_close_file_id = file_id;
+        fizzy.editor.requestWebSaveDialog(.save);
+        return;
+    }
     try file.saveAsync();
     try fizzy.editor.pending_close_after_save.put(fizzy.app.allocator, file_id, {});
 }

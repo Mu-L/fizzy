@@ -44,9 +44,10 @@ pub fn draw() !dvui.App.Result {
             .expand = .horizontal,
             //.style = .control,
         }) != null) {
-            if (try dvui.dialogNativeFolderSelect(dvui.currentWindow().arena(), .{ .title = "Open Project Folder" })) |folder| {
-                try fizzy.editor.setProjectFolder(folder);
-            }
+            // Use the backend abstraction (native = OS dialog, web = file input element
+            // or "folders unavailable" toast) instead of `dvui.dialogNativeFolderSelect`,
+            // which has no implementation on wasm and would silently no-op the menu.
+            fizzy.backend.showOpenFolderDialog(Editor.Workspace.setProjectFolderCallback, null);
             fw.close();
         }
 
@@ -61,17 +62,17 @@ pub fn draw() !dvui.App.Result {
             .expand = .horizontal,
             //.style = .control,
         }) != null) {
-            if (try dvui.dialogNativeFileOpenMultiple(dvui.currentWindow().arena(), .{
-                .title = "Open Files...",
-                .filter_description = ".fiz, .pixi, .png, .jpg, .jpeg",
-                .filters = &.{ "*.fiz", "*.pixi", "*.png", "*.jpg", "*.jpeg" },
-            })) |files| {
-                for (files) |file| {
-                    _ = fizzy.editor.openFilePath(file, fizzy.editor.open_workspace_grouping) catch {
-                        std.log.err("Failed to open file: {s}", .{file});
-                    };
-                }
-            }
+            // Same reason as "Open Folder" above: route through the backend so the web
+            // build actually pops the file picker. The same callback the homepage uses
+            // handles the open-file plumbing on both platforms.
+            fizzy.backend.showOpenFileDialog(
+                Editor.Workspace.openFilesCallback,
+                &.{
+                    .{ .name = "Image Files", .pattern = "fizzy;png;jpg;jpeg" },
+                },
+                "",
+                null,
+            );
             fw.close();
         }
 

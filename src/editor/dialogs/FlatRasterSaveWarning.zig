@@ -126,8 +126,14 @@ fn onChooseFlatRaster(file_id: u64) !void {
     const f = fileRef(file_id) orelse return;
     switch (pending_mode) {
         .editor_save => {
-            try f.saveAsync();
             fizzy.dvui.closeFloatingDialogAnchored();
+            if (comptime @import("builtin").target.cpu.arch == .wasm32) {
+                const idx = fizzy.editor.open_files.getIndex(file_id) orelse return;
+                fizzy.editor.setActiveFile(idx);
+                fizzy.editor.requestWebSaveDialog(.save);
+            } else {
+                try f.saveAsync();
+            }
         },
         .save_and_close => {
             // Kick off async; close happens once the worker settles (see

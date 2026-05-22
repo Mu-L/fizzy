@@ -7,7 +7,19 @@ const WebFileIo = @import("../WebFileIo.zig");
 
 var default_name_storage: ?[]u8 = null;
 
-pub fn request(default_filename: []const u8) void {
+pub const Kind = enum {
+    save,
+    save_as,
+
+    fn dialogTitle(self: Kind) []const u8 {
+        return switch (self) {
+            .save => "Save",
+            .save_as => "Save As",
+        };
+    }
+};
+
+pub fn request(default_filename: []const u8, kind: Kind) void {
     if (active(dvui.currentWindow())) return;
     if (default_name_storage) |old| {
         fizzy.app.allocator.free(old);
@@ -20,7 +32,7 @@ pub fn request(default_filename: []const u8) void {
     var mutex = fizzy.dvui.dialog(@src(), .{
         .displayFn = dialog,
         .callafterFn = callAfter,
-        .title = "Save As",
+        .title = kind.dialogTitle(),
         .ok_label = "Download",
         .cancel_label = "Cancel",
         .resizeable = false,

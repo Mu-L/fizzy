@@ -51,31 +51,16 @@ pub fn showOpenFileDialog(
     dvui.dialogWasmFileOpenMultiple(open_picker_id.?, .{ .accept = open_accept });
 }
 
-/// `showSaveFileDialog` on web: there is no useful pre-save dialog to draw —
-/// the browser itself prompts for save location (or downloads straight into
-/// the user's Downloads folder) when `wasm_download_data` fires. Skip the DVUI
-/// `WebSaveAs` dialog entirely and forward the default filename straight to
-/// the callback so the editor's save flow proceeds to encoding + download.
+/// Opens the in-app save dialog; `Editor.processPendingSaveAs` consumes the chosen name.
 pub fn showSaveFileDialog(
-    cb: *const fn (?[][:0]const u8) void,
+    _: *const fn (?[][:0]const u8) void,
     _: []const fizzy.backend.DialogFileFilter,
     default_filename: []const u8,
     _: ?[]const u8,
 ) void {
     if (comptime builtin.target.cpu.arch != .wasm32) return;
-
-    const filename_z = fizzy.app.allocator.dupeZ(u8, default_filename) catch {
-        dvui.log.err("Save: out of memory preparing filename", .{});
-        cb(null);
-        return;
-    };
-    defer fizzy.app.allocator.free(filename_z);
-
-    // Stack slice handed to the synchronous callback. The callback dupes
-    // immediately into `editor.pending_save_as_path`, so the underlying buffer
-    // doesn't need to outlive this call.
-    var paths: [1][:0]const u8 = .{filename_z};
-    cb(&paths);
+    const WebSaveAs = @import("dialogs/WebSaveAs.zig");
+    WebSaveAs.request(default_filename, .save_as);
 }
 
 /// Poll the wasm file picker once per frame. Loads picked files synchronously.
