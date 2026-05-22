@@ -2060,7 +2060,7 @@ pub fn drawSampleButton(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
 
                 if (is_drag_sampling and did_sample and file.editor.canvas.samplePointerInViewport(me.p)) {
                     const data_pt = file.editor.canvas.dataFromScreenPoint(me.p);
-                    fizzy.dvui.FileWidget.sampleColorAtPoint(file, data_pt, true, true, true);
+                    fizzy.dvui.FileWidget.sampleColorAtPoint(file, data_pt, false, true, true);
                 }
 
                 // Clear sample state so the magnifier disappears on the next frame.
