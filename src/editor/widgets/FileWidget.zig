@@ -189,12 +189,18 @@ pub fn processSample(self: *FileWidget) void {
     }
 }
 
-fn sample(self: *FileWidget, file: *fizzy.Internal.File, point: dvui.Point, change_layer: bool, change_tool: bool) void {
-    self.sample_data_point = point;
+/// Walk visible layers for an opaque pixel at `point`. Optionally selects the hit layer,
+/// sets the primary color (`apply_primary`), and/or adjusts the active tool (`change_tool`).
+pub fn sampleColorAtPoint(
+    file: *fizzy.Internal.File,
+    point: dvui.Point,
+    change_layer: bool,
+    apply_primary: bool,
+    change_tool: bool,
+) void {
     var color: [4]u8 = .{ 0, 0, 0, 0 };
 
     var min_layer_index: usize = 0;
-
     if (file.editor.isolate_layer) {
         if (file.peek_layer_index) |peek_layer_index| {
             min_layer_index = peek_layer_index;
@@ -233,7 +239,14 @@ fn sample(self: *FileWidget, file: *fizzy.Internal.File, point: dvui.Point, chan
             })
                 fizzy.editor.tools.set(fizzy.editor.tools.previous_drawing_tool);
         }
+    } else if (apply_primary and color[3] > 0) {
+        fizzy.editor.colors.primary = color;
     }
+}
+
+fn sample(self: *FileWidget, file: *fizzy.Internal.File, point: dvui.Point, change_layer: bool, change_tool: bool) void {
+    self.sample_data_point = point;
+    sampleColorAtPoint(file, point, change_layer, change_tool, change_tool);
 }
 
 /// Responsible for changing the currently selected animation index, the animation frame index, and the animations scroll to index
@@ -3942,10 +3955,6 @@ pub fn drawCursor(self: *FileWidget) void {
     var subtract = false;
     var add = false;
 
-    if (self.init_options.file.editor.canvas.hovered) {
-        _ = dvui.cursorSet(.hidden);
-    }
-
     for (dvui.events()) |*e| {
         if (!self.init_options.file.editor.canvas.scroll_container.matchEvent(e)) {
             continue;
@@ -3969,10 +3978,13 @@ pub fn drawCursor(self: *FileWidget) void {
         }
     }
 
-    const data_point = self.init_options.file.editor.canvas.dataFromScreenPoint(dvui.currentWindow().mouse_pt);
     const mouse_point = dvui.currentWindow().mouse_pt;
     if (!self.init_options.file.editor.canvas.rect.contains(mouse_point)) return;
     if (self.sample_data_point != null) return;
+
+    _ = dvui.cursorSet(.hidden);
+
+    const data_point = self.init_options.file.editor.canvas.dataFromScreenPoint(mouse_point);
 
     const selection_sprite = switch (fizzy.editor.tools.selection_mode) {
         .box => if (subtract) fizzy.editor.atlas.data.sprites[fizzy.atlas.sprites.box_selection_rem_default] else if (add) fizzy.editor.atlas.data.sprites[fizzy.atlas.sprites.box_selection_add_default] else fizzy.editor.atlas.data.sprites[fizzy.atlas.sprites.box_selection_default],
@@ -4069,11 +4081,9 @@ pub fn drawSample(self: *FileWidget) void {
         // The size of the sample box in screen space (constant size)
         const sample_box_size: f32 = 100.0 * 1 / self.init_options.file.editor.canvas.scale; // e.g. 100x80 pixels on screen
 
-        const corner_radius = dvui.Rect{
-            .y = 1000000,
-            .w = 1000000,
-            .h = 1000000,
-        };
+        // x/y/w/h = top-left / top-right / bottom-right / bottom-left (dvui Path.addRect).
+        const cr = sample_box_size / 2;
+        const corner_radius = dvui.Rect{ .x = cr, .y = cr, .w = cr, .h = 0 };
 
         // The size of the sample region in data (texture) space
         // This is how many data pixels are shown in the box, so that the box always shows the same number of data pixels at 2x the canvas scale
@@ -4081,12 +4091,12 @@ pub fn drawSample(self: *FileWidget) void {
 
         const border_width = 2 / self.init_options.file.editor.canvas.scale;
 
-        // Position the sample box so that the data_point is at its center
+        // Anchor the magnifier at the sample point's bottom-left so the bubble sits up-right.
         const box = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .none,
             .rect = .{
                 .x = data_point.x,
-                .y = data_point.y,
+                .y = data_point.y - sample_box_size,
                 .w = sample_box_size,
                 .h = sample_box_size,
             },
@@ -4097,12 +4107,7 @@ pub fn drawSample(self: *FileWidget) void {
             .color_fill = dvui.themeGet().color(.window, .fill),
             .box_shadow = .{
                 .fade = 15 * 1 / self.init_options.file.editor.canvas.scale,
-                .corner_radius = .{
-                    .x = sample_box_size / 12,
-                    .y = sample_box_size / 2,
-                    .w = sample_box_size / 2,
-                    .h = sample_box_size / 2,
-                },
+                .corner_radius = corner_radius,
                 .alpha = 0.2,
                 .offset = .{
                     .x = 2 * 1 / self.init_options.file.editor.canvas.scale,
@@ -5486,14 +5491,23 @@ pub fn processEvents(self: *FileWidget) void {
         dvui.dataRemove(null, self.init_options.file.editor.canvas.id, "hide_distance_bubble");
     };
 
+    const canvas_ptr = &self.init_options.file.editor.canvas;
+    const mouse_pt = dvui.currentWindow().mouse_pt;
+    canvas_ptr.hovered = !fizzy.dvui.canvasPointerInputSuppressed() and
+        canvas_ptr.rect.contains(mouse_pt);
+
     // Cursor-leave: when hover transitions true → false, the last brush/fill preview
     // pixels are still painted on the temp layer. Clear them exactly once on the way out
     // (we deliberately do NOT clear every frame — the temp layer can be 64 MB on large
-    // files and clearing it each frame murders performance for nothing).
-    const canvas_ptr = &self.init_options.file.editor.canvas;
-    if (canvas_ptr.prev_hovered and !canvas_ptr.hovered and self.init_options.file.editor.temp_layer_has_content) {
-        resetTempLayerPreview(&self.init_options.file.editor);
-        dvui.refresh(null, @src(), canvas_ptr.scroll_container.data().id);
+    // files and clearing it each frame murders performance for nothing). Also restore the
+    // OS cursor — drawCursor hides it while over the image, and explorer empty areas do not
+    // call cursorSet, so it would otherwise stay hidden after crossing into the explorer.
+    if (canvas_ptr.prev_hovered and !canvas_ptr.hovered) {
+        _ = dvui.cursorSet(.arrow);
+        if (self.init_options.file.editor.temp_layer_has_content) {
+            resetTempLayerPreview(&self.init_options.file.editor);
+            dvui.refresh(null, @src(), canvas_ptr.scroll_container.data().id);
+        }
     }
 
     // Input-mode flip (mouse ↔ touch): clear the temp preview exactly once. On touch
@@ -5600,6 +5614,10 @@ pub fn processEvents(self: *FileWidget) void {
     self.drawSample();
     if (self.hovered())
         self.drawCursor();
+
+    if (!fizzy.dvui.canvasPointerInputSuppressed() and !canvas_ptr.rect.contains(mouse_pt)) {
+        _ = dvui.cursorSet(.arrow);
+    }
 
     // Then process the scroll and zoom events last
     self.init_options.file.editor.canvas.processEvents();

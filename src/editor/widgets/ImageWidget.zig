@@ -194,11 +194,9 @@ pub fn drawSample(self: *ImageWidget) void {
         // The size of the sample box in screen space (constant size)
         const sample_box_size: f32 = 100.0 * 1 / self.init_options.canvas.scale; // e.g. 100x80 pixels on screen
 
-        const corner_radius = dvui.Rect{
-            .y = sample_box_size / 2,
-            .w = sample_box_size / 2,
-            .h = sample_box_size / 2,
-        };
+        // x/y/w/h = top-left / top-right / bottom-right / bottom-left (dvui Path.addRect).
+        const cr = sample_box_size / 2;
+        const corner_radius = dvui.Rect{ .x = cr, .y = cr, .w = cr, .h = 0 };
 
         // The size of the sample region in data (texture) space
         // This is how many data pixels are shown in the box, so that the box always shows the same number of data pixels at 2x the canvas scale
@@ -206,12 +204,12 @@ pub fn drawSample(self: *ImageWidget) void {
 
         const border_width = 2 / self.init_options.canvas.scale;
 
-        // Position the sample box so that the data_point is at its center
+        // Anchor the magnifier at the sample point's bottom-left so the bubble sits up-right.
         const box = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .none,
             .rect = .{
                 .x = data_point.x,
-                .y = data_point.y,
+                .y = data_point.y - sample_box_size,
                 .w = sample_box_size,
                 .h = sample_box_size,
             },
@@ -222,12 +220,7 @@ pub fn drawSample(self: *ImageWidget) void {
             .color_fill = dvui.themeGet().color(.window, .fill),
             .box_shadow = .{
                 .fade = 15 * 1 / self.init_options.canvas.scale,
-                .corner_radius = .{
-                    .x = sample_box_size / 12,
-                    .y = sample_box_size / 2,
-                    .w = sample_box_size / 2,
-                    .h = sample_box_size / 2,
-                },
+                .corner_radius = corner_radius,
                 .alpha = 0.2,
                 .offset = .{
                     .x = 2 * 1 / self.init_options.canvas.scale,

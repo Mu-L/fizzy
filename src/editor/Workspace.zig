@@ -887,6 +887,7 @@ pub fn drawCanvas(self: *Workspace) !void {
 
         self.drawTransformDialog(canvas_vbox);
         self.drawEditPill(canvas_vbox);
+        self.drawSampleButton(canvas_vbox);
 
         if (self.grouping != file.editor.grouping) return;
 
@@ -1650,6 +1651,9 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
     const button_gap: f32 = 6;
     const pill_padding: f32 = 6;
     const margin: f32 = 10;
+    // Canvas scroll area uses a non-overlay vertical bar on the right edge; keep the
+    // pill clear of it (see `CanvasWidget.install` + dvui `ScrollBarWidget` width).
+    const right_margin: f32 = margin + dvui.ScrollBarWidget.defaults.min_sizeGet().w;
     // Icons render at ~60% of their previous size — previous padding was 0.22 (icon
     // ≈ 56% of button); new padding is 0.33 so the icon ends up ≈ 34% of the button,
     // which is roughly 60% of the prior icon footprint.
@@ -1708,9 +1712,9 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
         .h = wb.h - ruler_top,
     };
 
-    if (canvas_nat.w < pill_w + 2 * margin or canvas_nat.h < collapsed_h + 2 * margin) return;
+    if (canvas_nat.w < pill_w + margin + right_margin or canvas_nat.h < collapsed_h + 2 * margin) return;
 
-    const pill_x: f32 = canvas_nat.x + canvas_nat.w - margin - pill_w;
+    const pill_x: f32 = canvas_nat.x + canvas_nat.w - right_margin - pill_w;
     const pill_y: f32 = canvas_nat.y + margin;
 
     // Clamp the bottom edge so the expanded pill never spills past the canvas area —
@@ -1727,16 +1731,16 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
             .h = effective_pill_h,
         },
         .expand = .none,
-        .background = true,
+        .background = self.edit_pill_expanded,
         .color_fill = dvui.themeGet().color(.window, .fill),
         .corner_radius = dvui.Rect.all(pill_radius),
-        .box_shadow = .{
+        .box_shadow = if (self.edit_pill_expanded) .{
             .color = .black,
             .alpha = 0.25,
             .fade = 10,
             .offset = .{ .x = 0, .y = 3 },
             .corner_radius = dvui.Rect.all(pill_radius),
-        },
+        } else null,
     });
     defer fw.deinit();
 
@@ -1803,8 +1807,25 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
         }
     }
 
+    // Action buttons live inside a scroll area so the pill stays the right width and
+    // never visually "squishes" when there isn't enough vertical room — instead the
+    // overflow buttons become reachable via vertical scroll inside the pill. Bars are
+    // hidden to preserve the rounded-pill look; touch / wheel still drives the scroll.
+    var actions_scroll = dvui.scrollArea(@src(), .{
+        .vertical_bar = .hide,
+        .horizontal_bar = .hide,
+    }, .{
+        .expand = .both,
+        .background = false,
+        .padding = .{},
+        .margin = .{},
+        .border = dvui.Rect.all(0),
+        .color_fill = .transparent,
+    });
+    defer actions_scroll.deinit();
+
     // Action buttons stacked below the hamburger. We draw them all and let the
-    // FloatingWidget's tight rect clip the ones that overflow during the animation.
+    // scrollArea handle any overflow when the pill is clamped to the canvas height.
     for (entries, 0..) |entry, i| {
         const enabled: bool = switch (entry.action) {
             .save => file.dirty(),
@@ -1894,6 +1915,212 @@ pub fn drawEditPill(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
                 },
                 .grid_layout => fizzy.editor.requestGridLayoutDialog(),
             }
+        }
+    }
+}
+
+/// Floating round button anchored just to the left of the Edit pill at the top-right of
+/// the canvas. Tapping it shows a tooltip explaining the gesture; the primary action is
+/// to drag from the button toward whatever pixel you want to sample. The button itself
+/// stays put — instead, while the drag is in progress, we route the touch position
+/// through to `file.editor.canvas.sample_data_point` so `FileWidget.drawSample` renders
+/// the existing color-dropper magnifier at the touch location. On release we read the
+/// color underneath the sample point and apply it to the primary color slot.
+pub fn drawSampleButton(self: *Workspace, canvas_vbox: *dvui.BoxWidget) void {
+    const file = fizzy.editor.activeFile() orelse return;
+
+    const pill_button_size: f32 = 36;
+    const pill_padding: f32 = 6;
+    const pill_outer_w: f32 = pill_button_size + 2 * pill_padding;
+    const button_size: f32 = 36;
+    const btn_radius: f32 = button_size / 2;
+    const icon_padding: f32 = button_size * 0.33;
+    const margin: f32 = 10;
+    const right_margin: f32 = margin + dvui.ScrollBarWidget.defaults.min_sizeGet().w;
+    const gap: f32 = 6;
+
+    // Anchor against the same canvas-scroll-area rect the pill uses.
+    const wb = canvas_vbox.data().rectScale().r.toNatural();
+    const ruler_top: f32 = if (fizzy.editor.settings.show_rulers) self.horizontal_ruler_height else 0;
+    const ruler_left: f32 = if (fizzy.editor.settings.show_rulers) self.vertical_ruler_width else 0;
+    const canvas_nat = dvui.Rect{
+        .x = wb.x + ruler_left,
+        .y = wb.y + ruler_top,
+        .w = wb.w - ruler_left,
+        .h = wb.h - ruler_top,
+    };
+
+    // Only draw when the canvas area can fit pill + gap + sample button + margins.
+    if (canvas_nat.w < pill_outer_w + gap + button_size + margin + right_margin) return;
+    if (canvas_nat.h < button_size + 2 * margin) return;
+
+    const btn_x = canvas_nat.x + canvas_nat.w - right_margin - pill_outer_w - gap - button_size;
+    // Match the hamburger row inside the pill (pill top + inner vbox padding).
+    const btn_y = canvas_nat.y + margin + pill_padding;
+
+    var fw: dvui.FloatingWidget = undefined;
+    fw.init(@src(), .{}, .{
+        .rect = .{ .x = btn_x, .y = btn_y, .w = button_size, .h = button_size },
+        .expand = .none,
+        .background = false,
+    });
+    defer fw.deinit();
+
+    var btn: dvui.ButtonWidget = undefined;
+    // `touch_drag = true` keeps `ButtonWidget`'s own capture alive while the touch is
+    // dragging away from the button — without it, dvui's default `clickedEx` releases
+    // capture as soon as the drag crosses the threshold (treating the gesture as a
+    // canceled scroll), which would also cancel our custom drag-to-sample handler.
+    btn.init(@src(), .{ .touch_drag = true }, .{
+        .expand = .both,
+        .background = true,
+        .min_size_content = .{ .w = button_size, .h = button_size },
+        .corner_radius = dvui.Rect.all(btn_radius),
+        .color_fill = dvui.themeGet().color(.content, .fill),
+        .color_fill_hover = dvui.themeGet().color(.content, .fill).lighten(if (dvui.themeGet().dark) 10.0 else -10.0),
+        .color_border = .transparent,
+        .padding = .all(0),
+        .margin = .{},
+        .box_shadow = .{
+            .color = .black,
+            .alpha = 0.2,
+            .fade = 4,
+            .offset = .{ .x = 0, .y = 2 },
+            .corner_radius = dvui.Rect.all(btn_radius),
+        },
+    });
+    defer btn.deinit();
+
+    // Persistent drag state (a press is "drag-sampling" once motion clears the dvui drag
+    // threshold). Stored via dataSet because the button widget is recreated each frame.
+    const drag_state_id = dvui.Id.update(canvas_vbox.data().id, "sample_button_drag");
+    var is_drag_sampling = dvui.dataGet(null, drag_state_id, "active", bool) orelse false;
+    var did_sample = dvui.dataGet(null, drag_state_id, "did_sample", bool) orelse false;
+
+    // The button's screen rect is the "press home base"; events that happen here belong
+    // to us regardless of whether motion has carried the pointer away.
+    const btn_rs = btn.data().rectScale();
+
+    // Custom event handling runs *before* `btn.processEvents()` so we can claim the
+    // press / motion / release events first. `ButtonWidget.clickedEx` ALWAYS releases
+    // mouse capture and ends the drag on a release event (regardless of touch_drag) —
+    // if we ran after it, our release branch would see `dvui.captured(...)` already
+    // false and the magnifier would stay stuck on screen. Calling `e.handle(...)` here
+    // makes `clickedEx`'s match-event check skip these events entirely, so the button
+    // leaves our gesture alone.
+    for (dvui.events()) |*e| {
+        if (e.evt != .mouse) continue;
+        const me = e.evt.mouse;
+
+        switch (me.action) {
+            .press => {
+                if (!me.button.pointer()) continue;
+                if (!btn_rs.r.contains(me.p)) continue;
+                e.handle(@src(), btn.data());
+                dvui.captureMouse(btn.data(), e.num);
+                dvui.dragPreStart(me.p, .{ .name = "sample_button_drag" });
+                is_drag_sampling = false;
+                did_sample = false;
+            },
+            .motion => {
+                if (!dvui.captured(btn.data().id)) continue;
+                if (dvui.dragging(me.p, "sample_button_drag")) |_| {
+                    is_drag_sampling = true;
+                    // Convert touch position into canvas data coords and stash it so
+                    // FileWidget's next install picks it up and drawSample renders the
+                    // magnifier at the touch point.
+                    const data_pt = file.editor.canvas.dataFromScreenPoint(me.p);
+                    dvui.dataSet(null, file.editor.canvas.id, "sample_data_point", data_pt);
+                    did_sample = true;
+                    dvui.refresh(null, @src(), file.editor.canvas.id);
+                    e.handle(@src(), btn.data());
+                }
+            },
+            .release => {
+                if (!me.button.pointer()) continue;
+                if (!dvui.captured(btn.data().id)) continue;
+                e.handle(@src(), btn.data());
+                dvui.captureMouse(null, e.num);
+                dvui.dragEnd();
+
+                if (is_drag_sampling and did_sample) {
+                    const data_pt = file.editor.canvas.dataFromScreenPoint(me.p);
+                    fizzy.dvui.FileWidget.sampleColorAtPoint(file, data_pt, true, true, true);
+                }
+
+                // Clear sample state so the magnifier disappears on the next frame.
+                dvui.dataRemove(null, file.editor.canvas.id, "sample_data_point");
+                is_drag_sampling = false;
+                did_sample = false;
+                dvui.refresh(null, @src(), file.editor.canvas.id);
+            },
+            else => {},
+        }
+    }
+
+    // Persist the drag state for the next frame's widget recreate.
+    dvui.dataSet(null, drag_state_id, "active", is_drag_sampling);
+    dvui.dataSet(null, drag_state_id, "did_sample", did_sample);
+
+    // Now let the button run its own pass to handle hover styling against any remaining
+    // (non-claimed) events — i.e. plain mouse hover when we're not in a drag.
+    btn.processEvents();
+    btn.drawBackground();
+
+    const icon_color = dvui.themeGet().color(.content, .text);
+    dvui.icon(
+        @src(),
+        "sample_dropper",
+        icons.tvg.lucide.pipette,
+        .{ .stroke_color = icon_color, .fill_color = icon_color },
+        .{
+            .expand = .ratio,
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 1.0, .h = 1.0 },
+            .padding = dvui.Rect.all(icon_padding),
+        },
+    );
+
+    // While the drag is in progress, hide the OS cursor entirely so only the canvas
+    // magnifier (drawn at the touch point via `FileWidget.drawSample`) communicates
+    // where the sample is happening. Set after `btn.processEvents()` so it overrides
+    // the `.hand` hover cursor `clickedEx` would otherwise leave in place.
+    if (is_drag_sampling) {
+        dvui.cursorSet(.hidden);
+    }
+
+    // Tooltip prompting the gesture. We hide it during an active sample drag so it
+    // doesn't compete with the magnifier on screen.
+    if (!is_drag_sampling) {
+        var tooltip: dvui.FloatingTooltipWidget = undefined;
+        tooltip.init(@src(), .{
+            .active_rect = btn.data().rectScale().r,
+            .delay = 350_000,
+        }, .{
+            .color_fill = dvui.themeGet().color(.window, .fill),
+            .border = dvui.Rect.all(0),
+            .box_shadow = .{
+                .color = .black,
+                .shrink = 0,
+                .corner_radius = dvui.Rect.all(8),
+                .offset = .{ .x = 0, .y = 2 },
+                .fade = 4,
+                .alpha = 0.2,
+            },
+        });
+        defer tooltip.deinit();
+
+        if (tooltip.shown()) {
+            var anim = dvui.animate(@src(), .{ .kind = .alpha, .duration = 250_000 }, .{ .expand = .both });
+            defer anim.deinit();
+
+            var tl = dvui.textLayout(@src(), .{}, .{
+                .background = false,
+                .padding = dvui.Rect.all(6),
+            });
+            tl.format("Drag to sample color", .{}, .{ .font = dvui.Font.theme(.body) });
+            tl.deinit();
         }
     }
 }
