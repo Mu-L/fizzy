@@ -202,6 +202,26 @@ pub fn processSample(self: *FileWidget) void {
     }
 }
 
+/// Set `file.peek_layer_index` to the visible layer with an opaque pixel at `point`, mirroring
+/// `sampleColorAtPoint`'s selection rule (bottommost match wins). Called every frame while the
+/// sample key is held so other layers dim like during layer-list hover.
+pub fn peekLayerAtPoint(file: *fizzy.Internal.File, point: dvui.Point) void {
+    if (file.editor.isolate_layer) return;
+
+    var layer_index: usize = file.layers.len;
+    while (layer_index > 0) {
+        layer_index -= 1;
+        var layer = file.layers.get(layer_index);
+        if (!layer.visible) continue;
+        if (layer.pixelIndex(point)) |index| {
+            const c = layer.pixels()[index];
+            if (c[3] > 0) {
+                file.peek_layer_index = layer_index;
+            }
+        }
+    }
+}
+
 /// Walk visible layers for an opaque pixel at `point`. Optionally selects the hit layer,
 /// sets the primary color (`apply_primary`), and/or adjusts the active tool (`change_tool`).
 pub fn sampleColorAtPoint(
@@ -234,6 +254,11 @@ pub fn sampleColorAtPoint(
                 if (change_layer and !file.editor.isolate_layer) {
                     file.selected_layer_index = layer_index;
                     file.peek_layer_index = layer_index;
+                    // Sample acts as a focused layer-pick: narrow multi-selection to just this layer
+                    // so the ctrl modifier (also the layer-list multi-select toggle) doesn't accumulate.
+                    file.editor.selected_layer_indices.clearRetainingCapacity();
+                    file.editor.selected_layer_indices.append(fizzy.app.allocator, layer_index) catch {};
+                    file.editor.layer_selection_anchor = layer_index;
                 }
             }
         }
@@ -5765,6 +5790,18 @@ pub fn processEvents(self: *FileWidget) void {
 
     if (self.active() and self.init_options.file.editor.transform != null and !suppress) {
         self.processTransform();
+    }
+
+    // While the sample key is held, dim non-target layers like layer-list hover does. This
+    // must run before `drawLayers` because `renderLayers` picks dimmed vs normal triangles at
+    // call time based on `peek_layer_index`; `Editor.draw` resets peek at end of frame, so
+    // setting it inside `processSample` (after `drawLayers`) wouldn't take effect.
+    if (self.sample_key_down) {
+        const sample_mouse = dvui.currentWindow().mouse_pt;
+        if (self.init_options.file.editor.canvas.samplePointerInViewport(sample_mouse)) {
+            const sample_point = self.init_options.file.editor.canvas.dataFromScreenPoint(sample_mouse);
+            peekLayerAtPoint(self.init_options.file, sample_point);
+        }
     }
 
     self.drawLayers();
