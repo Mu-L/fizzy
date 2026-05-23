@@ -212,56 +212,60 @@ pub fn draw() !void {
         });
         defer box.deinit();
 
-        var dropdown: dvui.DropdownWidget = undefined;
-        dropdown.init(@src(), .{ .label = "Control scheme" }, .{
-            .expand = .horizontal,
-            .corner_radius = dvui.Rect.all(1000),
-        });
-        defer dropdown.deinit();
+        {
+            var dropdown: dvui.DropdownWidget = undefined;
+            dropdown.init(@src(), .{ .label = "Control scheme" }, .{
+                .expand = .horizontal,
+                .corner_radius = dvui.Rect.all(1000),
+            });
+            defer dropdown.deinit();
 
-        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .vertical,
-            .gravity_x = 1.0,
-        });
+            var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .expand = .vertical,
+                .gravity_x = 1.0,
+            });
 
-        const label_text: []const u8 = switch (fizzy.editor.settings.input_scheme) {
-            .auto => switch (dvui.mouseType()) {
-                // Pre-classification (no scroll events seen yet) — drop the parenthetical
-                // entirely rather than showing "Auto (unknown)".
-                .unknown => "Auto",
-                .mouse, .trackpad => |hint| try std.fmt.allocPrint(dvui.currentWindow().lifo(), "Auto ({s})", .{@tagName(hint)}),
-            },
-            .mouse => "Mouse",
-            .trackpad => "Trackpad",
-        };
-        dvui.label(@src(), "{s}", .{label_text}, .{ .margin = .all(0), .padding = .all(0) });
+            const label_text: []const u8 = switch (fizzy.editor.settings.input_scheme) {
+                .auto => switch (dvui.mouseType()) {
+                    // Pre-classification (no scroll events seen yet) — drop the parenthetical
+                    // entirely rather than showing "Auto (unknown)".
+                    .unknown => "Auto",
+                    .mouse, .trackpad => |hint| try std.fmt.allocPrint(dvui.currentWindow().lifo(), "Auto ({s})", .{@tagName(hint)}),
+                },
+                .mouse => "Mouse",
+                .trackpad => "Trackpad",
+            };
+            dvui.label(@src(), "{s}", .{label_text}, .{ .margin = .all(0), .padding = .all(0) });
 
-        dvui.icon(
-            @src(),
-            "dropdown_triangle",
-            dvui.entypo.triangle_down,
-            .{},
-            .{ .gravity_y = 0.5 },
-        );
+            dvui.icon(
+                @src(),
+                "dropdown_triangle",
+                dvui.entypo.triangle_down,
+                .{},
+                .{ .gravity_y = 0.5 },
+            );
 
-        hbox.deinit();
+            hbox.deinit();
 
-        if (dropdown.dropped()) {
-            if (dropdown.addChoiceLabel("Auto")) {
-                fizzy.editor.settings.input_scheme = .auto;
-                fizzy.editor.markSettingsDirty();
-                dvui.refresh(null, @src(), vbox.data().id);
+            if (dropdown.dropped()) {
+                if (dropdown.addChoiceLabel("Auto")) {
+                    fizzy.editor.settings.input_scheme = .auto;
+                    fizzy.editor.markSettingsDirty();
+                    dvui.refresh(null, @src(), vbox.data().id);
+                }
+                if (dropdown.addChoiceLabel("Mouse")) {
+                    fizzy.editor.settings.input_scheme = .mouse;
+                    fizzy.editor.markSettingsDirty();
+                    dvui.refresh(null, @src(), vbox.data().id);
+                }
+                if (dropdown.addChoiceLabel("Trackpad")) {
+                    fizzy.editor.settings.input_scheme = .trackpad;
+                    fizzy.editor.markSettingsDirty();
+                    dvui.refresh(null, @src(), vbox.data().id);
+                }
             }
-            if (dropdown.addChoiceLabel("Mouse")) {
-                fizzy.editor.settings.input_scheme = .mouse;
-                fizzy.editor.markSettingsDirty();
-                dvui.refresh(null, @src(), vbox.data().id);
-            }
-            if (dropdown.addChoiceLabel("Trackpad")) {
-                fizzy.editor.settings.input_scheme = .trackpad;
-                fizzy.editor.markSettingsDirty();
-                dvui.refresh(null, @src(), vbox.data().id);
-            }
+
+            _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 10 } });
         }
 
         var hold_menu_ms: f32 = @floatFromInt(fizzy.editor.settings.hold_menu_duration_ms);
