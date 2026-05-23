@@ -277,6 +277,15 @@ pub fn build(b: *std.Build) !void {
         web_exe.root_module.addImport("dvui", dvui_web_dep.module("dvui_web"));
         web_exe.root_module.addImport("web-backend", dvui_web_dep.module("web"));
 
+        // Extra wasm exports beyond dvui's own (`dvui_init`/`dvui_update`/etc.). The wasm
+        // linker only emits symbols listed here, so `export fn` in Zig isn't enough on its
+        // own — without this line our trackpad pinch entry point would compile cleanly but
+        // be missing from `instance.exports`, and the JS bootstrap in `docs/web/index.html`
+        // would never be able to forward pinch deltas into the canvas widget.
+        web_exe.root_module.export_symbol_names = &[_][]const u8{
+            "FizzyWebTrackpadMagnification",
+        };
+
         // `icons` (pure-Zig icon data) is referenced at file scope in
         // `src/dvui.zig` and `src/editor/Infobar.zig`. Wired in so any future
         // wasm-reachable code that pulls those files in compiles cleanly.

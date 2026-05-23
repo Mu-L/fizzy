@@ -136,6 +136,38 @@
         });
       }
 
+      // Trackpad pinch arrives as a `wheel` event with `ctrlKey=true` and `deltaMode=0`
+      // (every modern browser synthesizes this). Two things to do here in the capture phase,
+      // before dvui's bubble-phase listener on the canvas:
+      //   1. preventDefault + stopImmediatePropagation — keeps the browser from page-zooming
+      //      and keeps dvui's wheel handler from folding the tiny pinch delta into its
+      //      `scroll_lowest` minimum (an all-time min that never resets and otherwise
+      //      poisons trackpad scroll sensitivity for the rest of the session).
+      //   2. Forward the magnification into the wasm trackpad accumulator
+      //      (`FizzyWebTrackpadMagnification`). The canvas widget drains it each frame and
+      //      applies the same scale-around-point math used by macOS native pinch.
+      // `dvuiApp` starts null and is filled in once the app loads — events that arrive
+      // before then are still safely suppressed.
+      // Scale factor (100): browser pinch deltaY is roughly ±1..±20 per event; dividing by
+      // 100 produces ratios around 1.01..1.2 per event, matching the magnitude AppKit
+      // reports for native trackpad gestures. Negate deltaY because positive deltaY means
+      // "pinch fingers together = zoom out".
+      let dvuiApp = null;
+      const dvuiCanvas = document.getElementById("dvui-canvas");
+      dvuiCanvas.addEventListener("wheel", (ev) => {
+        if (ev.ctrlKey && ev.deltaMode === 0) {
+          ev.preventDefault();
+          ev.stopImmediatePropagation();
+          if (dvuiApp && dvuiApp.instance.exports.FizzyWebTrackpadMagnification) {
+            dvuiApp.instance.exports.FizzyWebTrackpadMagnification(-ev.deltaY / 100);
+            // dvui normally calls `requestRender` from its own wheel listener — since we
+            // swallowed the event in the capture phase, drive the frame loop ourselves so
+            // the canvas widget actually drains the accumulator we just wrote.
+            dvuiApp.requestRender();
+          }
+        }
+      }, { capture: true, passive: false });
+
       if (!hasWebGl()) {
         showError("This browser does not support WebGL, which fizzy needs to run.");
       } else {
@@ -144,6 +176,9 @@
           .then(() => import("./web.js?cache-buster=TEMPLATE_HASH_WITH_PADDING__ITS_64_BYTES_LONG_THE_SAME_AS_SHA256"))
           .then(({ dvui }) => dvui("#dvui-canvas", wasmUrl))
           .then((app) => {
+            // Late-bind the app reference so the capture-phase wheel listener above can
+            // forward pinch deltas into the trackpad accumulator and kick a render.
+            dvuiApp = app;
             window.dispatchEvent(new Event("resize"));
             app.requestRender();
             hideLoading();
