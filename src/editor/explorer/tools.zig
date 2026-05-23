@@ -953,8 +953,8 @@ pub fn drawColors() !void {
         .background = true,
         .corner_radius = dvui.Rect.all(8.0),
         .color_fill = primary,
-        //.color_fill_hover = primary,
-        //.color_fill_press = primary,
+        .color_fill_hover = primary,
+        .color_fill_press = primary,
         .margin = dvui.Rect.all(4),
         .padding = dvui.Rect.all(0),
         .box_shadow = .{
@@ -968,8 +968,8 @@ pub fn drawColors() !void {
 
     const secondary_overrider: dvui.Options = .{
         .color_fill = secondary,
-        //.color_fill_hover = secondary,
-        //.color_fill_press = secondary,
+        .color_fill_hover = secondary,
+        .color_fill_press = secondary,
     };
 
     var clicked: bool = false;
