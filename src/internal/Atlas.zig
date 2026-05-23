@@ -5,15 +5,54 @@ const dvui = @import("dvui");
 const Atlas = @This();
 const ExternalAtlas = @import("../Atlas.zig");
 
+const alpha_checkerboard_count: u32 = 8;
+
 /// The packed atlas texture
 source: dvui.ImageSource,
 canvas: fizzy.dvui.CanvasWidget = .{},
+
+/// Checkerboard tile for the project-tab atlas preview (not tied to open files).
+checkerboard_tile: dvui.ImageSource = undefined,
+checkerboard_tile_built: bool = false,
 
 // /// The packed atlas heightmap
 // heightmap: ?fizzy.gfx.Texture = null,
 
 /// The actual atlas, which contains the sprites and animations data
 data: ExternalAtlas,
+
+pub fn initCheckerboardTile(atlas: *Atlas) void {
+    if (atlas.checkerboard_tile_built) deinitCheckerboardTile(atlas);
+
+    const tile = fizzy.image.init(
+        alpha_checkerboard_count,
+        alpha_checkerboard_count,
+        .{ .r = 0, .g = 0, .b = 0, .a = 0 },
+        .ptr,
+    ) catch return;
+
+    for (fizzy.image.pixels(tile), 0..) |*pixel, i| {
+        if (fizzy.math.checker(fizzy.image.size(tile), i)) {
+            pixel.* = fizzy.editor.settings.checker_color_even;
+        } else {
+            pixel.* = fizzy.editor.settings.checker_color_odd;
+        }
+    }
+    dvui.textureInvalidateCache(tile.hash());
+    atlas.checkerboard_tile = tile;
+    atlas.checkerboard_tile_built = true;
+}
+
+pub fn deinitCheckerboardTile(atlas: *Atlas) void {
+    if (!atlas.checkerboard_tile_built) return;
+    switch (atlas.checkerboard_tile) {
+        .pixelsPMA => |p| fizzy.app.allocator.free(p.rgba),
+        .pixels => |p| fizzy.app.allocator.free(p.rgba),
+        .texture => |t| dvui.textureDestroyLater(t),
+        .imageFile => |i| fizzy.app.allocator.free(i.bytes),
+    }
+    atlas.checkerboard_tile_built = false;
+}
 
 pub const Selector = enum {
     source,

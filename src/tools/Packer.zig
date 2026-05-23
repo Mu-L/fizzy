@@ -336,6 +336,7 @@ pub fn packAndClear(packer: *Packer) !void {
         }
 
         if (packer.atlas) |*current_atlas| {
+            current_atlas.deinitCheckerboardTile();
             for (current_atlas.data.animations) |*animation| {
                 fizzy.app.allocator.free(animation.name);
             }
@@ -346,11 +347,13 @@ pub fn packAndClear(packer: *Packer) !void {
 
             current_atlas.data = atlas;
             current_atlas.source = atlas_layer.source;
+            current_atlas.initCheckerboardTile();
         } else {
             packer.atlas = .{
                 .source = atlas_layer.source,
                 .data = atlas,
             };
+            packer.atlas.?.initCheckerboardTile();
         }
 
         packer.last_packed_at_ns = fizzy.perf.nanoTimestamp();

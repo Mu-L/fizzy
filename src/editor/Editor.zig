@@ -2194,6 +2194,7 @@ pub fn processPackJob(editor: *Editor) void {
         // Free the previously-installed atlas's allocations so the new one can take its
         // place — matches the synchronous `packAndClear` cleanup ordering.
         if (fizzy.packer.atlas) |*current_atlas| {
+            current_atlas.deinitCheckerboardTile();
             for (current_atlas.data.animations) |*anim| fizzy.app.allocator.free(anim.name);
             fizzy.app.allocator.free(current_atlas.data.sprites);
             fizzy.app.allocator.free(current_atlas.data.animations);
@@ -2201,8 +2202,10 @@ pub fn processPackJob(editor: *Editor) void {
 
             current_atlas.source = new_atlas.source;
             current_atlas.data = new_atlas.data;
+            current_atlas.initCheckerboardTile();
         } else {
             fizzy.packer.atlas = new_atlas;
+            fizzy.packer.atlas.?.initCheckerboardTile();
         }
         fizzy.packer.last_packed_at_ns = fizzy.perf.nanoTimestamp();
         job.result_consumed = true;

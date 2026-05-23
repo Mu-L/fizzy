@@ -315,13 +315,11 @@ pub fn drawSampleMagnifier(canvas: *CanvasWidget, source: dvui.ImageSource, data
     } }, .{ .thickness = 2, .color = .black });
 }
 
-/// Borrow a checkerboard tile texture from an open file (atlas preview has no file of its own).
 fn packedAtlasCheckerboardTexture() ?dvui.Texture {
-    if (fizzy.editor.activeFile()) |file| {
-        return file.editor.checkerboard_tile.getTexture() catch null;
-    }
-    for (fizzy.editor.open_files.values()) |*file| {
-        return file.editor.checkerboard_tile.getTexture() catch null;
+    if (fizzy.packer.atlas) |atlas| {
+        if (atlas.checkerboard_tile_built) {
+            return atlas.checkerboard_tile.getTexture() catch null;
+        }
     }
     return null;
 }
