@@ -28,11 +28,10 @@ const UpdateJob = @This();
 
 pub const Phase = enum(u8) {
     queued = 0,
-    checking = 1,
-    downloading = 2,
-    applying = 3,
-    failed = 4,
-    no_update = 5,
+    downloading = 1,
+    applying = 2,
+    failed = 3,
+    no_update = 4,
 };
 
 allocator: std.mem.Allocator,
@@ -103,9 +102,13 @@ pub fn progressPercent(job: *const UpdateJob) u8 {
 
 pub fn phaseLabel(p: Phase) []const u8 {
     return switch (p) {
-        .queued => "Preparing…",
-        .checking => "Checking for updates…",
-        .downloading => "Downloading update…",
+        // `.queued` is only ever visible for the brief window between
+        // `startOrGet` returning and the worker actually transitioning to
+        // `.downloading`. Both callers (toast + About dialog) have already
+        // confirmed an update is available, so we say "Downloading…" here
+        // too instead of leaking a "Checking…" / "Preparing…" state that
+        // would contradict the prior step.
+        .queued, .downloading => "Downloading update…",
         .applying => "Applying update — relaunching…",
         .failed => "Update failed",
         .no_update => "You're up to date.",
@@ -155,7 +158,7 @@ fn workerMain(job: *UpdateJob) void {
         return;
     }
 
-    job.phase.store(@intFromEnum(Phase.checking), .release);
+    job.phase.store(@intFromEnum(Phase.downloading), .release);
     dvui.refresh(job.window, @src(), null);
 
     const mgr_opaque = auto_update.openUpdateManager(job.io, job.allocator) catch {
@@ -190,10 +193,6 @@ fn workerMain(job: *UpdateJob) void {
 
     const u = update_info.?;
     defer Vpk.vpkc_free_update_info(u);
-
-    job.phase.store(@intFromEnum(Phase.downloading), .release);
-    dvui.refresh(job.window, @src(), null);
-
     if (!Vpk.vpkc_download_updates(mgr, u, progressCb, job)) {
         auto_update.logVpkError("fizzy autoupdate: download failed");
         job.setFailed(error.DownloadFailed);
