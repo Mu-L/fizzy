@@ -7,10 +7,14 @@ buildrunner.zig
 .DS_Store
 imgui.ini
 recents.json
+.claude/
+.config/
 .temp/
+web/app/
 *.code-workspace
 zig-pkg/
 .velopack-msvc/
+.velopack-msvc.lock
 tools/msvcup-bin/
 tools/msvc-libc*.ini
 .zig-cache/

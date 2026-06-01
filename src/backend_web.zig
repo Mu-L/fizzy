@@ -71,13 +71,13 @@ pub fn setSdlAppMetadata(_: [*:0]const u8, _: [*:0]const u8, _: [*:0]const u8) v
 pub fn setupMacOSMenuBar() void {}
 
 // Browser trackpad pinch arrives as a `wheel` event with `ctrlKey=true` (synthesized by every
-// modern browser). The bootstrap JS in `docs/web/index.html` intercepts those events in the
+// modern browser). The bootstrap JS in `web/shell.html` intercepts those events in the
 // capture phase, prevents the browser's default page-zoom, and forwards the magnification
 // delta into the wasm export below. Same accumulator pattern as the macOS native trackpad
 // monitor — the canvas widget drains via `takeTrackpadPinchRatio` once per frame.
 var pending_pinch_ratio: f32 = 1.0;
 
-/// Called from `docs/web/index.html` via `app.instance.exports.FizzyWebTrackpadMagnification`
+/// Called from `web/shell.html` via `app.instance.exports.FizzyWebTrackpadMagnification`
 /// for every pinch wheel event. `delta` is a small relative magnification (positive = zoom in)
 /// derived from `-ev.deltaY` scaled to match macOS NSEvent magnification magnitudes.
 export fn FizzyWebTrackpadMagnification(delta: f32) void {

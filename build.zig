@@ -288,7 +288,7 @@ pub fn build(b: *std.Build) !void {
         // Extra wasm exports beyond dvui's own (`dvui_init`/`dvui_update`/etc.). The wasm
         // linker only emits symbols listed here, so `export fn` in Zig isn't enough on its
         // own — without this line our trackpad pinch entry point would compile cleanly but
-        // be missing from `instance.exports`, and the JS bootstrap in `docs/web/index.html`
+        // be missing from `instance.exports`, and the JS bootstrap in `web/shell.html`
         // would never be able to forward pinch deltas into the canvas widget.
         web_exe.root_module.export_symbol_names = &[_][]const u8{
             "FizzyWebTrackpadMagnification",
@@ -393,7 +393,7 @@ pub fn build(b: *std.Build) !void {
             }),
         });
         const cb_run = b.addRunArtifact(cb);
-        cb_run.addFileArg(b.path("docs/web/index.html"));
+        cb_run.addFileArg(b.path("web/shell.html"));
         cb_run.addFileArg(dvui_web_dep.path("src/backends/web.js"));
         cb_run.addFileArg(web_exe.getEmittedBin());
         const index_html_with_hash = cb_run.captureStdOut(.{});
@@ -423,12 +423,13 @@ pub fn build(b: *std.Build) !void {
         const check_web_step = b.step("check-web", "Compile fizzy web (wasm) without installing artifacts");
         check_web_step.dependOn(&web_exe.step);
 
-        // Copy zig-out/web into docs/app/ for local preview: `cd docs && python3 -m http.server`
-        // then open http://localhost:8000/app/ (matches production /app/ path).
-        const web_docs_step = b.step("web-docs", "Build web app and copy into docs/app/ for local Pages preview");
+        // Copy zig-out/web into web/app/ for local preview at the production
+        // `/app/` path: `cd web && python3 -m http.server` then open
+        // http://localhost:8000/app/. The landing page lives in fizzyedit/website.
+        const web_docs_step = b.step("web-docs", "Build web app and copy into web/app/ for local /app/ preview");
         web_docs_step.dependOn(web_step);
         const cp_web_to_docs = b.addSystemCommand(&.{ "sh", "-c" });
-        cp_web_to_docs.addArg("mkdir -p docs/app && cp -R zig-out/web/. docs/app/");
+        cp_web_to_docs.addArg("mkdir -p web/app && cp -R zig-out/web/. web/app/");
         cp_web_to_docs.step.dependOn(web_step);
         web_docs_step.dependOn(&cp_web_to_docs.step);
 
