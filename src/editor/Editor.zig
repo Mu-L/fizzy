@@ -1315,7 +1315,7 @@ pub fn handleNativeMenuAction(editor: *Editor, action: fizzy.backend.NativeMenuA
             Dialogs.AboutFizzy.request();
         },
         .report_bug => {
-            _ = dvui.openURL(.{ .url = "https://github.com/foxnne/fizzy/issues" });
+            _ = dvui.openURL(.{ .url = "https://github.com/fizzyedit/fizzy/issues" });
         },
     }
 }

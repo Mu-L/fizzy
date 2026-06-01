@@ -42,7 +42,68 @@ pub fn installLayoutSupported(io: std.Io) bool {
     return std.mem.indexOf(u8, buf[0..n], ".app/") != null;
 }
 
-/// Create an update manager using `FIZZY_AUTOUPDATE_URL` or the build-time repo URL.
+/// Iterates the ordered list of GitHub repo URLs to check for updates: the
+/// build-time primary (`app_repo_url`) first, then each non-empty, comma-
+/// separated entry of `app_repo_url_fallback`. Used to survive a repo move:
+/// point the primary at the new home and a fallback at the old one (where the
+/// transitional release is published) so the binary works before and after the
+/// transfer regardless of GitHub's redirects.
+const RepoUrlIterator = struct {
+    primary_done: bool = false,
+    rest: []const u8 = build_opts.app_repo_url_fallback,
+
+    fn next(self: *RepoUrlIterator) ?[]const u8 {
+        if (!self.primary_done) {
+            self.primary_done = true;
+            if (build_opts.app_repo_url.len != 0) return build_opts.app_repo_url;
+        }
+        while (self.rest.len != 0) {
+            const comma = std.mem.indexOfScalar(u8, self.rest, ',');
+            const raw = if (comma) |c| self.rest[0..c] else self.rest;
+            self.rest = if (comma) |c| self.rest[c + 1 ..] else self.rest[self.rest.len..];
+            const item = std.mem.trim(u8, raw, " \t");
+            if (item.len != 0) return item;
+        }
+        return null;
+    }
+};
+
+/// True when at least one non-empty fallback repo URL is configured.
+fn hasFallbackUrl() bool {
+    var it = RepoUrlIterator{ .primary_done = true };
+    return it.next() != null;
+}
+
+/// Create a Velopack update manager backed by a GitHub release source at `url`.
+fn openGithubManager(allocator: std.mem.Allocator, url: []const u8) error{OutOfMemory}!?*anyopaque {
+    if (!impl) return null;
+    if (url.len == 0) return null;
+
+    const repo_url_z = try allocator.dupeZ(u8, url);
+    defer allocator.free(repo_url_z);
+
+    const source: ?*Vpk.vpkc_update_source_t = Vpk.vpkc_new_source_github(repo_url_z.ptr, null, false);
+    if (source == null) {
+        logVpkError("fizzy autoupdate: vpkc_new_source_github failed");
+        return null;
+    }
+
+    var manager: ?*Vpk.vpkc_update_manager_t = null;
+    if (!Vpk.vpkc_new_update_manager_with_source(source, null, null, &manager)) {
+        Vpk.vpkc_free_source(source);
+        logVpkError("fizzy autoupdate: vpkc_new_update_manager_with_source failed");
+        return null;
+    }
+    return @ptrCast(manager.?);
+}
+
+/// Create an update manager using `FIZZY_AUTOUPDATE_URL`, or the build-time repo
+/// URL(s). When one or more fallback repos are configured, each candidate is
+/// probed in order and the manager for the first repo reporting an available
+/// update is returned; if none has an update, the first reachable repo's manager
+/// is returned so callers still see a "no update" result. Callers re-run
+/// `vpkc_check_for_updates` on the returned manager (cheap, and the winning repo
+/// will report the same available update) to download and apply.
 pub fn openUpdateManager(io: std.Io, allocator: std.mem.Allocator) error{OutOfMemory}!?*anyopaque {
     if (!impl) return null;
     if (!installLayoutSupported(io)) return null;
@@ -60,24 +121,46 @@ pub fn openUpdateManager(io: std.Io, allocator: std.mem.Allocator) error{OutOfMe
         return @ptrCast(manager.?);
     }
 
-    if (build_opts.app_repo_url.len == 0) return null;
-
-    const repo_url_z = try allocator.dupeZ(u8, build_opts.app_repo_url);
-    defer allocator.free(repo_url_z);
-
-    const source: ?*Vpk.vpkc_update_source_t = Vpk.vpkc_new_source_github(repo_url_z.ptr, null, false);
-    if (source == null) {
-        logVpkError("fizzy autoupdate: vpkc_new_source_github failed");
-        return null;
+    // Fast path: no fallback configured — single source, no extra probe (the
+    // caller's own check is the only network round-trip), matching the original
+    // behavior exactly.
+    if (!hasFallbackUrl()) {
+        return openGithubManager(allocator, build_opts.app_repo_url);
     }
 
-    var manager: ?*Vpk.vpkc_update_manager_t = null;
-    if (!Vpk.vpkc_new_update_manager_with_source(source, null, null, &manager)) {
-        Vpk.vpkc_free_source(source);
-        logVpkError("fizzy autoupdate: vpkc_new_update_manager_with_source failed");
-        return null;
+    // Fallback(s) present: probe each candidate and return the manager for the
+    // first repo with an available update, else the first reachable repo.
+    var first_reachable: ?*anyopaque = null;
+    var it = RepoUrlIterator{};
+    while (it.next()) |url| {
+        const mgr = (try openGithubManager(allocator, url)) orelse continue;
+
+        var update_info: ?*Vpk.vpkc_update_info_t = null;
+        const result = Vpk.vpkc_check_for_updates(castManager(mgr), &update_info);
+        if (update_info) |info| Vpk.vpkc_free_update_info(info);
+
+        switch (result) {
+            Vpk.UPDATE_AVAILABLE => {
+                std.log.info("fizzy autoupdate: update available at {s}", .{url});
+                if (first_reachable) |fr| freeUpdateManager(fr);
+                return mgr;
+            },
+            Vpk.NO_UPDATE_AVAILABLE, Vpk.REMOTE_IS_EMPTY => {
+                // Reachable but nothing newer; remember the first such repo so a
+                // genuine "you're up to date" can still be reported.
+                if (first_reachable == null) {
+                    first_reachable = mgr;
+                } else {
+                    freeUpdateManager(mgr);
+                }
+            },
+            else => {
+                logVpkError("fizzy autoupdate: check failed during repo probe");
+                freeUpdateManager(mgr);
+            },
+        }
     }
-    return @ptrCast(manager.?);
+    return first_reachable;
 }
 
 pub fn freeUpdateManager(m: ?*anyopaque) void {

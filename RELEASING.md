@@ -32,10 +32,16 @@ only for one-off experiments — don't release with a mismatched VERSION file.
 ## How auto-update works
 
 The Velopack runtime in each binary calls the GitHub Releases API on the URL
-baked in at build time (`-Drepo-url`, default `https://github.com/foxnne/fizzy`).
+baked in at build time (`-Drepo-url`, default `https://github.com/fizzyedit/fizzy`).
 It looks at the latest non-prerelease release for assets matching its own
 channel and downloads the `*-<channel>-full.nupkg`. The `releases.<channel>.json`
 manifest tells it which nupkg is current.
+
+A binary may also be built with one or more fallback repos
+(`-Drepo-url-fallback`, comma-separated, empty by default). When set, each repo
+is probed in order — primary first — and the first one with a newer release
+wins; if none has an update, the first reachable repo reports "up to date". This
+exists to survive a repo move (see "Migrating the repo" below).
 
 For this to work, **three files per channel** must be present on the release:
 

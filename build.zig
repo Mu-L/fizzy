@@ -197,7 +197,14 @@ pub fn build(b: *std.Build) !void {
     // the latest release via the GitHub Releases API. Override at build time
     // with `-Drepo-url=...` (e.g. when shipping a fork). At runtime, the env
     // var `FIZZY_AUTOUPDATE_URL` still overrides this for local feed testing.
-    const app_repo_url = b.option([]const u8, "repo-url", "GitHub repo URL used by Velopack auto-update (e.g. https://github.com/foxnne/fizzy)") orelse "https://github.com/foxnne/fizzy";
+    const app_repo_url = b.option([]const u8, "repo-url", "GitHub repo URL used by Velopack auto-update (e.g. https://github.com/fizzyedit/fizzy)") orelse "https://github.com/fizzyedit/fizzy";
+
+    // Comma-separated fallback repo URLs checked (in order) after `app_repo_url`
+    // yields no update. Lets a build survive a repo move/rename: ship a binary
+    // whose primary points at the new home and whose fallback points at the old
+    // one (where the transitional release is published), then transfer the repo.
+    // Empty by default (no fallback).
+    const app_repo_url_fallback = b.option([]const u8, "repo-url-fallback", "Comma-separated fallback GitHub repo URLs for Velopack auto-update, tried after -Drepo-url") orelse "";
 
     var version_owned: ?[]u8 = null;
     defer if (version_owned) |buf| b.allocator.free(buf);
@@ -211,6 +218,7 @@ pub fn build(b: *std.Build) !void {
     const build_opts = b.addOptions();
     build_opts.addOption([]const u8, "app_version", app_version);
     build_opts.addOption([]const u8, "app_repo_url", app_repo_url);
+    build_opts.addOption([]const u8, "app_repo_url_fallback", app_repo_url_fallback);
     build_opts.addOption(bool, "velopack_enabled", velopack_enabled);
 
     const step = b.step("update", "update git dependencies");
@@ -444,6 +452,7 @@ pub fn build(b: *std.Build) !void {
         const pack_opts = b.addOptions();
         pack_opts.addOption([]const u8, "app_version", app_version);
         pack_opts.addOption([]const u8, "app_repo_url", app_repo_url);
+        pack_opts.addOption([]const u8, "app_repo_url_fallback", app_repo_url_fallback);
         pack_opts.addOption(bool, "velopack_enabled", true);
         const pack_fizzy = try addFizzyExecutableForTarget(b, target, optimize, accesskit, pack_opts, zip_pkg, assets_module, process_assets_step, macos_sdl_paths, true);
         break :package_blk pack_fizzy.exe;

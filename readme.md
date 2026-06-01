@@ -3,7 +3,7 @@
   <img width="20%" src="assets/icon.png" alt="Fizzy logo">
 </p>
 
-![buildworkflow](https://github.com/foxnne/fizzy/actions/workflows/ci.yml/badge.svg)
+![buildworkflow](https://github.com/fizzyedit/fizzy/actions/workflows/ci.yml/badge.svg)
 
 # 
 **Fizzy** is a cross-platform open-source pixel art editor and animation editor written in [Zig](https://github.com/ziglang/zig).
@@ -12,7 +12,7 @@
 
 ### Downloads are available [here](https://fizzyed.it)
 
-#### Check out the [user guide](https://github.com/foxnne/fizzy/wiki/User-Guide)!
+#### Check out the [user guide](https://github.com/fizzyedit/fizzy/wiki/User-Guide)!
 
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/R5R4LL2PJ)
@@ -41,7 +41,7 @@
 - Install zig 0.16.0.
 - Clone fizzy.
 - Build.
-    - ```git clone https://github.com/foxnne/fizzy.git```
+    - ```git clone https://github.com/fizzyedit/fizzy.git```
     - ```cd fizzy```
     - ```zig build run```
 

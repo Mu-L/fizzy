@@ -350,7 +350,7 @@ pub fn draw() !dvui.App.Result {
         _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
         if (menuItem(@src(), "Report Bug…", .{}, .{ .expand = .horizontal }) != null) {
-            _ = dvui.openURL(.{ .url = "https://github.com/foxnne/fizzy/issues" });
+            _ = dvui.openURL(.{ .url = "https://github.com/fizzyedit/fizzy/issues" });
             fw.close();
         }
     }
