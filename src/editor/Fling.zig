@@ -65,7 +65,10 @@ pub fn sample(self: *Fling, frame_delta: f32) void {
 /// caller can settle immediately. Always clears the drag velocity estimate.
 pub fn release(self: *Fling, t: Tuning) bool {
     const idle_s: f32 = @floatCast(@as(f64, @floatFromInt(dvui.frameTimeNS() - self.last_drag_ns)) / 1_000_000_000.0);
-    self.coasting = idle_s <= t.idle_s and @abs(self.drag_vel) > t.min_start;
+    const vel = @abs(self.drag_vel);
+    // Touch browsers often drop the last motion event before release; still coast fast flicks.
+    const fast_flick = vel > t.min_start * 4;
+    self.coasting = vel > t.min_start and (idle_s <= t.idle_s or fast_flick);
     if (self.coasting) self.vel = std.math.clamp(self.drag_vel, -t.max, t.max);
     self.drag_vel = 0.0;
     return self.coasting;

@@ -219,7 +219,6 @@ pub fn draw(self: *Sprites) !void {
             if (!self.fling.coasting) {
                 const snapped: i64 = @intFromFloat(@round(self.scroll_pos));
                 self.goal = @floatFromInt(snapped);
-                self.commitVirtualCenter(file, mode, wrapIndex(snapped, count));
             }
             dvui.refresh(null, @src(), dvui.parentGet().data().id);
         } else {
@@ -277,7 +276,9 @@ pub fn draw(self: *Sprites) !void {
             const fit = @as(i64, @intFromFloat(flat_zone)) + 1 + @as(i64, @intFromFloat(extra));
             break :blk std.math.clamp(fit, 1, max_window);
         };
-        const center_i: i64 = @intFromFloat(@round(self.scroll_pos));
+        // Floor (not round) so the focused slot doesn't swap at half-integers while
+        // scroll_pos eases toward goal after a slow release.
+        const center_i: i64 = @intFromFloat(@floor(self.scroll_pos));
 
         // `slot` is the unwrapped position (so `off` and the skew stay continuous);
         // `idx` is the wrapped sprite it shows; `id` is a per-slot widget id so
@@ -771,9 +772,7 @@ fn handleInput(self: *Sprites, file: anytype, mode: ScrollMode, count: usize, px
         } else if (!self.fling.release(sprite_fling)) {
             const snapped: i64 = @intFromFloat(@round(self.scroll_pos));
             self.goal = @floatFromInt(snapped);
-            if (mode != .all_passive) {
-                self.commitVirtualCenter(file, mode, wrapIndex(snapped, count));
-            }
+            dvui.refresh(null, @src(), id);
         }
     }
 }

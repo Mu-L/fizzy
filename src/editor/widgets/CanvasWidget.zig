@@ -127,6 +127,12 @@ touch_eval_button: dvui.enums.Button = .touch0,
 touch_eval_press_p: dvui.Point.Physical = .{},
 touch_eval_released: bool = false,
 touch_eval_release_p: dvui.Point.Physical = .{},
+touch_eval_last_p: dvui.Point.Physical = .{},
+/// Off-artboard pan promoted from the touch-eval window (finger left the artboard while eval was active).
+touch_eval_pan_active: bool = false,
+/// Touch slot driving an empty-area scroll pan (for release / cancel when the browser drops events).
+scroll_pan_touch_slot: ?u8 = null,
+scroll_pan_end_pending: bool = false,
 
 // Momentum for the drag-pan (middle button, or a left/touch drag starting off the
 // artboard). One coast per axis so a flick keeps gliding after release; see Fling.
@@ -174,10 +180,10 @@ const touch_eval_duration_ns: i128 = 80 * std.time.ns_per_ms;
 /// units `scroll_info.viewport.x/y` move in — so the feel scales naturally with zoom.
 const pan_fling: fizzy.Fling.Tuning = .{
     .decay = 4.0,
-    .min_start = 50.0,
+    .min_start = 40.0,
     .stop = 10.0,
     .max = 8000.0,
-    .idle_s = 0.08,
+    .idle_s = 0.18,
 };
 
 /// True while a 2-finger pan/pinch is in progress, or while we're still deciding whether
@@ -186,6 +192,46 @@ const pan_fling: fizzy.Fling.Tuning = .{
 /// to become a pan.
 pub fn gestureActive(self: *const CanvasWidget) bool {
     return self.gesture_active or self.touch_eval_active;
+}
+
+fn emptyPanDragThreshold() f32 {
+    return dvui.Dragging.threshold * dvui.currentWindow().natural_scale;
+}
+
+fn viewportPanDeltaFromPhysical(self: *const CanvasWidget, dp: dvui.Point.Physical) dvui.Point.Physical {
+    const rs = self.scroll_rect_scale;
+    if (rs.s <= 0) return .{};
+    return .{ .x = -dp.x / rs.s, .y = -dp.y / rs.s };
+}
+
+fn promoteTouchEvalToEmptyPan(self: *CanvasWidget, slot: usize, p: dvui.Point.Physical) void {
+    self.touch_eval_active = false;
+    self.touch_eval_pan_active = true;
+    self.scroll_pan_touch_slot = @intCast(slot);
+    self.tap_moved = true;
+    self.tap_gesture = false;
+    self.tap_press_down = false;
+    if (dvui.captured(self.scaler.data().id)) {
+        dvui.captureMouse(null, 0);
+    }
+    const dp = p.diff(self.touch_eval_last_p);
+    if (dp.x != 0 or dp.y != 0) {
+        const vd = self.viewportPanDeltaFromPhysical(dp);
+        self.pending_touch_pan.x += vd.x;
+        self.pending_touch_pan.y += vd.y;
+    }
+    self.touch_eval_last_p = p;
+    dvui.refresh(null, @src(), self.scroll_container.data().id);
+}
+
+fn noteScrollPanTouchEnd(self: *CanvasWidget, slot: usize) void {
+    if (self.scroll_pan_touch_slot) |s| {
+        if (s == slot) self.scroll_pan_end_pending = true;
+    }
+    if (self.touch_eval_pan_active and self.touch_eval_slot == slot) {
+        self.scroll_pan_end_pending = true;
+        self.touch_eval_pan_active = false;
+    }
 }
 
 /// True for a brief window after the most recent macOS trackpad pinch event. The window
@@ -490,6 +536,14 @@ pub fn updateTouchGesture(self: *CanvasWidget) void {
                     // is discarded; we never replay the original press.
                     self.gesture_active = true;
                     self.touch_eval_active = false;
+                    self.touch_eval_pan_active = false;
+                    if (dvui.captured(self.scroll_container.data().id)) {
+                        dvui.captureMouse(null, e.num);
+                        dvui.dragEnd();
+                        self.pan_fling_x.cancel();
+                        self.pan_fling_y.cancel();
+                        self.scroll_pan_touch_slot = null;
+                    }
                     self.last_centroid = self.touchCentroid();
                     self.last_pinch = self.touchPinchDistance();
                     dvui.captureMouse(self.scaler.data(), e.num);
@@ -501,15 +555,19 @@ pub fn updateTouchGesture(self: *CanvasWidget) void {
                     // delta on the next motion event.
                     self.last_centroid = self.touchCentroid();
                     self.last_pinch = self.touchPinchDistance();
-                } else if (!self.touch_eval_active and self.activeTouchCount() == 1) {
-                    // First (and so far only) finger — start the wait window.
-                    self.touch_eval_active = true;
-                    self.touch_eval_started_ns = dvui.currentWindow().frame_time_ns;
-                    self.touch_eval_slot = @intCast(slot);
-                    self.touch_eval_button = me.button;
-                    self.touch_eval_press_p = me.p;
-                    self.touch_eval_released = false;
-                    dvui.captureMouse(self.scaler.data(), e.num);
+                } else if (!self.touch_eval_active and !self.touch_eval_pan_active and self.activeTouchCount() == 1) {
+                    // First finger on the artboard: short wait for a possible second finger.
+                    // Off-artboard presses skip eval so empty-area pan + flick work immediately.
+                    if (self.pointerOverDrawable(me.p)) {
+                        self.touch_eval_active = true;
+                        self.touch_eval_started_ns = dvui.currentWindow().frame_time_ns;
+                        self.touch_eval_slot = @intCast(slot);
+                        self.touch_eval_button = me.button;
+                        self.touch_eval_press_p = me.p;
+                        self.touch_eval_last_p = me.p;
+                        self.touch_eval_released = false;
+                        dvui.captureMouse(self.scaler.data(), e.num);
+                    }
                 }
                 if (self.gesture_active or self.touch_eval_active) {
                     e.handle(@src(), self.scaler.data());
@@ -517,6 +575,7 @@ pub fn updateTouchGesture(self: *CanvasWidget) void {
             },
             .release => {
                 if (self.touches[slot].active) self.touches[slot].active = false;
+                self.noteScrollPanTouchEnd(slot);
 
                 if (self.touch_eval_active and slot == @as(usize, self.touch_eval_slot)) {
                     // User lifted before the eval window elapsed. Record it so the replay
@@ -545,12 +604,31 @@ pub fn updateTouchGesture(self: *CanvasWidget) void {
                 if (self.touches[slot].active) {
                     self.touches[slot].p = me.p;
                 }
-                if (self.touch_eval_active and slot == @as(usize, self.touch_eval_slot)) {
+                if (self.touch_eval_pan_active and self.scroll_pan_touch_slot == @as(u8, @intCast(slot))) {
+                    const dp = me.p.diff(self.touch_eval_last_p);
+                    if (dp.x != 0 or dp.y != 0) {
+                        const vd = self.viewportPanDeltaFromPhysical(dp);
+                        self.pending_touch_pan.x += vd.x;
+                        self.pending_touch_pan.y += vd.y;
+                        self.touch_eval_last_p = me.p;
+                        dvui.refresh(null, @src(), self.scroll_container.data().id);
+                    }
+                    e.handle(@src(), self.scaler.data());
+                } else if (self.touch_eval_active and slot == @as(usize, self.touch_eval_slot)) {
                     // Swallow motion during eval so the scroll container's touch-pan and the
                     // drawing tools' previews don't run on a touch that might still become a
                     // gesture. The latest position is used as the release point if the user
                     // lifts mid-window.
                     self.touch_eval_release_p = me.p;
+                    const dist = me.p.diff(self.touch_eval_press_p);
+                    const th = emptyPanDragThreshold();
+                    if (!self.pointerOverDrawable(me.p) and
+                        (@abs(dist.x) > th or @abs(dist.y) > th))
+                    {
+                        self.promoteTouchEvalToEmptyPan(slot, me.p);
+                    } else {
+                        self.touch_eval_last_p = me.p;
+                    }
                     e.handle(@src(), self.scaler.data());
                 }
                 if (self.gesture_active) {
@@ -580,6 +658,12 @@ pub fn updateTouchGesture(self: *CanvasWidget) void {
                 }
             },
             else => {},
+        }
+    }
+
+    if (self.scroll_pan_touch_slot) |slot| {
+        if (!self.touches[slot].active) {
+            self.noteScrollPanTouchEnd(slot);
         }
     }
 
@@ -857,9 +941,22 @@ pub fn processEvents(self: *CanvasWidget) void {
         self.pending_trackpad = false;
     }
     if (self.pending_touch_pan.x != 0 or self.pending_touch_pan.y != 0) {
-        self.scroll_info.viewport.x += self.pending_touch_pan.x;
-        self.scroll_info.viewport.y += self.pending_touch_pan.y;
+        const pdx = self.pending_touch_pan.x;
+        const pdy = self.pending_touch_pan.y;
+        self.scroll_info.viewport.x += pdx;
+        self.scroll_info.viewport.y += pdy;
+        if (self.touch_eval_pan_active or self.scroll_pan_touch_slot != null) {
+            self.pan_fling_x.sample(pdx);
+            self.pan_fling_y.sample(pdy);
+        }
         self.pending_touch_pan = .{};
+    }
+
+    if (self.touch_eval_pan_active and !dvui.captured(self.scroll_container.data().id)) {
+        dvui.captureMouse(self.scroll_container.data(), 0);
+        dvui.dragPreStart(self.touch_eval_press_p, .{ .name = "scroll_drag", .cursor = .hand });
+        self.pan_fling_x.begin();
+        self.pan_fling_y.begin();
     }
 
     if (self.pointerInputSuppressed()) {
@@ -886,6 +983,18 @@ pub fn processEvents(self: *CanvasWidget) void {
     var pan_dy: f32 = 0;
     var pan_motion = false;
     var pan_released = false;
+
+    if (self.scroll_pan_end_pending) {
+        const scroll_id = self.scroll_container.data().id;
+        if (dvui.captured(scroll_id) or dvui.dragging(dvui.currentWindow().mouse_pt, "scroll_drag") != null) {
+            dvui.captureMouse(null, 0);
+            dvui.dragEnd();
+            pan_released = true;
+        }
+        self.scroll_pan_end_pending = false;
+        self.scroll_pan_touch_slot = null;
+        self.touch_eval_pan_active = false;
+    }
 
     // Suppress DVUI's built-in single-touch auto-pan inside the canvas. By this point in the
     // frame the drawing tools have already consumed any single-finger touches, and the scroll
@@ -932,6 +1041,12 @@ pub fn processEvents(self: *CanvasWidget) void {
                     dvui.dragPreStart(me.p, .{ .name = "scroll_drag", .cursor = .hand });
                     self.pan_fling_x.begin();
                     self.pan_fling_y.begin();
+                    if (me.button.touch()) {
+                        const slot_signed = @intFromEnum(me.button) - @intFromEnum(dvui.enums.Button.touch0);
+                        if (slot_signed >= 0 and slot_signed < self.touches.len) {
+                            self.scroll_pan_touch_slot = @intCast(slot_signed);
+                        }
+                    }
                     // A non-middle (left/touch) off-artboard press may still become a tap
                     // or a hold — arm the gesture so the release/hold logic can resolve it.
                     // Skip while the touch-eval window owns the finger (web): capture often
@@ -947,11 +1062,15 @@ pub fn processEvents(self: *CanvasWidget) void {
                 } else if (me.action == .release and (me.button == .middle or me.button.pointer())) {
                     const had_tap = self.tap_gesture;
                     self.tap_press_down = false;
-                    if (dvui.captured(self.scroll_container.data().id)) {
+                    const scroll_captured = dvui.captured(self.scroll_container.data().id);
+                    const scroll_dragging = dvui.dragging(me.p, "scroll_drag") != null;
+                    if (scroll_captured or scroll_dragging) {
                         e.handle(@src(), self.scroll_container.data());
                         dvui.captureMouse(null, e.num);
                         dvui.dragEnd();
                         pan_released = true;
+                        self.scroll_pan_touch_slot = null;
+                        self.touch_eval_pan_active = false;
                     }
                     // Quick tap on empty space clears selection even when capture stayed on
                     // the scaler during touch-eval (common on web).
