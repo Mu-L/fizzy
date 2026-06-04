@@ -1025,9 +1025,14 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             for (dvui.events()) |*e| {
                 if (e.evt != .mouse) continue;
                 const me = e.evt.mouse;
-                if (me.action == .press and me.button.touch()) {
-                    editor.last_touch_press_ns = dvui.currentWindow().frame_time_ns;
-                    break;
+                switch (me.action) {
+                    .press => if (me.button.touch()) {
+                        editor.last_touch_press_ns = dvui.currentWindow().frame_time_ns;
+                    },
+                    .release => if (me.button.touch()) {
+                        editor.last_touch_press_ns = null;
+                    },
+                    else => {},
                 }
             }
             if (editor.last_touch_press_ns) |press_ns| {

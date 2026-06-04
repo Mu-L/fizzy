@@ -152,10 +152,16 @@ pending_trackpad: bool = false,
 // context-menu hold duration — opens the radial tool menu. Middle-button pans never
 // arm this, so they stay pan-only.
 tap_gesture: bool = false,
+/// True only while the off-artboard press is still down (cleared on release). Hold-to-open
+/// requires this stay true for the full hold duration — not merely capture/touch slots.
+tap_press_down: bool = false,
 tap_press_p: dvui.Point.Physical = .{},
 tap_press_ns: i128 = 0,
 tap_moved: bool = false,
 tap_radial: bool = false,
+/// Set when touch-eval replays a quick off-artboard tap so the synthetic press must not
+/// re-arm hold-to-open in the same frame.
+suppress_empty_tap_arm: bool = false,
 
 const TouchSlot = struct {
     active: bool = false,
@@ -595,6 +601,13 @@ pub fn updateTouchGesture(self: *CanvasWidget) void {
                 dvui.captureMouse(null, 0);
             }
 
+            // Quick off-artboard tap: finger lifted during the eval window. Resolve as
+            // clear-selection here so we never arm hold state from the replayed press.
+            if (released and !self.pointerOverDrawable(press_p)) {
+                fizzy.editor.cancel() catch {};
+                self.suppress_empty_tap_arm = true;
+            }
+
             // `addEventPointer` uses `win.mouse_pt` for the event position. Push the press
             // point first, fire the synthetic press, then do the same for the release.
             win.mouse_pt = press_p;
@@ -807,6 +820,9 @@ fn pointerInputSuppressed(self: *const CanvasWidget) bool {
 }
 
 pub fn processEvents(self: *CanvasWidget) void {
+    const suppress_empty_tap_arm = self.suppress_empty_tap_arm;
+    self.suppress_empty_tap_arm = false;
+
     // Apply pinch / two-finger pan deferred from this frame's `updateTouchGesture`.
     // We do it at end-of-frame so the body above rendered with stable widget state
     // (matching wheel zoom). The mutations land on `scale` / `scroll_info.viewport`,
@@ -854,6 +870,7 @@ pub fn processEvents(self: *CanvasWidget) void {
         // up; its release/close is handled in Editor.drawRadialMenu, so just drop our
         // pending gesture state here.
         self.tap_gesture = false;
+        self.tap_press_down = false;
         self.tap_radial = false;
         return;
     }
@@ -919,8 +936,9 @@ pub fn processEvents(self: *CanvasWidget) void {
                     // or a hold — arm the gesture so the release/hold logic can resolve it.
                     // Skip while the touch-eval window owns the finger (web): capture often
                     // stays on the scaler, so we must not leave `tap_gesture` latched after lift.
-                    if (me.button != .middle and !self.touch_eval_active and !self.gesture_active) {
+                    if (me.button != .middle and !self.touch_eval_active and !self.gesture_active and !suppress_empty_tap_arm) {
                         self.tap_gesture = true;
+                        self.tap_press_down = true;
                         self.tap_press_p = me.p;
                         self.tap_press_ns = dvui.frameTimeNS();
                         self.tap_moved = false;
@@ -928,6 +946,7 @@ pub fn processEvents(self: *CanvasWidget) void {
                     }
                 } else if (me.action == .release and (me.button == .middle or me.button.pointer())) {
                     const had_tap = self.tap_gesture;
+                    self.tap_press_down = false;
                     if (dvui.captured(self.scroll_container.data().id)) {
                         e.handle(@src(), self.scroll_container.data());
                         dvui.captureMouse(null, e.num);
@@ -1016,8 +1035,11 @@ pub fn processEvents(self: *CanvasWidget) void {
     // as the tools-menu color button). Hand the press over to the menu by releasing
     // our capture so its buttons can be hovered; Editor keeps it open until a tool
     // is chosen or the user clicks outside the menu. ----
-    const tap_still_held = dvui.captured(self.scroll_container.data().id) or self.activeTouchCount() > 0;
-    if (self.tap_gesture and !self.tap_moved and !self.tap_radial and tap_still_held) {
+    if (self.tap_gesture and !self.tap_press_down) {
+        self.tap_gesture = false;
+    }
+
+    if (self.tap_gesture and self.tap_press_down and !self.tap_moved and !self.tap_radial) {
         if (dvui.frameTimeNS() - self.tap_press_ns >= dvui.currentWindow().hold_menu_duration_ns) {
             fizzy.editor.tools.radial_menu.mouse_position = self.tap_press_p;
             fizzy.editor.tools.radial_menu.center = self.tap_press_p;
@@ -1026,14 +1048,17 @@ pub fn processEvents(self: *CanvasWidget) void {
             fizzy.editor.tools.radial_menu.suppress_next_pointer_release = true;
             fizzy.editor.tools.radial_menu.outside_click_press_p = null;
             self.tap_radial = true;
+            self.tap_press_down = false;
+            self.tap_gesture = false;
             if (dvui.captured(self.scroll_container.data().id)) {
                 dvui.captureMouse(null, 0);
                 dvui.dragEnd();
             }
             self.pan_fling_x.cancel();
             self.pan_fling_y.cancel();
+        } else {
+            dvui.refresh(null, @src(), self.scroll_container.data().id);
         }
-        dvui.refresh(null, @src(), self.scroll_container.data().id);
     }
 
     // scale around mouse point
