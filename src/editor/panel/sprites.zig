@@ -17,15 +17,21 @@ const sprite_fling: fizzy.Fling.Tuning = .{
     .max = 50.0,
     .idle_s = 0.08,
 };
-/// Touch scrub: browsers often omit the last move before `touchend`, so allow a longer
-/// idle gap and a lower start speed.
+/// Touch scrub: a finger flick is short and bursty, so start coasting at a lower
+/// speed and tolerate the small gap the browser leaves before `touchend`. Velocity is
+/// measured over a position/time window (`releaseWindowed`) rather than the last frame.
 const sprite_fling_touch: fizzy.Fling.Tuning = .{
     .decay = 4.0,
     .min_start = 0.6,
     .stop = 0.6,
     .max = 50.0,
-    .idle_s = 0.28,
+    .idle_s = 0.2,
 };
+/// Window the touch release velocity is averaged over (s).
+const sprite_fling_touch_window_s: f32 = 0.1;
+/// Draw an on-screen readout of the last touch fling decision (velocity / idle / coast)
+/// so the touch-only momentum can be tuned on a real device. Set false to hide.
+const debug_touch_fling = true;
 
 // Animated fit-scale state (shared, like a singleton preview).
 var prev_scale: f32 = 1.0;
@@ -200,6 +206,17 @@ pub fn draw(self: *Sprites) !void {
 
         // ---- User input (wheel / drag) may override the flow and the selection. ----
         self.handleInput(file, mode, count, front_gap, flown);
+
+        if (debug_touch_fling) {
+            const d = self.fling.last_debug;
+            dvui.label(@src(), "touch fling: vel {d:.2}  idle {d:.3}s  dt {d:.3}s  n {d}  coast {}", .{
+                d.vel, d.idle_s, d.dt, d.samples, d.coasted,
+            }, .{
+                .color_text = dvui.themeGet().color(.content, .text),
+                .background = true,
+                .color_fill = dvui.themeGet().color(.window, .fill),
+            });
+        }
 
         // An external selection change (clicking a sprite, picking an animation,
         // playback advancing a frame) retargets the flow. Pick the wrapped
@@ -776,23 +793,36 @@ fn handleInput(self: *Sprites, file: anytype, mode: ScrollMode, count: usize, px
     }
 
     if (!snap_scroll) {
-        if (frame_dx != 0) self.last_drag_frame_dx = frame_dx;
-        // Sample the flick velocity once per frame the drag moved.
-        if (self.drag_active) self.fling.sample(frame_dx);
+        if (self.drag_was_touch) {
+            // Touch path: record movement into the position/time history and, on
+            // release, coast from a windowed velocity. Kept fully separate from the
+            // mouse/trackpad path below so it can't change that proven behavior.
+            if (self.drag_active) self.fling.sampleTimed(frame_dx);
+            if (released_moved) {
+                if (!self.fling.releaseWindowed(sprite_fling_touch, sprite_fling_touch_window_s)) {
+                    const snapped: i64 = @intFromFloat(@round(self.scroll_pos));
+                    self.goal = @floatFromInt(snapped);
+                    dvui.refresh(null, @src(), id);
+                }
+            }
+        } else {
+            if (frame_dx != 0) self.last_drag_frame_dx = frame_dx;
+            // Sample the flick velocity once per frame the drag moved.
+            if (self.drag_active) self.fling.sample(frame_dx);
 
-        // On release, coast with the built-up velocity — unless the pointer had paused
-        // or barely moved, in which case ease to the nearest sprite.
-        if (released_moved) {
-            // Touch often lifts without a move on the same frame; re-sample the last
-            // delta so `release` sees fresh velocity and near-zero idle time.
-            const release_dx = if (frame_dx != 0) frame_dx else self.last_drag_frame_dx;
-            if (release_dx != 0) self.fling.sample(release_dx);
+            // On release, coast with the built-up velocity — unless the pointer had
+            // paused or barely moved, in which case ease to the nearest sprite.
+            if (released_moved) {
+                // Touch often lifts without a move on the same frame; re-sample the
+                // last delta so `release` sees fresh velocity and near-zero idle time.
+                const release_dx = if (frame_dx != 0) frame_dx else self.last_drag_frame_dx;
+                if (release_dx != 0) self.fling.sample(release_dx);
 
-            const fling_tuning = if (self.drag_was_touch) sprite_fling_touch else sprite_fling;
-            if (!self.fling.release(fling_tuning)) {
-                const snapped: i64 = @intFromFloat(@round(self.scroll_pos));
-                self.goal = @floatFromInt(snapped);
-                dvui.refresh(null, @src(), id);
+                if (!self.fling.release(sprite_fling)) {
+                    const snapped: i64 = @intFromFloat(@round(self.scroll_pos));
+                    self.goal = @floatFromInt(snapped);
+                    dvui.refresh(null, @src(), id);
+                }
             }
         }
     } else if (released_moved) {
