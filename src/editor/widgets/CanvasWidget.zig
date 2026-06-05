@@ -1040,7 +1040,18 @@ pub fn processEvents(self: *CanvasWidget) void {
                 // Pan the canvas on a middle-button drag, or on a left/touch drag
                 // that starts in the empty scroll area (not over the artboard) —
                 // same scrub-the-viewport feel as the middle-button pan.
-                if (me.action == .press and (me.button == .middle or (me.button.pointer() and !self.pointerOverDrawable(me.p)))) {
+                //
+                // Exception: a left/touch off-artboard press holding ctrl/cmd (add)
+                // or shift (subtract) while the pointer tool is active belongs to the
+                // sprite-selection marquee — it already claimed the press earlier in
+                // FileWidget.processSpriteSelection. Yielding it here keeps our
+                // `dragPreStart("scroll_drag")` from clobbering the marquee's drag, so
+                // the hotkey draws a selection box instead of panning. Middle-button
+                // pans are never affected.
+                const sel_marquee_press = me.button.pointer() and me.button != .middle and
+                    (me.mod.matchBind("ctrl/cmd") or me.mod.matchBind("shift")) and
+                    fizzy.editor.tools.current == .pointer;
+                if (me.action == .press and !sel_marquee_press and (me.button == .middle or (me.button.pointer() and !self.pointerOverDrawable(me.p)))) {
                     e.handle(@src(), self.scroll_container.data());
                     dvui.captureMouse(self.scroll_container.data(), e.num);
                     dvui.dragPreStart(me.p, .{ .name = "scroll_drag", .cursor = .hand });

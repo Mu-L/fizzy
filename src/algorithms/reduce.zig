@@ -20,6 +20,7 @@
 //!    anchor lands on the same pixel before/after the reduce.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Integer-pixel rect. Distinct from dvui.Rect (which is f32) so this module stays std-only.
 pub const Rect = struct {
@@ -33,6 +34,29 @@ pub const Rect = struct {
 /// throughout the editor (drawing tools clear alpha-zero pixels rather than touching alpha).
 inline fn isOpaque(p: [4]u8) bool {
     return p[3] != 0;
+}
+
+/// True if any pixel in the contiguous `pixels` is opaque (alpha byte != 0).
+///
+/// Vectorized: each RGBA pixel bitcasts to one `u32`, so it ORs the alpha bytes of
+/// `vec_len` pixels per step and bails on the first opaque chunk
+pub fn anyOpaque(pixels: []const [4]u8) bool {
+    var i: usize = 0;
+    if (std.simd.suggestVectorLength(u32)) |vec_len| {
+        const V = @Vector(vec_len, u32);
+        // Alpha is byte 3 of each pixel: the high byte of the u32 on little-endian
+        // targets, the low byte on big-endian.
+        const alpha_mask: V = @splat(switch (builtin.cpu.arch.endian()) {
+            .little => 0xFF00_0000,
+            .big => 0x0000_00FF,
+        });
+        while (i + vec_len <= pixels.len) : (i += vec_len) {
+            const chunk: V = @bitCast(pixels[i..][0..vec_len].*);
+            if (@reduce(.Or, chunk & alpha_mask) != 0) return true;
+        }
+    }
+    while (i < pixels.len) : (i += 1) if (isOpaque(pixels[i])) return true;
+    return false;
 }
 
 /// Tighten `src` to the smallest sub-rect of `pixels` (laid out row-major, `layer_width` wide and
@@ -66,7 +90,7 @@ pub fn reduce(
     top: while (top <= bottom) : (top += 1) {
         const row_start: usize = @as(usize, left) + @as(usize, top) * layer_width;
         const row = pixels[row_start .. row_start + (right - left + 1)];
-        for (row) |p| if (isOpaque(p)) break :top;
+        if (anyOpaque(row)) break :top;
     }
     if (top > bottom) return null;
 
@@ -74,7 +98,7 @@ pub fn reduce(
     bottom: while (bottom >= top) : (bottom -= 1) {
         const row_start: usize = @as(usize, left) + @as(usize, bottom) * layer_width;
         const row = pixels[row_start .. row_start + (right - left + 1)];
-        for (row) |p| if (isOpaque(p)) break :bottom;
+        if (anyOpaque(row)) break :bottom;
         if (bottom == 0) break;
     }
 
@@ -319,6 +343,50 @@ test "reduce: returned rect's edges each touch an opaque pixel" {
     try expect(has_bot);
     try expect(has_left);
     try expect(has_right);
+}
+
+test "anyOpaque: empty slice is not opaque" {
+    const px: []const [4]u8 = &.{};
+    try expect(!anyOpaque(px));
+}
+
+test "anyOpaque: all transparent is false" {
+    var px = blankPixels(16, 16);
+    try expect(!anyOpaque(&px));
+}
+
+test "anyOpaque: alpha=0 with non-zero RGB still counts as transparent" {
+    var px = blankPixels(8, 8);
+    @memset(&px, .{ 255, 255, 255, 0 });
+    try expect(!anyOpaque(&px));
+}
+
+test "anyOpaque: a single opaque pixel anywhere is detected" {
+    // Cover positions inside the first vector chunk, on a likely chunk boundary,
+    // and in the ragged tail past the last full vector.
+    for ([_]usize{ 0, 1, 7, 8, 15, 16, 31, 63, 64, 100, 254, 255 }) |idx| {
+        var px = blankPixels(16, 16); // 256 pixels
+        px[idx] = opaque_red;
+        try expect(anyOpaque(&px));
+    }
+}
+
+test "anyOpaque: detects opaque pixel in a non-vector-multiple length (tail)" {
+    // 13 is prime — guarantees a scalar-tail remainder for any vector width.
+    var px = blankPixels(13, 1);
+    try expect(!anyOpaque(&px));
+    px[12] = opaque_red;
+    try expect(anyOpaque(&px));
+}
+
+test "anyOpaque: only the alpha byte matters (RGB ignored)" {
+    var px = blankPixels(8, 8);
+    // Opaque red has alpha 255 -> opaque.
+    px[5] = opaque_red;
+    try expect(anyOpaque(&px));
+    // Clearing alpha (but leaving RGB) makes the whole slice transparent again.
+    px[5] = .{ 255, 0, 0, 0 };
+    try expect(!anyOpaque(&px));
 }
 
 test "originAfterReduce: zero offset leaves the origin untouched" {
