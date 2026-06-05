@@ -35,6 +35,8 @@ const sprite_fling_touch: fizzy.Fling.Tuning = .{
 };
 /// Window the touch release velocity is averaged over (s).
 const sprite_fling_touch_window_s: f32 = 0.1;
+/// Upper bound on the per-frame delta fed to the passive cover-flow ease.
+const max_ease_dt: f32 = 1.0 / 30.0;
 /// Draw an on-screen readout of the last touch fling decision (velocity / idle / coast)
 /// so the touch-only momentum can be tuned on a real device. Set false to hide.
 const debug_touch_fling = false;
@@ -258,7 +260,9 @@ pub fn draw(self: *Sprites) !void {
         } else {
             const diff = self.goal - self.scroll_pos;
             if (@abs(diff) > 0.001) {
-                const dt = dvui.secondsSinceLastFrame();
+                // Clamp dt so a wake-from-idle frame (huge secondsSinceLastFrame) doesn't
+                // collapse the ease into a single-frame snap. See `max_ease_dt`.
+                const dt = @min(dvui.secondsSinceLastFrame(), max_ease_dt);
                 const t = 1.0 - @exp(-12.0 * dt);
                 self.scroll_pos += diff * t;
                 dvui.refresh(null, @src(), dvui.parentGet().data().id);
@@ -770,7 +774,14 @@ fn handleInput(self: *Sprites, file: anytype, mode: ScrollMode, count: usize, px
                 if (inside) {
                     e.handle(@src(), pane);
                     const amt = if (me.action == .wheel_x) me.action.wheel_x else me.action.wheel_y;
-                    self.wheel_accum += amt * 0.01;
+                    // A discrete mouse wheel advances one sprite per notch; a trackpad
+                    // accumulates its stream of small deltas smoothly. We can't key off the
+                    // raw magnitude: a single wheel notch is ~1.0
+                    if (dvui.mouseType() == .mouse) {
+                        self.wheel_accum += std.math.sign(amt);
+                    } else {
+                        self.wheel_accum += amt * 0.01;
+                    }
                     while (@abs(self.wheel_accum) >= 1.0) {
                         const step: f32 = if (self.wheel_accum > 0.0) 1.0 else -1.0;
                         self.wheel_accum -= step;
