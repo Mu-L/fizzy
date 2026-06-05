@@ -799,6 +799,12 @@ fn handleInput(self: *Sprites, file: anytype, mode: ScrollMode, count: usize, px
             // mouse/trackpad path below so it can't change that proven behavior.
             if (self.drag_active) self.fling.sampleTimed(frame_dx);
             if (released_moved) {
+                // A finger flick usually delivers its last `touchmove` and `touchend`
+                // on the same frame, which leaves `drag_active` set. Clear it (after
+                // sampling that final move) so draw()'s `drag_active` branch doesn't
+                // immediately cancel the coast we're about to start — that race was
+                // eating the momentum on ~half of all flicks.
+                self.drag_active = false;
                 if (!self.fling.releaseWindowed(sprite_fling_touch, sprite_fling_touch_window_s)) {
                     const snapped: i64 = @intFromFloat(@round(self.scroll_pos));
                     self.goal = @floatFromInt(snapped);
