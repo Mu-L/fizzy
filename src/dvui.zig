@@ -1325,6 +1325,43 @@ fn reflectionLagSamplePhysical(sample: ReflectionLagSample, scale: f32) Reflecti
 }
 
 /// Linear interpolation across the column strip by horizontal fraction `t_x`.
+/// Per-row reflection factors, hoisted out of the per-vertex loop. The two `pow`
+/// calls (depth lag + seam pin) depend only on the row (`t_y`), so computing them
+/// once per row instead of per vertex removes thousands of `pow` calls per frame.
+const ReflectionRow = struct {
+    low_submerge: bool,
+    lag: f32,
+    lag_mix: f32, // already × 0.55
+    submerge_scale: f32, // lerp(1, 1.25, submerge)
+    dx_pin: f32,
+};
+
+fn reflectionRowFactors(t_y: f32) ReflectionRow {
+    const submerge = 1.0 - std.math.clamp(t_y, 0, 1);
+    const seam_t = std.math.clamp(t_y, 0, 1);
+    return .{
+        .low_submerge = submerge <= 0.001,
+        .lag = std.math.pow(f32, submerge, 1.55) * 0.74,
+        .lag_mix = std.math.clamp(submerge * submerge * 0.9, 0, 1) * 0.55,
+        .submerge_scale = std.math.lerp(1.0, 1.25, submerge),
+        .dx_pin = 1.0 - std.math.pow(f32, seam_t, 4.5),
+    };
+}
+
+/// Horizontal refraction for one vertex using precomputed row factors. Equivalent
+/// to `reflectionMeshDisplacement(.x)`, just with the row-constant work hoisted.
+fn reflectionRowDx(t_x: f32, dx_seam: f32, row: ReflectionRow, sample: ReflectionLagSample) f32 {
+    // `dx_seam` (the column's refraction at the seam) is supplied precomputed — it
+    // depends only on t_x, so the caller resolves it once per column. Only the
+    // depth-lagged sample, which shifts t_x by the row's phase lag, needs an interp.
+    const t_lag = if (row.low_submerge)
+        t_x
+    else
+        std.math.clamp(t_x - (if (dx_seam >= 0) row.lag else -row.lag), 0, 1);
+    const dx_lag = if (row.low_submerge) dx_seam else interpolateReflectionCols(&sample.cols_dx, t_lag);
+    return std.math.lerp(dx_seam, dx_lag, row.lag_mix) * row.submerge_scale * row.dx_pin;
+}
+
 fn interpolateReflectionCols(cols: []const f32, t_x: f32) f32 {
     if (cols.len == 0) return 0;
     if (cols.len == 1) return cols[0];
@@ -1373,15 +1410,16 @@ fn reflectionLaggedTx(t_x: f32, cols_dx: []const f32, submerge: f32) f32 {
 }
 
 /// Reflection mesh: seam pinned at the waterline; the body carries horizontal
-/// refraction ripples (cols_dx) that grow and phase-lag with depth. cols_dy is
-/// not applied — ramping it by depth squished the mesh while the water was active.
+/// refraction ripples that phase-lag with depth. cols_dy is not applied.
 fn reflectionMeshDisplacement(t_x: f32, t_y: f32, sample: ReflectionLagSample) dvui.Point.Physical {
     const submerge = reflectionSubmergeDepth(t_y);
     const t_lag = reflectionLaggedTx(t_x, &sample.cols_dx, submerge);
     const lag_mix = std.math.clamp(submerge * submerge * 0.9, 0, 1);
 
     const seam_t = std.math.clamp(t_y, 0, 1);
-    const dx_pin = 1.0 - std.math.pow(f32, seam_t, 4.5);
+    // Peak refraction just under the card base (not mid-body / far edge); seam
+    // corners stay pinned so the base width still matches the card.
+    const dx_pin = std.math.pow(f32, seam_t, 1.4) * (1.0 - std.math.pow(f32, seam_t, 12.0));
     const dx_seam = interpolateReflectionCols(&sample.cols_dx, t_x);
     const dx_lag = interpolateReflectionCols(&sample.cols_dx, t_lag);
     const dx = std.math.lerp(dx_seam, dx_lag, lag_mix * 0.55) * std.math.lerp(1.0, 1.25, submerge) * dx_pin;
@@ -1434,6 +1472,22 @@ pub fn pathToSubdividedQuad(path: dvui.Path, allocator: std.mem.Allocator, optio
     const base_uv = options.uv orelse dvui.Rect{ .x = 0, .y = 0, .w = 1, .h = 1 };
 
     {
+        // The seam refraction for a reflection mesh depends only on the column
+        // (t_x), so precompute it once per column and reuse it down every row
+        // instead of re-interpolating cols_dx per vertex. Guarded by the buffer
+        // size; non-reflection meshes and any unusually fine mesh fall back to the
+        // inline interp below (`seam_cache` stays false).
+        var dx_seam_col: [64]f32 = undefined;
+        const seam_cache = options.reflection_lag != null and options.waterline_propagate and subdivs + 1 <= dx_seam_col.len;
+        if (seam_cache) {
+            const sample = options.reflection_lag.?;
+            var x: usize = 0;
+            while (x <= subdivs) : (x += 1) {
+                const t_x = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(subdivs));
+                dx_seam_col[x] = interpolateReflectionCols(&sample.cols_dx, t_x);
+            }
+        }
+
         var y: usize = 0;
         while (y <= subdivs) : (y += 1) { // vertical
             const t_y = @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(subdivs));
@@ -1446,6 +1500,22 @@ pub fn pathToSubdividedQuad(path: dvui.Path, allocator: std.mem.Allocator, optio
                 .x = tr.x + (br.x - tr.x) * t_y,
                 .y = tr.y + (br.y - tr.y) * t_y,
             };
+            // Keep each row monotonic in x so a steep ripple pinches instead of
+            // folding back over itself. Overlapping triangles double-blend the
+            // semi-transparent reflection, which reads as a too-bright seam where
+            // the verts cross (most visible on the fly-in splash).
+            const row_increasing = right.x >= left.x;
+            // Hoist the per-row (pow-heavy) refraction factors out of the x-loop.
+            const refl_row: ?ReflectionRow = if (options.reflection_lag != null and options.waterline_propagate)
+                reflectionRowFactors(t_y)
+            else
+                null;
+            // Vertex tint only depends on the row (vertical fade), so resolve the
+            // colour and its PMA conversion once per row, not per vertex.
+            var row_col: dvui.Color = options.color_mod;
+            if (options.vertical_fade) row_col = row_col.opacity(0.5 * t_y);
+            const row_col_pma = dvui.Color.PMA.fromColor(row_col);
+            var prev_x: f32 = 0;
             var x: usize = 0;
             while (x <= subdivs) : (x += 1) { // horizontal
                 const t_x = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(subdivs));
@@ -1453,8 +1523,26 @@ pub fn pathToSubdividedQuad(path: dvui.Path, allocator: std.mem.Allocator, optio
                     .x = left.x + (right.x - left.x) * t_x,
                     .y = left.y + (right.y - left.y) * t_x,
                 };
-                if (options.reflection_lag != null) {
-                    pos = pos.plus(reflectionCombinedDisplacement(t_x, t_y, options));
+                if (options.reflection_lag) |sample| {
+                    if (refl_row) |row| {
+                        const dx_seam = if (seam_cache) dx_seam_col[x] else interpolateReflectionCols(&sample.cols_dx, t_x);
+                        var dx = reflectionRowDx(t_x, dx_seam, row, sample);
+                        // The reflection offset is purely horizontal (dy = 0), so the
+                        // magnitude clamp is just |dx| — no Point/​sqrt needed.
+                        const dmax = options.displacement_max;
+                        if (dmax > 0.0001 and @abs(dx) > dmax) dx = std.math.sign(dx) * dmax;
+                        pos.x += dx;
+                    } else {
+                        pos = pos.plus(reflectionCombinedDisplacement(t_x, t_y, options));
+                    }
+                    if (x > 0) {
+                        if (row_increasing) {
+                            pos.x = @max(pos.x, prev_x);
+                        } else {
+                            pos.x = @min(pos.x, prev_x);
+                        }
+                    }
+                    prev_x = pos.x;
                 }
 
                 const uv = .{
@@ -1462,11 +1550,9 @@ pub fn pathToSubdividedQuad(path: dvui.Path, allocator: std.mem.Allocator, optio
                     base_uv.y + base_uv.h * t_y,
                 };
 
-                var col: dvui.Color = options.color_mod;
-                if (options.vertical_fade) col = col.opacity(0.5 * t_y);
                 builder.appendVertex(.{
                     .pos = pos,
-                    .col = dvui.Color.PMA.fromColor(col),
+                    .col = row_col_pma,
                     .uv = uv,
                 });
             }

@@ -23,9 +23,16 @@ const water_stir_k: f32 = 68.0;
 /// injected as a localized splash (like fly-in) so it ripples rather than uniformly
 /// shrinking the reflections. Acceleration-driven, so small quick shakes read big
 /// and an abrupt stop throws a forward wake, while a steady drag stays calm.
-const water_drag_k: f32 = 11.0;
-/// Inject radius (field columns) for the drag wake — like the fly-in splash.
-const water_drag_radius: f32 = 0.7;
+const water_drag_k: f32 = 20.0;
+/// Inject radius (field columns) for the drag wake. Wider than a point so the
+/// per-frame scroll stir excites smooth, propagating ripples instead of grid-scale
+/// spikes (a 1-cell impulse shimmers in place; a broad bump travels and reads watery).
+const water_drag_radius: f32 = 10.0;
+/// Steady drag/coast bow wake: dv-only injects vanish at constant speed, so a small
+/// per-frame velocity stir keeps ripples visible under the finger (scaled by dt).
+const water_scroll_bow_k: f32 = 3.2;
+/// Extra reflection refraction while the shelf is actively moving.
+const water_scroll_disp_boost: f32 = 1.25;
 /// Fly-out transition splash at the centre (velocity impulse).
 const water_fly_out_impulse: f32 = -10.5;
 /// Fly-in: card bottom is `baseline_y - fly_offset`; ripple only once this close.
@@ -34,7 +41,7 @@ const water_fly_out_near_k: f32 = 0.22;
 /// Downward velocity impulse when a flown-in card splashes back through the waterline.
 const water_land_impulse: f32 = -20.0;
 /// Surface slope → horizontal refraction at the waterline (fraction of card height).
-const water_disp_k: f32 = 1.15;
+const water_disp_k: f32 = 1.1;
 /// Fly stir / splash: Gaussian radius as a fraction of one card's field span.
 /// Wider + more taps than a point inject — spreads energy instead of column bars.
 const water_fly_stir_radius_frac: f32 = 0.24;
@@ -45,6 +52,16 @@ const water_fly_impulse_scale: f32 = 0.36;
 const water_fly_refl_scale: f32 = 0.40;
 /// Fly stir velocity dead-zone — higher than scroll so only brisk line contact stirs.
 const water_fly_vel_dead: f32 = 0.11;
+/// Scroll wake spread (slots): the head-on cards each carve their own wake, fading
+/// to nothing ~this many slots out, so ripples emanate from every card the shelf
+/// drags across instead of one point at the focus.
+const wake_spread_slots: f32 = 3.5;
+
+/// Per-card scroll-wake weight by screen offset — 1 at the focus, linear to 0 at
+/// `wake_spread_slots`. Used to distribute the shelf's stir across the visible cards.
+fn wakeWeight(off: f32) f32 {
+    return @max(0.0, 1.0 - @abs(off) / wake_spread_slots);
+}
 
 const FlowItem = struct { idx: usize, off: f32, d: i64, id: usize, center: bool };
 
@@ -460,6 +477,12 @@ pub fn draw(self: *Sprites) !void {
         // slot change so frame advances don't retrigger endless waves. ----
         const water_live = !dvui.reduce_motion;
         const water_scroll_stir = water_live and !flown;
+        // Scroll-wake velocity impulses for this frame, distributed across the
+        // visible cards in pass 1 (so each head-on card stirs its own slot) rather
+        // than injected at one point here. `dv` ≈ acceleration; `bow` is the steady
+        // drag/coast stir. Both are computed once and shared out by `wakeWeight`.
+        var wake_dv_impulse: f32 = 0;
+        var wake_bow_impulse: f32 = 0;
         if (water_live) {
             if (flown) {
                 if (center_i != self.prev_center_i) {
@@ -481,12 +504,18 @@ pub fn draw(self: *Sprites) !void {
                 // forward wake, while a steady drag stays calm. Zero-mean over a
                 // gesture, so it settles on its own.
                 const v_raw = scroll_travel / scroll_dt; // signed slots/s
-                const v_new = std.math.lerp(self.shelf_vel, v_raw, 1.0 - @exp(-30.0 * scroll_dt));
+                // Smooth the shelf-velocity estimate more (was 42): pointer input is
+                // noisy frame-to-frame, and `dv` drives the wake — a gentler tracker
+                // means a steadier stir instead of a jittery stream of impulses.
+                const v_new = std.math.lerp(self.shelf_vel, v_raw, 1.0 - @exp(-18.0 * scroll_dt));
                 const dv = v_new - self.shelf_vel;
                 self.shelf_vel = v_new;
                 if (@abs(dv) > 0.0001) {
-                    const frac = self.scroll_pos - @as(f32, @floatFromInt(center_i));
-                    self.water.inject(wsurf.colForOffset(frac), water_drag_radius, 0, -dv * water_drag_k);
+                    wake_dv_impulse = -dv * water_drag_k;
+                }
+                // Acceleration injects miss steady drags — add a bow wake while moving.
+                if (@abs(v_new) > 0.22 and (self.drag_active or self.fling.coasting)) {
+                    wake_bow_impulse = -v_new * water_scroll_bow_k * scroll_dt;
                 }
             } else {
                 self.shelf_vel = 0;
@@ -520,6 +549,14 @@ pub fn draw(self: *Sprites) !void {
         };
         std.sort.pdq(FlowItem, items[0..n], {}, SortCtx.lessThan);
 
+        // Total wake weight across the visible cards, so the per-card stir in pass 1
+        // shares out the *same* total energy as the old single-point wake — just
+        // spread over the cards by `wakeWeight` instead of all at the focus.
+        var wake_w_total: f32 = 0;
+        if (water_scroll_stir and (wake_dv_impulse != 0 or wake_bow_impulse != 0)) {
+            for (items[0..n]) |it| wake_w_total += wakeWeight(it.off);
+        }
+
         // Cull side cards only once the fly-out has finished — not when outBack
         // crosses 1 mid-animation (that overshoot is the visible fling).
         const fly_cull_side_cards = blk: {
@@ -532,6 +569,20 @@ pub fn draw(self: *Sprites) !void {
         // Pass 1 — layout, then inject this card's motion into the shared water.
         for (items[0..n]) |it| {
             const off = it.off;
+
+            // Per-card scroll wake: stir this card's own patch of water (its slot's
+            // sample band) so ripples are born under each head-on card and fade out
+            // as cards skew toward the edges — not all from the focus. The normalized
+            // weight keeps the total energy equal to the old single wake.
+            if (water_scroll_stir and wake_w_total > 0.0) {
+                const w = wakeWeight(off) / wake_w_total;
+                if (w > 0.0) {
+                    const col = wsurf.slotCenterCol(it.d);
+                    if (wake_dv_impulse != 0) self.water.inject(col, water_drag_radius, 0, wake_dv_impulse * w);
+                    if (wake_bow_impulse != 0) self.water.inject(col, water_drag_radius * 1.15, 0, wake_bow_impulse * w);
+                }
+            }
+
             const a = std.math.clamp(off, -flat_zone, flat_zone);
             const beyond = off - a;
 
@@ -678,11 +729,16 @@ pub fn draw(self: *Sprites) !void {
                 const refl_scale: f32 = if (fly_t > 0.0) water_fly_refl_scale else 1.0;
                 // Horizontal refraction only — cols_dy is unused (vertical mesh warp squished
                 // the reflection while the field was active).
+                const scroll_wake_disp: f32 = if (flown or fly_t > 0.0 or
+                    !(self.drag_active or self.fling.coasting or @abs(self.shelf_vel) > 0.45))
+                    1.0
+                else
+                    water_scroll_disp_boost;
                 inline for (0..reflection_surface_cols) |c| {
                     const t = @as(f32, @floatFromInt(c)) / @as(f32, @floatFromInt(reflection_surface_cols - 1));
                     const col = left_col + t * span;
                     const slope = self.water.visualSlopeAt(col);
-                    lag_sample.cols_dx[c] = slope * cd.h * water_disp_k * refl_scale;
+                    lag_sample.cols_dx[c] = slope * cd.h * water_disp_k * refl_scale * scroll_wake_disp;
                 }
             }
 

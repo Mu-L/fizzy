@@ -434,6 +434,7 @@ pub fn syncLayerComposite(file: *fizzy.Internal.File) !void {
 
     try renderLayersIntoTarget(file, target, 0, file.layers.len, null);
     file.editor.layer_composite_dirty = false;
+    file.editor.layer_composite_generation +%= 1;
 }
 
 /// Builds two split composites that exclude the active (selected) layer.
@@ -607,6 +608,7 @@ pub fn syncPreviewComposite(file: *fizzy.Internal.File) !void {
     // The flattened layer stack feeds the bake; build/refresh it first.
     try syncLayerComposite(file);
 
+    var fresh = false;
     if (file.editor.preview_composite_target) |t| {
         if (t.width != w or t.height != h) {
             t.destroyLater();
@@ -616,8 +618,27 @@ pub fn syncPreviewComposite(file: *fizzy.Internal.File) !void {
     const target = if (file.editor.preview_composite_target) |t| t else blk: {
         const nt = try dvui.textureCreateTarget(.{ .width = w, .height = h, .format = compositeTargetPixelFormat(), .interpolation = .nearest });
         file.editor.preview_composite_target = nt;
+        fresh = true;
         break :blk nt;
     };
+
+    // Skip the (clear + several renderTriangles) re-bake when nothing that feeds
+    // the composite changed. The cover-flow reflections animate via mesh
+    // displacement only, so during a ripple the baked sprite content is identical
+    // frame to frame — this turns a per-frame bake into a no-op while idle/rippling.
+    const theme_fill = dvui.themeGet().color(.content, .fill);
+    var sig: u64 = file.editor.layer_composite_generation;
+    sig = sig *% 1000003 +% file.editor.selection_layer.source.hash();
+    if (file.editor.temp_layer_has_content) {
+        sig = sig *% 1000003 +% file.editor.temporary_layer.source.hash();
+    }
+    const fill_packed: u32 = @as(u32, theme_fill.r) | @as(u32, theme_fill.g) << 8 | @as(u32, theme_fill.b) << 16 | @as(u32, theme_fill.a) << 24;
+    sig = sig *% 1000003 +% @as(u64, fill_packed);
+    sig = sig *% 1000003 +% (@as(u64, @intCast(file.columns)) << 16 | @as(u64, @intCast(file.rows)));
+
+    if (!fresh and file.editor.preview_composite_valid and sig == file.editor.preview_composite_sig) return;
+    file.editor.preview_composite_sig = sig;
+    file.editor.preview_composite_valid = true;
 
     const sc_t0 = perf.syncCompositeBegin();
     defer perf.syncCompositeEnd(sc_t0);

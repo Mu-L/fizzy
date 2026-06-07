@@ -83,6 +83,9 @@ pub const EditorData = struct {
     layer_composite_target: ?dvui.Texture.Target = null,
     layer_composite_frame_built: u64 = 0,
     layer_composite_dirty: bool = true,
+    /// Bumped each time the flattened layer texture is actually rebuilt, so
+    /// downstream bakes (e.g. the sprite preview) can detect a stale input cheaply.
+    layer_composite_generation: u64 = 0,
 
     /// Split composites for use during active drawing. The "below" target
     /// contains all visible layers below the active layer; the "above" target
@@ -101,6 +104,11 @@ pub const EditorData = struct {
     /// once per frame (see `render.syncPreviewComposite`).
     preview_composite_target: ?dvui.Texture.Target = null,
     preview_composite_frame_built: u64 = 0,
+    /// Content signature of the last preview-composite bake. The bake is skipped
+    /// (texture reused) when this is unchanged — so a static cover flow whose
+    /// reflections are merely rippling doesn't re-flatten the sprite every frame.
+    preview_composite_sig: u64 = 0,
+    preview_composite_valid: bool = false,
 
     /// Tracks when the active layer transparency mask was last built,
     /// so we can skip rebuilding it when the layer hasn't changed.

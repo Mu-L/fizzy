@@ -82,6 +82,12 @@ pub const WaterSurface = struct {
     /// `sqrt(wave_c)` cells/s; at 56 cells/card a ripple crosses in ~0.09 s.
     const wave_c: f32 = 11500.0;
 
+    /// Velocity diffusion (kinematic viscosity, cells²/s). Surface-tension analogue:
+    /// damps short-wavelength modes ∝ wavenumber², so grid-scale jitter decays fast
+    /// while smooth long swells — which carry the refraction — are barely touched.
+    /// Stable while `visc·dt ≤ 0.5`; sub-step `dt ≤ 0.0047 s` keeps margin to spare.
+    const visc: f32 = 32.0;
+
     /// One wave-equation step: `vel += c²·∇²h·dt`, then integrate and damp.
     /// Sub-stepped so the explicit scheme stays stable (CFL) even at high `wave_c`
     /// and slow frames, decoupling ripple speed from the frame rate.
@@ -110,6 +116,20 @@ pub const WaterSurface = struct {
             // Reflective ends so ripples bounce instead of vanishing at the buffer edge.
             self.vel[0] += (self.height[1] - self.height[0]) * wave_c * dt;
             self.vel[grid_n - 1] += (self.height[grid_n - 2] - self.height[grid_n - 1]) * wave_c * dt;
+
+            // Viscosity: diffuse velocity using a snapshot (Jacobi), so short, jittery
+            // ripples smear out while smooth swells pass through. Computed from the
+            // pre-diffusion velocities so left/right neighbours stay consistent.
+            if (visc > 0) {
+                var lap_v: [grid_n]f32 = undefined;
+                lap_v[0] = self.vel[1] - self.vel[0];
+                lap_v[grid_n - 1] = self.vel[grid_n - 2] - self.vel[grid_n - 1];
+                var k: usize = 1;
+                while (k < grid_n - 1) : (k += 1) {
+                    lap_v[k] = self.vel[k - 1] + self.vel[k + 1] - 2.0 * self.vel[k];
+                }
+                for (&self.vel, lap_v) |*v, l| v.* += visc * l * dt;
+            }
 
             var h_sum: f32 = 0;
             var v_sum: f32 = 0;
@@ -180,7 +200,7 @@ pub const WaterSurface = struct {
     /// with the displayed ripple direction in both scroll orientations.
     pub fn visualSlopeAt(self: *const WaterSurface, col: f32) f32 {
         const c = std.math.clamp(col, 0.45, @as(f32, @floatFromInt(grid_n - 1)) - 0.45);
-        return (self.visualHeightAt(c + 0.45) - self.visualHeightAt(c - 0.45)) * 0.82;
+        return (self.visualHeightAt(c + 0.45) - self.visualHeightAt(c - 0.45)) * 0.98;
     }
 
     /// Signed slope of the simulation field (internal / energy).
