@@ -122,6 +122,13 @@ pub const EditorData = struct {
     /// True when the temp layer contains any non-zero content (brush preview,
     /// selection visualization, etc.) and needs clearing next frame.
     temp_layer_has_content: bool = false,
+    /// Bumped every time the temp layer's pixels change (brush preview moves,
+    /// stroke segment, selection visualization, clear). The temp layer uses
+    /// `.ptr` invalidation, so `source.hash()` only sees the buffer pointer and
+    /// not its contents — downstream bakes (the sprite preview composite) hash
+    /// this counter instead to notice a moved hover preview that reuses the
+    /// same buffer.
+    temp_layer_generation: u64 = 0,
     /// Accumulated region of the temp layer whose CPU pixels differ from the
     /// GPU texture. Persists across frames until flushed via sub-rect upload
     /// in renderLayers, so stale GPU data is always cleaned up.

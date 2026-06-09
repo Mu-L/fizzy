@@ -630,7 +630,10 @@ pub fn syncPreviewComposite(file: *fizzy.Internal.File) !void {
     var sig: u64 = file.editor.layer_composite_generation;
     sig = sig *% 1000003 +% file.editor.selection_layer.source.hash();
     if (file.editor.temp_layer_has_content) {
-        sig = sig *% 1000003 +% file.editor.temporary_layer.source.hash();
+        // `.ptr` invalidation makes `source.hash()` content-blind (it only sees the
+        // stable buffer pointer), so a moved hover/brush preview that reuses the same
+        // buffer wouldn't change the signature. Use the content generation instead.
+        sig = sig *% 1000003 +% file.editor.temp_layer_generation;
     }
     const fill_packed: u32 = @as(u32, theme_fill.r) | @as(u32, theme_fill.g) << 8 | @as(u32, theme_fill.b) << 16 | @as(u32, theme_fill.a) << 24;
     sig = sig *% 1000003 +% @as(u64, fill_packed);

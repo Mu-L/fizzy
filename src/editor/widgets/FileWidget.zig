@@ -2249,6 +2249,7 @@ pub fn processSelection(self: *FileWidget) void {
             file.editor.temporary_layer.setColorFromMask(selection_color_primary);
             file.editor.temporary_layer.mask.setIntersection(file.editor.checkerboard);
             file.editor.temporary_layer.setColorFromMask(selection_color_secondary);
+            file.editor.temp_layer_generation +%= 1;
         }
     }
 
@@ -5925,6 +5926,9 @@ fn expandTempGpuDirtyRect(editor: *fizzy.Internal.File.EditorData, rect: dvui.Re
     } else {
         editor.temp_gpu_dirty_rect = rect;
     }
+    // The temp layer's pixels just changed; let content-signature consumers
+    // (the sprite preview composite) see it even though the buffer ptr is stable.
+    editor.temp_layer_generation +%= 1;
 }
 
 /// Clears the pixels covered by the current temp preview dirty rect, then
@@ -5952,6 +5956,7 @@ fn resetTempLayerPreview(editor: *fizzy.Internal.File.EditorData) void {
         @memset(editor.temporary_layer.pixels(), .{ 0, 0, 0, 0 });
         editor.temporary_layer.invalidate();
         editor.temp_gpu_dirty_rect = null;
+        editor.temp_layer_generation +%= 1;
     }
     editor.temp_layer_has_content = false;
     editor.temporary_layer.clearMask();
