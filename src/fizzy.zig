@@ -89,6 +89,10 @@ pub const paths = @import("paths.zig");
 /// Used to bridge APIs (like `known-folders.getPath`) that require an
 /// `Environ.Map` constructed from the parent process's environment.
 pub fn processEnviron() std.process.Environ {
+    if (comptime @import("builtin").target.cpu.arch == .wasm32) {
+        const empty: [:null]const ?[*:0]const u8 = &.{};
+        return .{ .block = .{ .slice = empty } };
+    }
     if (@import("builtin").os.tag == .windows) {
         return .{ .block = .global };
     }

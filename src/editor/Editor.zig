@@ -205,7 +205,11 @@ pub fn init(
     else config_root_blk: {
         break :config_root_blk try fizzy.paths.configRoot(dvui.io, arena, fizzy.processEnviron(), app.root_path);
     };
-    const config_folder = try fizzy.paths.configFolder(fizzy.app.allocator, dvui.io, arena, fizzy.processEnviron(), app.root_path);
+    const config_folder: []const u8 = if (comptime builtin.target.cpu.arch == .wasm32)
+        app.root_path
+    else config_folder_blk: {
+        break :config_folder_blk try fizzy.paths.configFolder(fizzy.app.allocator, dvui.io, arena, fizzy.processEnviron(), app.root_path);
+    };
 
     // One-time migration: pre-rename builds used `Fizzy/` (capitalized).
     // On case-insensitive filesystems (Windows NTFS, macOS APFS) `fizzy/` already
