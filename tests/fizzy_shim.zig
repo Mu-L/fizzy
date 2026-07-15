@@ -51,9 +51,8 @@ pub fn init(gpa: std.mem.Allocator) !Ctx {
     // top of that test rather than expanding the shim.
     const editor_ptr = try gpa.create(fizzy.Editor);
     @memset(@as([*]u8, @ptrCast(editor_ptr))[0..@sizeOf(fizzy.Editor)], 0);
-    editor_ptr.settings.checker_color_even = .{ 200, 200, 200, 255 };
-    editor_ptr.settings.checker_color_odd = .{ 100, 100, 100, 255 };
     editor_ptr.arena = std.heap.ArenaAllocator.init(gpa);
+    editor_ptr.host.allocator = gpa;
     fizzy.editor = editor_ptr;
 
     return .{ .t = t, .app = app_ptr, .editor = editor_ptr };

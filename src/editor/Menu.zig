@@ -3,7 +3,6 @@ const fizzy = @import("../fizzy.zig");
 const dvui = @import("dvui");
 const Editor = fizzy.Editor;
 const settings = fizzy.settings;
-const zstbi = @import("zstbi");
 const builtin = @import("builtin");
 
 pub var mouse_distance: f32 = std.math.floatMax(f32);
@@ -24,6 +23,20 @@ pub fn draw() !dvui.App.Result {
         dvui.themeSet(theme);
     }
 
+    // The shell owns only the menu bar container + theme; the top-level menus are
+    // plugin (and shell built-in) contributions, drawn in registration order.
+    for (fizzy.editor.host.menus.items) |*menu| {
+        if (menu.hidden) continue;
+        menu.draw(menu.ctx) catch |err| {
+            dvui.log.err("Menu contribution failed: {any}", .{err});
+        };
+    }
+
+    return .ok;
+}
+
+/// File menu (workbench contribution).
+pub fn drawFileMenu(_: ?*anyopaque) anyerror!void {
     if (menuItem(@src(), "File", .{ .submenu = true }, .{
         .expand = .horizontal,
         //.color_accent = dvui.themeGet().color(.window, .fill),
@@ -67,9 +80,7 @@ pub fn draw() !dvui.App.Result {
             // handles the open-file plumbing on both platforms.
             fizzy.backend.showOpenFileDialog(
                 Editor.Workspace.openFilesCallback,
-                &.{
-                    .{ .name = "Image Files", .pattern = "fizzy;png;jpg;jpeg" },
-                },
+                &.{},
                 "",
                 null,
             );
@@ -109,7 +120,7 @@ pub fn draw() !dvui.App.Result {
                 const folder = fizzy.editor.recents.folders.items[i - 1];
                 if (menuItem(@src(), folder, .{}, .{
                     .expand = .horizontal,
-                    .font = dvui.Font.theme(.mono).larger(-2.0),
+                    .font = dvui.Font.theme(.mono),
                     .id_extra = i,
                     .margin = dvui.Rect.all(1),
                     .padding = dvui.Rect.all(2),
@@ -121,8 +132,8 @@ pub fn draw() !dvui.App.Result {
 
         _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
-        if (menuItemWithHotkey(@src(), "Save", dvui.currentWindow().keybinds.get("save") orelse .{}, if (fizzy.editor.activeFile()) |file|
-            (file.dirty() or !fizzy.Internal.File.hasRecognizedSaveExtension(file.path))
+        if (menuItemWithHotkey(@src(), "Save", dvui.currentWindow().keybinds.get("save") orelse .{}, if (fizzy.editor.activeDoc()) |doc|
+            (doc.owner.isDirty(doc) or !doc.owner.documentHasRecognizedSaveExtension(doc))
         else
             false, .{}, .{
             .expand = .horizontal,
@@ -134,7 +145,7 @@ pub fn draw() !dvui.App.Result {
             fw.close();
         }
 
-        if (menuItemWithHotkey(@src(), "Save As…", dvui.currentWindow().keybinds.get("save_as") orelse .{}, fizzy.editor.activeFile() != null, .{}, .{
+        if (menuItemWithHotkey(@src(), "Save As…", dvui.currentWindow().keybinds.get("save_as") orelse .{}, fizzy.editor.activeDoc() != null, .{}, .{
             .expand = .horizontal,
             .color_text = dvui.themeGet().color(.window, .text),
         }) != null) {
@@ -145,8 +156,8 @@ pub fn draw() !dvui.App.Result {
         // Save All is enabled whenever any open file is dirty with a recognized
         // extension. Worker queue handles them serially; UI stays responsive.
         const any_dirty = blk: {
-            for (fizzy.editor.open_files.values()) |*f| {
-                if (f.dirty() and fizzy.Internal.File.hasRecognizedSaveExtension(f.path)) break :blk true;
+            for (fizzy.editor.open_files.values()) |doc| {
+                if (doc.owner.isDirty(doc) and doc.owner.documentHasRecognizedSaveExtension(doc)) break :blk true;
             }
             break :blk false;
         };
@@ -160,7 +171,12 @@ pub fn draw() !dvui.App.Result {
             fw.close();
         }
     }
+}
 
+/// Edit menu. Undo/Redo/Save are vtable-guaranteed for any document-owning plugin; Copy/Paste/
+/// Transform/Grid Layout are Commands, so each is only shown when the active document's owner
+/// actually registered it (see `activeDocHasCommand`) rather than rendered permanently disabled.
+pub fn drawEditMenu(_: ?*anyopaque) anyerror!void {
     if (menuItem(
         @src(),
         "Edit",
@@ -168,7 +184,6 @@ pub fn draw() !dvui.App.Result {
         .{
             .expand = .horizontal,
             .color_text = dvui.themeGet().color(.control, .text),
-            //.style = .control,
         },
     )) |r| {
         var animator = dvui.animate(@src(), .{
@@ -182,15 +197,15 @@ pub fn draw() !dvui.App.Result {
         var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
         defer fw.deinit();
 
-        if (menuItemWithHotkey(
-            @src(),
-            "Copy",
-            dvui.currentWindow().keybinds.get("copy") orelse .{},
-            if (fizzy.editor.activeFile() != null) true else false,
-            .{},
-            .{ .expand = .horizontal },
-        ) != null) {
-            if (fizzy.editor.activeFile() != null) {
+        if (fizzy.editor.activeDocHasCommand("copy")) {
+            if (menuItemWithHotkey(
+                @src(),
+                "Copy",
+                dvui.currentWindow().keybinds.get("copy") orelse .{},
+                fizzy.editor.activeDocCommandEnabled("copy"),
+                .{},
+                .{ .expand = .horizontal },
+            ) != null) {
                 fizzy.editor.copy() catch {
                     std.log.err("Failed to copy", .{});
                 };
@@ -198,15 +213,15 @@ pub fn draw() !dvui.App.Result {
             }
         }
 
-        if (menuItemWithHotkey(
-            @src(),
-            "Paste",
-            dvui.currentWindow().keybinds.get("paste") orelse .{},
-            if (fizzy.editor.activeFile() != null) true else false,
-            .{},
-            .{ .expand = .horizontal },
-        ) != null) {
-            if (fizzy.editor.activeFile() != null) {
+        if (fizzy.editor.activeDocHasCommand("paste")) {
+            if (menuItemWithHotkey(
+                @src(),
+                "Paste",
+                dvui.currentWindow().keybinds.get("paste") orelse .{},
+                fizzy.editor.activeDocCommandEnabled("paste"),
+                .{},
+                .{ .expand = .horizontal },
+            ) != null) {
                 fizzy.editor.paste() catch {
                     std.log.err("Failed to paste", .{});
                 };
@@ -214,18 +229,20 @@ pub fn draw() !dvui.App.Result {
             }
         }
 
-        _ = dvui.separator(@src(), .{ .expand = .horizontal });
+        if (fizzy.editor.activeDocHasCommand("copy") or fizzy.editor.activeDocHasCommand("paste")) {
+            _ = dvui.separator(@src(), .{ .expand = .horizontal });
+        }
 
         if (menuItemWithHotkey(
             @src(),
             "Undo",
             dvui.currentWindow().keybinds.get("undo") orelse .{},
-            if (fizzy.editor.activeFile()) |file| if (file.history.undo_stack.items.len > 0) true else false else false,
+            if (fizzy.editor.activeDoc()) |doc| doc.owner.canUndo(doc) else false,
             .{},
             .{ .expand = .horizontal },
         ) != null) {
-            if (fizzy.editor.activeFile()) |file| {
-                file.history.undoRedo(file, .undo) catch {
+            if (fizzy.editor.activeDoc()) |doc| {
+                doc.owner.undo(doc) catch {
                     std.log.err("Failed to undo", .{});
                 };
             }
@@ -235,52 +252,25 @@ pub fn draw() !dvui.App.Result {
             @src(),
             "Redo",
             dvui.currentWindow().keybinds.get("redo") orelse .{},
-            if (fizzy.editor.activeFile()) |file| if (file.history.redo_stack.items.len > 0) true else false else false,
+            if (fizzy.editor.activeDoc()) |doc| doc.owner.canRedo(doc) else false,
             .{},
             .{ .expand = .horizontal },
         ) != null) {
-            if (fizzy.editor.activeFile()) |file| {
-                file.history.undoRedo(file, .redo) catch {
+            if (fizzy.editor.activeDoc()) |doc| {
+                doc.owner.redo(doc) catch {
                     std.log.err("Failed to redo", .{});
                 };
             }
         }
 
-        _ = dvui.separator(@src(), .{ .expand = .horizontal });
-
-        if (menuItemWithHotkey(
-            @src(),
-            "Transform",
-            dvui.currentWindow().keybinds.get("transform") orelse .{},
-            if (fizzy.editor.activeFile() != null) true else false,
-            .{},
-            .{ .expand = .horizontal },
-        ) != null) {
-            if (fizzy.editor.activeFile() != null) {
-                fizzy.editor.transform() catch {
-                    std.log.err("Failed to transform", .{});
-                };
-                fw.close();
-            }
-        }
-
-        _ = dvui.separator(@src(), .{ .expand = .horizontal });
-
-        if (menuItemWithHotkey(
-            @src(),
-            "Grid Layout…",
-            dvui.currentWindow().keybinds.get("grid_layout") orelse .{},
-            if (fizzy.editor.activeFile() != null) true else false,
-            .{},
-            .{ .expand = .horizontal },
-        ) != null) {
-            if (fizzy.editor.activeFile() != null) {
-                fizzy.editor.requestGridLayoutDialog();
-                fw.close();
-            }
-        }
+        // Transform / Grid Layout are pixel-art-specific, not shell concepts — pixi injects
+        // them itself via a `MenuSectionContribution` parented to "shell.menu.edit" below.
+        try drawMenuSections("shell.menu.edit");
     }
+}
 
+/// View menu (shell built-in).
+pub fn drawViewMenu(_: ?*anyopaque) anyerror!void {
     if (menuItem(@src(), "View", .{ .submenu = true }, .{
         .expand = .horizontal,
         .color_text = dvui.themeGet().color(.control, .text),
@@ -315,6 +305,8 @@ pub fn draw() !dvui.App.Result {
             fw.close();
         }
 
+        try drawMenuSections("shell.menu.view");
+
         _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
         if (menuItem(@src(), "Show DVUI Demo", .{}, .{ .expand = .horizontal }) != null) {
@@ -322,8 +314,11 @@ pub fn draw() !dvui.App.Result {
             fw.close();
         }
     }
+}
 
-    // Help — matches the macOS native Help menu so the two menubars stay congruent.
+/// Help menu (shell built-in). Matches the macOS native Help menu so the two
+/// menubars stay congruent.
+pub fn drawHelpMenu(_: ?*anyopaque) anyerror!void {
     if (menuItem(@src(), "Help", .{ .submenu = true }, .{
         .expand = .horizontal,
         .color_text = dvui.themeGet().color(.control, .text),
@@ -354,16 +349,20 @@ pub fn draw() !dvui.App.Result {
             fw.close();
         }
     }
-
-    return .ok;
 }
 
+/// A menu leaf with a trailing keybind hint. `enabled = false` both greys the label (see
+/// `labelWithKeybind`) *and* swallows the click here — dvui's `MenuItemWidget` has no built-in
+/// disabled state, so without this a "greyed out" item was still fully clickable and silently
+/// ran its action.
 pub fn menuItemWithHotkey(src: std.builtin.SourceLocation, label_str: []const u8, hotkey: dvui.enums.Keybind, enabled: bool, init_opts: dvui.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
     var mi = dvui.menuItem(src, init_opts, opts);
 
     var ret: ?dvui.Rect.Natural = null;
-    if (mi.activeRect()) |r| {
-        ret = r;
+    if (enabled) {
+        if (mi.activeRect()) |r| {
+            ret = r;
+        }
     }
 
     fizzy.dvui.labelWithKeybind(label_str, hotkey, enabled, opts, opts);
@@ -437,4 +436,15 @@ pub fn menuItemWithChevron(src: std.builtin.SourceLocation, label_str: []const u
     mi.deinit();
 
     return ret;
+}
+
+/// Draw registered menu sections for an open parent menu.
+pub fn drawMenuSections(parent_menu_id: []const u8) !void {
+    for (fizzy.editor.host.menu_sections.items) |*section| {
+        if (section.hidden) continue;
+        if (!std.mem.eql(u8, section.parent_menu_id, parent_menu_id)) continue;
+        section.draw(section.ctx) catch |err| {
+            dvui.log.err("Menu section '{s}' failed: {any}", .{ section.id, err });
+        };
+    }
 }

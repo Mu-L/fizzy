@@ -25,7 +25,7 @@ pub fn draw() !void {
             var dropdown: dvui.DropdownWidget = undefined;
             dropdown.init(@src(), .{ .label = "Theme" }, .{
                 .expand = .horizontal,
-                .corner_radius = dvui.Rect.all(1000),
+                .corners = dvui.CornerRect.all(1000),
             });
             defer dropdown.deinit();
 
@@ -148,68 +148,6 @@ pub fn draw() !void {
             dvui.refresh(null, @src(), vbox.data().id);
         }
 
-        {
-            var dropdown: dvui.DropdownWidget = undefined;
-            dropdown.init(@src(), .{ .label = "Transparency effect" }, .{
-                .expand = .horizontal,
-                .corner_radius = dvui.Rect.all(1000),
-            });
-            defer dropdown.deinit();
-
-            var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .expand = .vertical,
-                .gravity_x = 1.0,
-            });
-
-            const label_text = switch (fizzy.editor.settings.transparency_effect) {
-                .none => "None",
-                .rainbow => "Rainbow",
-                .animation => "Animation",
-            };
-            dvui.label(@src(), "{s}", .{label_text}, .{ .margin = .all(0), .padding = .all(0) });
-
-            dvui.icon(
-                @src(),
-                "dropdown_triangle",
-                dvui.entypo.triangle_down,
-                .{},
-                .{ .gravity_y = 0.5 },
-            );
-
-            hbox.deinit();
-
-            if (dropdown.dropped()) {
-                if (dropdown.addChoiceLabel("None")) {
-                    fizzy.editor.settings.transparency_effect = .none;
-                    fizzy.editor.markSettingsDirty();
-                    dvui.refresh(null, @src(), vbox.data().id);
-                }
-                if (dropdown.addChoiceLabel("Rainbow")) {
-                    fizzy.editor.settings.transparency_effect = .rainbow;
-                    fizzy.editor.markSettingsDirty();
-                    dvui.refresh(null, @src(), vbox.data().id);
-                }
-                if (dropdown.addChoiceLabel("Animation")) {
-                    fizzy.editor.settings.transparency_effect = .animation;
-                    fizzy.editor.markSettingsDirty();
-                    dvui.refresh(null, @src(), vbox.data().id);
-                }
-            }
-
-            _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 10 } });
-        }
-
-        if (dvui.checkbox(@src(), &fizzy.editor.settings.show_rulers, "Show Rulers", .{
-            .expand = .none,
-        })) {
-            fizzy.editor.markSettingsDirty();
-        }
-
-        if (dvui.checkbox(@src(), &fizzy.editor.settings.scrolling_cards, "Show sprite cover-flow cards", .{
-            .expand = .none,
-        })) {
-            fizzy.editor.markSettingsDirty();
-        }
     }
 
     {
@@ -218,11 +156,26 @@ pub fn draw() !void {
         });
         defer box.deinit();
 
+        var hold_menu_ms: f32 = @floatFromInt(fizzy.editor.settings.hold_menu_duration_ms);
+        if (dvui.sliderEntry(@src(), "Context menu hold: {d:0.0} ms", .{
+            .value = &hold_menu_ms,
+            .interval = 50,
+            .max = 1500,
+            .min = 100,
+        }, .{
+            .expand = .horizontal,
+        })) {
+            fizzy.editor.settings.hold_menu_duration_ms = @intFromFloat(hold_menu_ms);
+            fizzy.editor.applyHoldMenuDuration();
+            fizzy.editor.markSettingsDirty();
+            dvui.refresh(null, @src(), vbox.data().id);
+        }
+
         {
             var dropdown: dvui.DropdownWidget = undefined;
-            dropdown.init(@src(), .{ .label = "Control scheme" }, .{
+            dropdown.init(@src(), .{ .label = "Canvas control scheme" }, .{
                 .expand = .horizontal,
-                .corner_radius = dvui.Rect.all(1000),
+                .corners = dvui.CornerRect.all(1000),
             });
             defer dropdown.deinit();
 
@@ -233,23 +186,15 @@ pub fn draw() !void {
 
             const label_text: []const u8 = switch (fizzy.editor.settings.input_scheme) {
                 .auto => switch (dvui.mouseType()) {
-                    // Pre-classification (no scroll events seen yet) — drop the parenthetical
-                    // entirely rather than showing "Auto (unknown)".
                     .unknown => "Auto",
-                    .mouse, .trackpad => |hint| try std.fmt.allocPrint(dvui.currentWindow().lifo(), "Auto ({s})", .{@tagName(hint)}),
+                    .mouse, .trackpad => |hint| try std.fmt.allocPrint(dvui.currentWindow().arena(), "Auto ({s})", .{@tagName(hint)}),
                 },
                 .mouse => "Mouse",
                 .trackpad => "Trackpad",
             };
             dvui.label(@src(), "{s}", .{label_text}, .{ .margin = .all(0), .padding = .all(0) });
 
-            dvui.icon(
-                @src(),
-                "dropdown_triangle",
-                dvui.entypo.triangle_down,
-                .{},
-                .{ .gravity_y = 0.5 },
-            );
+            dvui.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_y = 0.5 });
 
             hbox.deinit();
 
@@ -270,23 +215,6 @@ pub fn draw() !void {
                     dvui.refresh(null, @src(), vbox.data().id);
                 }
             }
-
-            _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 10 } });
-        }
-
-        var hold_menu_ms: f32 = @floatFromInt(fizzy.editor.settings.hold_menu_duration_ms);
-        if (dvui.sliderEntry(@src(), "Context menu hold: {d:0.0} ms", .{
-            .value = &hold_menu_ms,
-            .interval = 50,
-            .max = 1500,
-            .min = 100,
-        }, .{
-            .expand = .horizontal,
-        })) {
-            fizzy.editor.settings.hold_menu_duration_ms = @intFromFloat(hold_menu_ms);
-            fizzy.editor.applyHoldMenuDuration();
-            fizzy.editor.markSettingsDirty();
-            dvui.refresh(null, @src(), vbox.data().id);
         }
 
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 10 } });
