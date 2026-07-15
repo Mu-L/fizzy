@@ -18,9 +18,12 @@
 //! - `bytes` passed into `hover`/`gotoDefinition` is a borrowed slice into the live,
 //!   mutable document buffer — copy it before handing it to the background queue.
 const std = @import("std");
+const builtin = @import("builtin");
 const dvui = @import("dvui");
 const Protocol = @import("Protocol.zig");
 const UriUtil = @import("UriUtil.zig");
+const shell_env = @import("../shell_env.zig");
+const darwin_spawn = @import("../darwin_spawn.zig");
 
 const Client = @This();
 
@@ -39,10 +42,12 @@ pub const Config = struct {
     /// Returns the current workspace folder, or null — queried fresh each time it's needed
     /// (mirrors `sdk.host().folder()`), since it can change after a project is opened/closed.
     getFolder: *const fn () ?[]const u8,
-    /// Forwards a warning line to the host's Output panel and this dylib's own `std.log`
-    /// (mirrors `sdk.host().logLine(.warn, source, msg)`) — needed because each plugin dylib
-    /// has its own private `std.log` binding, so `dvui.log.warn` alone never reaches the host.
-    logWarn: *const fn (source: []const u8, msg: []const u8) void,
+    /// Forwards a line at the given level to the host's Output panel and this dylib's own
+    /// `std.log` (mirrors `sdk.host().logLine(level, source, msg)`) — needed because each
+    /// plugin dylib has its own private `std.log` binding, so `dvui.log.warn` alone never
+    /// reaches the host. Used both for this client's own diagnostics (spawn failure, stderr
+    /// drain) and to relay the server's own `window/logMessage` notifications.
+    log: *const fn (source: []const u8, level: std.log.Level, msg: []const u8) void,
     /// Wakes the app's event loop from a background thread (mirrors `sdk.refresh()`).
     refresh: *const fn () void,
     /// Sent verbatim as `initialize`'s `initializationOptions`, or omitted (sent as `null`)
@@ -323,9 +328,13 @@ encoding: Protocol.PositionEncoding = .utf16,
 completion_resolve_supported: bool = false,
 shutdown: std.atomic.Value(bool) = .init(false),
 
-reader_thread: ?std.Thread = null,
-stderr_thread: ?std.Thread = null,
-dispatch_thread: ?std.Thread = null,
+/// Every background task this client owns (`startupThreadMain`, `readerThreadMain`,
+/// `stderrDrainThreadMain`, `dispatchThreadMain`) — see `ensureStarted`'s and
+/// `shutdownProcess`'s doc comments. One shared group rather than four separate
+/// `?std.Thread` fields: `shutdownProcess` needs to wait for all of them together anyway
+/// (there's no scenario where only some are running), and `Io.Group.concurrent` dispatches
+/// onto `Io.Threaded`'s pooled workers instead of a fresh OS thread per (re)start.
+tasks: std.Io.Group = .init,
 
 write_lock: SpinLock = .{},
 
@@ -1012,44 +1021,160 @@ fn ensureStarted(self: *Client, doc_path: []const u8) bool {
         .not_started => {
             if (self.workspace_root == null) self.deriveFallbackRoot(doc_path);
             if (self.workspace_root == null) return false;
-            self.state.store(.starting, .release);
-            const t = std.Thread.spawn(.{}, startupThreadMain, .{self}) catch |err| {
-                dvui.log.warn("{s}: std.Thread.spawn(startupThreadMain) failed: {any}", .{ self.config.language_id, err });
-                self.state.store(.unavailable, .release);
+            // Captured here, on the caller's thread (draw thread — `ensureStarted` is only
+            // ever called from `hover`/`gotoDefinition`/etc.), and handed off by value rather
+            // than read fresh from inside a background thread. `dvui.io` is a plain,
+            // non-atomic global the draw thread also *writes* every frame
+            // (`Editor.syncLoadedPluginDvuiContexts` → `dvui_context.inject`) — reading it
+            // concurrently from another thread would race that writer with no synchronization,
+            // risking a torn read of the vtable pointer. `Io.Group.concurrent` guarantees the
+            // task is fully assigned a unit of concurrency before returning (unlike `Io.async`,
+            // which is allowed to fall back to running inline on this — the draw — thread under
+            // load), so this capture is the last read of the global on this thread for this
+            // task; `startupThreadMain` only ever sees its own copy from here on.
+            const io = dvui.io;
+            self.tasks.concurrent(io, startupThreadMain, .{ self, io }) catch |err| {
+                // `ConcurrencyUnavailable` is a documented transient condition (pool
+                // exhaustion) — leave state as `not_started` so the next hover retries,
+                // rather than permanently disabling the client the way `.unavailable` would.
+                dvui.log.warn("{s}: Io.Group.concurrent(startupThreadMain) failed: {any}", .{ self.config.language_id, err });
                 return false;
             };
-            t.detach();
+            self.state.store(.starting, .release);
             return false;
         },
     }
 }
 
-fn startupThreadMain(self: *Client) void {
-    self.spawnAndHandshake(dvui.io) catch |err| {
+/// Spawns the subprocess (see `spawnProcess`'s doc comment for why that's safe from a
+/// background thread now — it was not, before `darwin_spawn` replaced the fork-based
+/// `std.process.spawn` on the platform that mattered) and then runs the handshake — both on
+/// this one `Io.Group`-dispatched task, so `ensureStarted` never blocks the draw thread.
+fn startupThreadMain(self: *Client, io: std.Io) void {
+    self.spawnProcess(io) catch {
+        self.state.store(.unavailable, .release);
+        return;
+    };
+    self.handshake(io) catch |err| {
         dvui.log.warn("{s}: language server unavailable ({any})", .{ self.config.language_id, err });
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "language server unavailable ({any})", .{err}) catch "language server unavailable";
+        self.config.log(self.config.language_id, .warn, msg);
         self.state.store(.unavailable, .release);
         return;
     };
     self.state.store(.ready, .release);
 }
 
-fn spawnAndHandshake(self: *Client, io: std.Io) !void {
+/// Spawns the language server subprocess. Runs on the background `startupThreadMain` task, not
+/// the draw thread — safe to do so now that this goes through `darwin_spawn` on Darwin rather
+/// than `std.process.spawn` (see its doc comment): the latter always forks the whole process,
+/// which is unsafe from a background thread in this multithreaded Cocoa/Metal process (if some
+/// other thread holds a lock inside a non-fork-safe system framework at the instant of
+/// `fork()`, that lock is stuck forever in the child), *and* unconditionally walks the
+/// process's raw `environ` array in a way that's turned up a crash specifically right after a
+/// Velopack installer auto-open. `darwin_spawn`'s `posix_spawn` doesn't fork the caller's
+/// address space at all, so neither hazard applies regardless of which thread calls it.
+fn spawnProcess(self: *Client, io: std.Io) !void {
     const root = self.workspace_root orelse return error.NoWorkspace;
     const gpa = self.config.allocator;
 
-    self.child = std.process.spawn(io, .{
-        .argv = self.config.command,
-        .cwd = .{ .path = root },
+    // A GUI app launched via LaunchServices/launchd on macOS doesn't inherit the user's login
+    // shell PATH — Homebrew, cargo, zvm, rustup, etc. install locations all live outside the
+    // launchd-provided default (`/usr/bin:/bin:/usr/sbin:/sbin`), so `std.process.spawn`'s own
+    // PATH search (over *this process's own* inherited PATH) usually can't find a server the
+    // user installed normally from a terminal, even though it's right there once you open one.
+    // Resolve it ourselves first and pass an absolute path, which sidesteps that search
+    // entirely; falls back to the bare command unresolved (same behavior as before this
+    // existed) if it can't be found anywhere, so the resulting error is still a clear
+    // FileNotFound rather than something more surprising.
+    const resolved_argv0 = resolveExecutable(gpa, io, self.config.command[0]);
+    defer if (resolved_argv0) |r| gpa.free(r);
+
+    var argv_buf: [16][]const u8 = undefined;
+    const argv: []const []const u8 = if (resolved_argv0 != null and self.config.command.len <= argv_buf.len) blk: {
+        argv_buf[0] = resolved_argv0.?;
+        @memcpy(argv_buf[1..self.config.command.len], self.config.command[1..]);
+        break :blk argv_buf[0..self.config.command.len];
+    } else self.config.command;
+
+    self.child = spawnChild(gpa, io, argv, root) catch |err| {
+        dvui.log.warn("{s}: could not spawn \"{s}\" ({any}) — hover/goto-definition disabled for this session", .{ self.config.language_id, argv[0], err });
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "could not spawn \"{s}\" ({any}) — hover/goto-definition disabled for this session", .{ argv[0], err }) catch "could not spawn language server";
+        self.config.log(self.config.language_id, .warn, msg);
+        return err;
+    };
+}
+
+fn spawnChild(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, cwd: []const u8) !std.process.Child {
+    if (comptime builtin.os.tag == .macos) {
+        // Prefers the fuller login-shell-resolved PATH (already resolved above, by
+        // `resolveExecutable` → `shell_env.path`, and cached) over this process's own
+        // inherited one, so the server itself — not just fizzy locating its binary — sees the
+        // user's normal PATH (e.g. a server that shells out to other installed tools).
+        return darwin_spawn.spawn(gpa, .{
+            .argv = argv,
+            .cwd = cwd,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        }, shell_env.path(gpa, io));
+    }
+    return std.process.spawn(io, .{
+        .argv = argv,
+        .cwd = .{ .path = cwd },
         .stdin = .pipe,
         .stdout = .pipe,
         .stderr = .pipe,
-    }) catch |err| {
-        dvui.log.warn("{s}: could not spawn \"{s}\" ({any}) — hover/goto-definition disabled for this session", .{ self.config.language_id, self.config.command[0], err });
-        return err;
-    };
+    });
+}
 
-    self.reader_thread = try std.Thread.spawn(.{}, readerThreadMain, .{ self, io });
-    self.stderr_thread = try std.Thread.spawn(.{}, stderrDrainThreadMain, .{ self, io });
+/// Resolves `name` to an absolute executable path if it isn't one already (i.e. contains no
+/// `/` — already a path, `std.process.spawn` treats it literally rather than PATH-searching).
+/// Searches this process's own inherited `PATH` first — cheap, and covers any setup that
+/// already works (e.g. a LaunchAgent plist setting PATH) without the cost below. Only on a
+/// miss there does it fall back to asking the user's actual login shell what its `PATH` is
+/// (`shell_env.path`) and searching that — this is what makes a `zls` installed via Homebrew,
+/// cargo, zvm, or anywhere else the user's own shell profile already knows about resolve
+/// correctly, without fizzy having to guess at or hardcode install locations itself. Caller
+/// owns the returned slice; returns null if `name` isn't found on either PATH.
+fn resolveExecutable(gpa: std.mem.Allocator, io: std.Io, name: []const u8) ?[]u8 {
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return null;
+
+    const inherited_path: ?[]const u8 = if (std.c.getenv("PATH")) |p| std.mem.span(p) else null;
+    if (findInPath(gpa, io, inherited_path, name)) |found| return found;
+
+    return findInPath(gpa, io, shell_env.path(gpa, io), name);
+}
+
+/// Searches each `:`-separated directory in `path_value` for `name`, in order, returning the
+/// first that exists. Caller owns the returned slice.
+fn findInPath(gpa: std.mem.Allocator, io: std.Io, path_value: ?[]const u8, name: []const u8) ?[]u8 {
+    const p = path_value orelse return null;
+    var it = std.mem.splitScalar(u8, p, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const candidate = std.fs.path.join(gpa, &.{ dir, name }) catch continue;
+        std.Io.Dir.accessAbsolute(io, candidate, .{ .read = true }) catch {
+            gpa.free(candidate);
+            continue;
+        };
+        return candidate;
+    }
+    return null;
+}
+
+/// Everything after the subprocess is already running: reader/stderr threads plus the LSP
+/// `initialize`/`initialized` handshake. None of this forks, so — unlike `spawnProcess` — it's
+/// safe, and necessary (to keep `hover`/etc. non-blocking), to run on the background startup
+/// thread.
+fn handshake(self: *Client, io: std.Io) !void {
+    const root = self.workspace_root orelse return error.NoWorkspace;
+    const gpa = self.config.allocator;
+
+    try self.tasks.concurrent(io, readerThreadMain, .{ self, io });
+    try self.tasks.concurrent(io, stderrDrainThreadMain, .{ self, io });
 
     const root_uri = try UriUtil.pathToUri(gpa, root);
     defer gpa.free(root_uri);
@@ -1124,7 +1249,7 @@ fn spawnAndHandshake(self: *Client, io: std.Io) !void {
 
     try self.sendNotification(io, "initialized", Protocol.EmptyObject{});
 
-    self.dispatch_thread = try std.Thread.spawn(.{}, dispatchThreadMain, .{ self, io });
+    try self.tasks.concurrent(io, dispatchThreadMain, .{ self, io });
 }
 
 fn shutdownProcess(self: *Client) void {
@@ -1135,18 +1260,18 @@ fn shutdownProcess(self: *Client) void {
     self.shutdown.store(true, .release);
     if (self.child) |*c| c.kill(io);
 
-    if (self.reader_thread) |t| {
-        t.join();
-        self.reader_thread = null;
-    }
-    if (self.stderr_thread) |t| {
-        t.join();
-        self.stderr_thread = null;
-    }
-    if (self.dispatch_thread) |t| {
-        t.join();
-        self.dispatch_thread = null;
-    }
+    // Waits for every task in the group — `startupThreadMain` included, not just the three
+    // loop threads it starts partway through. The old per-thread `?std.Thread` fields could
+    // only ever join threads that had *already* been spawned by the time shutdown ran; if
+    // shutdown landed while still mid-`spawnProcess`/mid-handshake (state `.starting`, reader/
+    // stderr/dispatch not started yet), the detached startup thread was never waited on at
+    // all — a real use-after-free risk if it kept running past `self`'s lifetime. `Io.Group`
+    // tracks the whole family as one unit, so this now genuinely blocks until nothing is left
+    // touching `self`, regardless of which stage shutdown catches it at. `shutdown`/`child.kill`
+    // above are what actually make each loop thread notice and exit promptly — `await` here is
+    // purely the join, not the cancellation signal.
+    self.tasks.await(io) catch {};
+
     self.child = null;
     self.shutdown.store(false, .release);
 
@@ -1311,10 +1436,15 @@ fn readerThreadMain(self: *Client, io: std.Io) void {
                 // (once at startup, or per-setting-change) and each reply is a single small
                 // write, so blocking the read loop for it is not a real throughput concern.
                 self.handleServerRequest(io, req_id, method, resp.params);
+            } else if (std.mem.eql(u8, method, "window/logMessage")) {
+                // zls (and most servers) route their own logging through this notification by
+                // default rather than stderr — without this, the Output panel only ever sees a
+                // crash or a failed spawn, never the server's actual "here's what I'm doing"
+                // trail, which is exactly what's needed to tell a slow response from a stuck one.
+                self.handleLogMessage(resp.params);
             }
-            // Otherwise a notification (`textDocument/publishDiagnostics`,
-            // `window/logMessage`, …) — no `id` to reply to, and this client doesn't consume
-            // any of them today, so just drop it.
+            // Any other notification (`textDocument/publishDiagnostics`, …) — no `id` to reply
+            // to and this client doesn't consume it today, so just drop it.
             continue;
         }
 
@@ -1355,14 +1485,14 @@ fn stderrDrainThreadMain(self: *Client, io: std.Io) void {
 
         var msg_buf: [4160]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "language server stderr: {s}", .{line}) catch line;
-        self.config.logWarn(self.config.language_id, msg);
+        self.config.log(self.config.language_id, .warn, msg);
     }
 }
 
 fn dispatchThreadMain(self: *Client, io: std.Io) void {
     const gpa = self.config.allocator;
     while (!self.shutdown.load(.acquire)) {
-        self.checkPendingNegativeWake();
+        self.checkPendingNegativeWake(io);
 
         self.queue_lock.lock();
         const job: ?HoverJob = if (self.queue.items.len > 0) self.queue.orderedRemove(0) else null;
@@ -1457,32 +1587,35 @@ fn runHoverJob(self: *Client, io: std.Io, j: HoverJob) !void {
     // A missing/null result or absent contents just means "no hover info here" (the common
     // case for most tokens) — cached as a negative entry, not logged as an error.
     const result = resp.result orelse {
-        self.cacheHoverResult(gpa, j.key, null);
+        self.cacheHoverResult(io, gpa, j.key, null);
         return;
     };
     if (result == .null) {
-        self.cacheHoverResult(gpa, j.key, null);
+        self.cacheHoverResult(io, gpa, j.key, null);
         return;
     }
     const contents = jsonGet(result, "contents") orelse {
-        self.cacheHoverResult(gpa, j.key, null);
+        self.cacheHoverResult(io, gpa, j.key, null);
         return;
     };
     const text = extractContentsText(contents) orelse {
-        self.cacheHoverResult(gpa, j.key, null);
+        self.cacheHoverResult(io, gpa, j.key, null);
         return;
     };
     const owned_text = try gpa.dupe(u8, text);
-    self.cacheHoverResult(gpa, j.key, owned_text);
+    self.cacheHoverResult(io, gpa, j.key, owned_text);
 }
 
 /// Called once per dispatch-loop tick (~20ms, regardless of GUI sleep state — see
 /// `pending_negative_wake`'s doc comment). Wakes the app exactly once a pending negative
 /// hover entry's TTL has elapsed, so `hover()` gets a chance to notice the expiry and retry.
-fn checkPendingNegativeWake(self: *Client) void {
+/// `io` comes from the caller (`dispatchThreadMain`'s own parameter, itself captured once on
+/// the draw thread in `ensureStarted`) rather than the `dvui.io` global — see `ensureStarted`'s
+/// doc comment for why reading that global from a background thread is unsafe.
+fn checkPendingNegativeWake(self: *Client, io: std.Io) void {
     self.hover_cache_lock.lock();
     const due = if (self.pending_negative_wake) |cached_at|
-        cached_at.untilNow(dvui.io).raw.toMilliseconds() >= hover_negative_cache_ttl_ms
+        cached_at.untilNow(io).raw.toMilliseconds() >= hover_negative_cache_ttl_ms
     else
         false;
     if (due) self.pending_negative_wake = null;
@@ -1492,12 +1625,13 @@ fn checkPendingNegativeWake(self: *Client) void {
 
 /// Stores a hover result (or a negative `null` entry — see `CacheEntry.text`) in the cache
 /// and evicts the oldest entry if it's now over `hover_cache_limit`. `owned_text`, if
-/// non-null, must already be owned by `gpa` — this function takes ownership of it.
-fn cacheHoverResult(self: *Client, gpa: std.mem.Allocator, key: CacheKey, owned_text: ?[]u8) void {
+/// non-null, must already be owned by `gpa` — this function takes ownership of it. `io` — see
+/// `checkPendingNegativeWake`'s doc comment.
+fn cacheHoverResult(self: *Client, io: std.Io, gpa: std.mem.Allocator, key: CacheKey, owned_text: ?[]u8) void {
     self.hover_cache_lock.lock();
     defer self.hover_cache_lock.unlock();
     self.cache_seq += 1;
-    const cached_at: std.Io.Clock.Timestamp = .now(dvui.io, .awake);
+    const cached_at: std.Io.Clock.Timestamp = .now(io, .awake);
     var confirmed_negative = false;
     if (owned_text == null) {
         if (self.unconfirmed_negative_keys.remove(key)) {
@@ -2341,6 +2475,23 @@ fn handleServerRequest(self: *Client, io: std.Io, id: i64, method: []const u8, p
     self.sendResponse(io, id, @as(?u8, null)) catch |err| {
         dvui.log.warn("{s}: failed to ack {s}: {any}", .{ self.config.language_id, method, err });
     };
+}
+
+/// Forwards a `window/logMessage` notification to the Output panel at its own reported
+/// severity (LSP `MessageType`: 1=Error, 2=Warning, 3=Info, 4=Log — anything else maps to
+/// `.debug` rather than being dropped, since an unrecognized-but-present level is still
+/// signal). Silently does nothing if `params` is missing/malformed — this is best-effort
+/// diagnostics, not a protocol requirement.
+fn handleLogMessage(self: *Client, params: ?std.json.Value) void {
+    const p = params orelse return;
+    const message = jsonString(p, "message") orelse return;
+    const level: std.log.Level = switch (jsonInt(p, "type") orelse 4) {
+        1 => .err,
+        2 => .warn,
+        3 => .info,
+        else => .debug,
+    };
+    self.config.log(self.config.language_id, level, message);
 }
 
 /// Polls `slot.ready` until it's set or `timeout_ms` elapses. Either way, removes the slot

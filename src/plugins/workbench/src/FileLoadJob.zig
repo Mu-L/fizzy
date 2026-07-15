@@ -56,6 +56,11 @@ doc_buf: []u8,
 
 err: ?anyerror = null,
 
+/// Set once the worker is dispatched via `std.Io.concurrent` (see `Editor.openFilePath`) —
+/// null if the job was destroyed before ever spawning (no plugin claims the extension, the
+/// map insert failed, wasm32, or dispatch itself failed). Released by `destroy`.
+future: ?std.Io.Future(void) = null,
+
 pub fn create(allocator: std.mem.Allocator, path: []const u8, owner: *sdk.Plugin, target_grouping: u64) !*FileLoadJob {
     const path_copy = try allocator.dupe(u8, path);
     errdefer allocator.free(path_copy);
@@ -79,7 +84,13 @@ pub fn create(allocator: std.mem.Allocator, path: []const u8, owner: *sdk.Plugin
     return job;
 }
 
-pub fn destroy(job: *FileLoadJob) void {
+/// Releases the `Io.Threaded` bookkeeping for the dispatched task (if any) before freeing the
+/// job itself. Every caller has already observed `done == true` (or never dispatched a worker
+/// at all) before calling this, so `Future.await` here is a futex wait against an already-
+/// finished task — effectively free, not the busy-spin `std.Thread.yield()` loop this
+/// replaced at `Editor.cancelPluginLoadingJobs`, the one call site that could actually block.
+pub fn destroy(job: *FileLoadJob, io: std.Io) void {
+    if (job.future) |*f| f.await(io);
     const a = job.allocator;
     a.free(job.path);
     a.free(job.doc_slab);

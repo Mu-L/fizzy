@@ -1,6 +1,7 @@
 //! Draws the shell's built-in "Output" bottom panel: a scrolling, color-coded view of
-//! everything captured in `OutputLog`. Registered with `owner = null` in `Editor.zig`,
-//! same as the Settings sidebar view.
+//! everything captured in `OutputLog`, with a vertical tab strip on the left to filter by
+//! source scope ("All" plus one tab per plugin/scope seen so far). Registered with
+//! `owner = null` in `Editor.zig`, same as the Settings sidebar view.
 
 const std = @import("std");
 const dvui = @import("dvui");
@@ -11,13 +12,51 @@ var scroll_info: dvui.ScrollInfo = .{};
 var follow = true;
 var last_seen_count: usize = 0;
 
+/// Selected tab, persisted as a bounded copy rather than a slice into `OutputLog`'s ring
+/// buffer — a scope string there can be freed on eviction or plugin unload between frames.
+/// Zero length means the "All" tab.
+var selected_scope_buf: [64]u8 = undefined;
+var selected_scope_len: usize = 0;
+
+fn selectedScope() ?[]const u8 {
+    return if (selected_scope_len == 0) null else selected_scope_buf[0..selected_scope_len];
+}
+
+fn selectScope(name: []const u8) void {
+    const n = @min(name.len, selected_scope_buf.len);
+    @memcpy(selected_scope_buf[0..n], name[0..n]);
+    selected_scope_len = n;
+}
+
 pub fn draw(_: ?*anyopaque) anyerror!void {
-    var vbox = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
-    defer vbox.deinit();
+    var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+    defer hbox.deinit();
 
     OutputLog.lock();
     defer OutputLog.unlock();
     const lines = OutputLog.items();
+
+    // Distinct scopes seen so far, in first-seen order — small (one per active plugin), so a
+    // linear scan per line is cheap. Arena-backed: pure per-frame scratch for the tab strip.
+    const arena = dvui.currentWindow().arena();
+    var scopes: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (lines) |line| {
+        var seen = false;
+        for (scopes.items) |s| {
+            if (std.mem.eql(u8, s, line.scope)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) scopes.append(arena, line.scope) catch {};
+    }
+
+    drawTabStrip(scopes.items);
+
+    const selected = selectedScope();
+
+    var vbox = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
+    defer vbox.deinit();
 
     if (follow and lines.len != last_seen_count) {
         scroll_info.scrollToFraction(.vertical, 1.0);
@@ -39,8 +78,13 @@ pub fn draw(_: ?*anyopaque) anyerror!void {
         .padding = .all(0),
     });
 
-    for (lines, 0..) |line, i| {
-        if (i > 0) tl.addText("\n", mono);
+    var shown: usize = 0;
+    for (lines) |line| {
+        if (selected) |s| {
+            if (!std.mem.eql(u8, s, line.scope)) continue;
+        }
+        if (shown > 0) tl.addText("\n", mono);
+        shown += 1;
         // Only the "level(scope): " prefix gets the level color — the message stays the
         // default text color, so a long line doesn't read as one solid block of red/purple.
         if (std.mem.indexOf(u8, line.text, ": ")) |idx| {
@@ -58,6 +102,42 @@ pub fn draw(_: ?*anyopaque) anyerror!void {
     // scrolled back down themselves, or nothing ever pushed it away). Any other position
     // means the user scrolled up, so leave it be until they return to the bottom.
     follow = scroll_info.offsetFromMax(.vertical) < 1.0;
+}
+
+/// Narrow vertical strip of tab buttons: "All" first, then one per distinct scope in
+/// `scopes` (first-seen order). Mirrors the workbench tab bar's selected/unselected
+/// convention — `.window` colors for the active tab, `.control` for the rest.
+fn drawTabStrip(scopes: []const []const u8) void {
+    var strip = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .expand = .vertical,
+        .min_size_content = .{ .w = 120 },
+        .background = true,
+        .gravity_x = 1.0,
+        .color_fill = dvui.themeGet().color(.control, .fill),
+    });
+    defer strip.deinit();
+
+    drawTab(@src(), "All", 0, selected_scope_len == 0);
+    for (scopes, 1..) |scope, i| {
+        drawTab(@src(), scope, i, selectedScope() != null and std.mem.eql(u8, selectedScope().?, scope));
+    }
+}
+
+fn drawTab(src: std.builtin.SourceLocation, label: []const u8, id_extra: usize, selected: bool) void {
+    const clicked = dvui.button(src, label, .{}, .{
+        .id_extra = id_extra,
+        .expand = .horizontal,
+        .margin = .{ .x = 2, .y = 1 },
+        .color_fill = if (selected) dvui.themeGet().color(.window, .fill) else .transparent,
+        .color_text = if (selected) dvui.themeGet().color(.window, .text) else dvui.themeGet().color(.control, .text),
+    });
+    if (clicked) {
+        if (id_extra == 0) {
+            selected_scope_len = 0;
+        } else {
+            selectScope(label);
+        }
+    }
 }
 
 fn levelColor(level: std.log.Level) dvui.Color {

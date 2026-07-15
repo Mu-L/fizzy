@@ -997,6 +997,7 @@ fn waitForPluginSaves(editor: *Editor, plugin: *sdk.Plugin) void {
 /// GUI thread before any teardown.
 fn cancelPluginLoadingJobs(editor: *Editor, plugin: *sdk.Plugin) void {
     if (editor.loading_jobs.count() == 0) return;
+    const io = dvui.io;
 
     // Signal cancellation first so a worker that has not yet entered (or has just exited) the
     // loader bails at its next checkpoint instead of re-entering the soon-unmapped image.
@@ -1019,8 +1020,10 @@ fn cancelPluginLoadingJobs(editor: *Editor, plugin: *sdk.Plugin) void {
     }
 
     for (owned.items) |job| {
-        // Block until the worker has fully left the dylib before we free through the owner.
-        while (!job.done.load(.acquire)) std.Thread.yield() catch {};
+        // Block until the worker has fully left the dylib before we free through the owner —
+        // a futex wait on the job's `Future` (see `Editor.openFilePath`), not the
+        // `std.Thread.yield()` busy-spin this replaced.
+        if (job.future) |*f| f.await(io);
         _ = editor.loading_jobs.remove(job.path);
         // Drop the partial open without inserting it into `open_files`. `ready`/`failed`
         // need exactly one `deinitDocumentBuffer`; a `cancelled` job was either freed by the
@@ -1030,7 +1033,7 @@ fn cancelPluginLoadingJobs(editor: *Editor, plugin: *sdk.Plugin) void {
             .ready, .failed => job.owner.deinitDocumentBuffer(job.doc_buf.ptr),
             else => {},
         }
-        job.destroy();
+        job.destroy(io);
     }
 }
 
@@ -1152,25 +1155,26 @@ pub fn postInit(editor: *Editor) !void {
     // near-empty shell's content: it iterates the Host registries rather than
     // hardcoding panes. Web-safe — the draw fns reach the same inline code the
     // editor tick already runs on wasm. Order = sidebar order.
+    // These 4 built-ins default to dylib-first with a static fallback, but none of them
+    // are actually shipped as dylibs right now (they keep the third-party shape purely as
+    // a template/example) — so the dylib load "fails" and falls back to static on every
+    // run. Not worth logging until that changes.
     if (loadWorkbenchFromDylibEnabled()) {
-        editor.loadWorkbenchDylib(fizzy.app.root_path) catch |err| {
-            dvui.log.warn("workbench dylib load failed ({s}); falling back to static plugin", .{@errorName(err)});
+        editor.loadWorkbenchDylib(fizzy.app.root_path) catch {
             try workbench_mod.plugin.register(&editor.host);
         };
     } else {
         try workbench_mod.plugin.register(&editor.host);
     }
     if (loadTextFromDylibEnabled()) {
-        editor.loadTextDylib(fizzy.app.root_path) catch |err| {
-            dvui.log.warn("text dylib load failed ({s}); falling back to static plugin", .{@errorName(err)});
+        editor.loadTextDylib(fizzy.app.root_path) catch {
             try text_mod.plugin.register(&editor.host);
         };
     } else {
         try text_mod.plugin.register(&editor.host);
     }
     if (loadImageFromDylibEnabled()) {
-        editor.loadImageDylib(fizzy.app.root_path) catch |err| {
-            dvui.log.warn("image dylib load failed ({s}); falling back to static plugin", .{@errorName(err)});
+        editor.loadImageDylib(fizzy.app.root_path) catch {
             try image_mod.plugin.register(&editor.host);
         };
     } else {
@@ -1178,8 +1182,7 @@ pub fn postInit(editor: *Editor) !void {
     }
     if (comptime builtin.target.cpu.arch != .wasm32) {
         if (loadMarkdownFromDylibEnabled()) {
-            editor.loadMarkdownDylib(fizzy.app.root_path) catch |err| {
-                dvui.log.warn("markdown dylib load failed ({s}); falling back to static plugin", .{@errorName(err)});
+            editor.loadMarkdownDylib(fizzy.app.root_path) catch {
                 try markdown_mod.plugin.register(&editor.host);
             };
         } else {
@@ -2792,27 +2795,32 @@ pub fn openFilePath(editor: *Editor, path: []const u8, grouping: u64) !bool {
     };
 
     // Spawn a worker. The job owns the path string we'll key the map by.
+    const io = dvui.io;
     const job = try FileLoadJob.create(fizzy.app.allocator, path, owner, grouping);
-    errdefer job.destroy();
+    errdefer job.destroy(io);
 
     try editor.loading_jobs.put(fizzy.app.allocator, job.path, job);
     editor.last_load_request_path = job.path;
 
     if (comptime builtin.target.cpu.arch == .wasm32) {
-        // Wasm has no Thread.spawn. File-open from a wasm-reachable path needs
+        // Wasm has no Io.concurrent worker pool. File-open from a wasm-reachable path needs
         // a synchronous load (the file picker hands us bytes inline). Not yet
         // implemented — drop the job here and report unsupported.
         _ = editor.loading_jobs.remove(job.path);
-        job.destroy();
+        job.destroy(io);
         dvui.log.warn("Async file load not yet supported on web", .{});
         return false;
     }
-    const thread = std.Thread.spawn(.{}, FileLoadJob.workerMain, .{job}) catch |err| {
+    // `Io.concurrent`, not a raw `std.Thread.spawn` + `.detach()`: dispatches onto
+    // `Io.Threaded`'s pooled workers (opening many files at once — a project-wide search
+    // result, a multi-file drag-drop — no longer means one fresh OS thread each), and the
+    // returned `Future` gives `cancelPluginLoadingJobs`/`destroy` a proper futex-based wait
+    // instead of the `std.Thread.yield()` busy-spin this replaced.
+    job.future = io.concurrent(FileLoadJob.workerMain, .{job}) catch |err| {
         _ = editor.loading_jobs.remove(job.path);
-        job.destroy();
+        job.destroy(io);
         return err;
     };
-    thread.detach();
 
     return true;
 }
@@ -2854,6 +2862,7 @@ pub fn openFileFromBytes(editor: *Editor, path: []u8, bytes: []const u8, groupin
 /// failed/cancelled jobs, and focuses the most-recently-requested file as it completes.
 pub fn processLoadingJobs(editor: *Editor) void {
     if (editor.loading_jobs.count() == 0) return;
+    const io = dvui.io;
 
     // Snapshot the job pointers because we'll be mutating the map during iteration.
     var to_remove: std.ArrayListUnmanaged(*FileLoadJob) = .empty;
@@ -2879,7 +2888,7 @@ pub fn processLoadingJobs(editor: *Editor) void {
                 editor.insertOpenDoc(job.doc_buf.ptr, owner, id) catch {
                     dvui.log.err("Failed to insert loaded file into open_files: {s}", .{job.path});
                     owner.deinitDocumentBuffer(job.doc_buf.ptr);
-                    job.destroy();
+                    job.destroy(io);
                     continue;
                 };
 
@@ -2905,7 +2914,7 @@ pub fn processLoadingJobs(editor: *Editor) void {
             },
         }
 
-        job.destroy();
+        job.destroy(io);
     }
 }
 
@@ -3475,10 +3484,13 @@ pub fn deinit(editor: *Editor) !void {
     // queued jobs need to finish writing or be dropped before File data is freed.
     for (editor.host.plugins.items) |plugin| plugin.deinit();
     // Signal cancel to any in-flight load workers. They check the flag after `fromPath` returns
-    // and discard the result; we can't synchronously join them without blocking quit, so we
-    // accept a brief window where a worker may still be running with a discardable result.
-    // The detached threads' allocations are short-lived (heap file structs); leaking them on
-    // hard quit is acceptable here.
+    // and discard the result; we deliberately don't await their `Future`s here — `.cancel()`
+    // still blocks until the worker's current `loadDocument` call returns (cancellation is
+    // only observed *after* it returns — see `FileLoadJob`'s doc comment), which could be
+    // slow, and we can't afford to block quit on that. We accept a brief window where a
+    // worker may still be running with a discardable result.
+    // Pooled-worker allocations (the job struct, and the `Io.Threaded` bookkeeping behind its
+    // unawaited `Future`) are short-lived; leaking them on hard quit is acceptable here.
     editor.cancelAllLoadingJobs();
     // Drop our bookkeeping for the jobs. Worker threads still own their result memory until
     // they observe the cancellation and discard it; the process is exiting anyway.

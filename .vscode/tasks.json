@@ -143,7 +143,19 @@
             }
         },
         {
-            "label": "Package (Velopack)",
+            "label": "Package (Velopack) Debug",
+            "type": "shell",
+            "command": "[ -f .env.local ] && set -a && . ./.env.local && set +a; zig build package",
+            "windows": {
+                "command": "zig build package"
+            },
+            "group": {"kind": "build", "isDefault": true},
+            "presentation": {
+                "clear": true
+            }
+        },
+        {
+            "label": "Package (Velopack) Release",
             "type": "shell",
             "command": "[ -f .env.local ] && set -a && . ./.env.local && set +a; zig build package -Doptimize=ReleaseFast",
             "windows": {

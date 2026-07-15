@@ -28,6 +28,12 @@ pub const fs = @import("fs.zig");
 pub const platform = @import("platform.zig");
 pub const paths = @import("paths.zig");
 
+/// Resolves the user's real login-shell `PATH` — see `shell_env.zig`.
+pub const shell_env = @import("shell_env.zig");
+
+/// Darwin-only raw `posix_spawn` wrapper — see `darwin_spawn.zig` for why.
+pub const darwin_spawn = @import("darwin_spawn.zig");
+
 /// Generic dvui hub: dialog framework, helpers, and the generic widgets.
 pub const dvui = @import("dvui.zig");
 

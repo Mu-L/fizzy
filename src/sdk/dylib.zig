@@ -239,6 +239,37 @@ pub fn exportManifestSymbols(comptime manifest: PluginManifest) void {
     @export(&ManifestEntry.pluginVersion, .{ .name = symbol_plugin_version });
 }
 
+/// `std.Options` that routes every `std.log`/`dvui.log` call in this dylib's whole compilation
+/// unit — the plugin's own code *and* anything statically compiled into it, dvui's own internal
+/// logging included — to the shell's Output panel, tagged with the plugin's own id. Still calls
+/// dvui's default sink too, so `zig build run` terminal output is unaffected.
+///
+/// A dylib has its own private `std.log` binding (see `Client.Config.log`'s doc comment for why
+/// that means `dvui.log.warn` alone never reaches the host), so without this, everything a
+/// plugin logs is invisible outside its own stderr — exactly what made zls's hover hang silent
+/// until `Client.zig` grew explicit forwarding for its own logging. This is that same fix, but
+/// generic: any plugin can opt in for its *entire* compilation unit with one `root.zig` line,
+/// no per-call-site changes.
+///
+/// One id per plugin (not the raw log scope) because `dvui.log` is always scoped `.dvui`
+/// regardless of which plugin dylib calls it — using the scope as-is would merge every plugin's
+/// dvui-originated logging into one shared tab, defeating the point of per-plugin filtering.
+///
+/// Opt in from `root.zig` (`plugin_mod` is the same module passed to `exportEntry` below):
+///   pub const std_options: std.Options = sdk.dylib.stdOptions(@import("src/plugin.zig"));
+pub fn stdOptions(comptime plugin_mod: type) std.Options {
+    const manifest = plugin_mod.manifest;
+    const Impl = struct {
+        fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
+            dvui.App.logFn(level, scope, format, args);
+            const msg = std.fmt.allocPrint(runtime.allocator(), format, args) catch return;
+            defer runtime.allocator().free(msg);
+            runtime.host().logLine(level, manifest.id, msg);
+        }
+    };
+    return .{ .logFn = Impl.logFn };
+}
+
 /// Emit the C entry symbols every plugin dylib must export, wired to the plugin's
 /// own `register` and `manifest`.
 ///
