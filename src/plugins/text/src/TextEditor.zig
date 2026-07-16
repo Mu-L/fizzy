@@ -1387,12 +1387,19 @@ fn parseHoverFileUri(arena: std.mem.Allocator, url: []const u8) ?struct { path: 
     const prefix = "file://";
     if (!std.ascii.startsWithIgnoreCase(url, prefix)) return null;
 
-    var path_part = url[prefix.len..];
+    // Everything up to the `#L<line>[:C<col>]` fragment, if any, is the URI itself — kept
+    // whole (still `file://`-prefixed) so it can go through `UriUtil.uriToPath` below rather
+    // than being percent-decoded by hand here. Hand-decoding used to skip the Windows
+    // drive-letter fixup `uriToPath` applies (`file:///C:/...` -> `C:\...`, not the
+    // `/C:/...` mess a plain percent-decode leaves you with), which is why "Go to" links
+    // inside a hover popup — unlike plain Ctrl+click goto-definition, which already went
+    // through `uriToPath` — used to fail on Windows with `error.BadPathName`.
+    var uri_part = url;
     var line_1based: u32 = 0;
     var character_1based: u32 = 0;
-    if (std.mem.indexOfScalar(u8, path_part, '#')) |hash| {
-        const frag = path_part[hash + 1 ..];
-        path_part = path_part[0..hash];
+    if (std.mem.indexOfScalar(u8, url, '#')) |hash| {
+        const frag = url[hash + 1 ..];
+        uri_part = url[0..hash];
         if (frag.len >= 2 and (frag[0] == 'L' or frag[0] == 'l')) {
             var i: usize = 1;
             var line: u32 = 0;
@@ -1411,23 +1418,7 @@ fn parseHoverFileUri(arena: std.mem.Allocator, url: []const u8) ?struct { path: 
         }
     }
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    var i: usize = 0;
-    while (i < path_part.len) {
-        if (path_part[i] == '%' and i + 2 < path_part.len) {
-            const byte = std.fmt.parseInt(u8, path_part[i + 1 .. i + 3], 16) catch {
-                out.append(arena, path_part[i]) catch return null;
-                i += 1;
-                continue;
-            };
-            out.append(arena, byte) catch return null;
-            i += 3;
-        } else {
-            out.append(arena, path_part[i]) catch return null;
-            i += 1;
-        }
-    }
-    const path = out.toOwnedSlice(arena) catch return null;
+    const path = core.lsp.UriUtil.uriToPath(arena, uri_part) catch return null;
     return .{ .path = path, .line_1based = line_1based, .character_1based = character_1based };
 }
 
