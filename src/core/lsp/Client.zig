@@ -328,18 +328,13 @@ encoding: Protocol.PositionEncoding = .utf16,
 completion_resolve_supported: bool = false,
 shutdown: std.atomic.Value(bool) = .init(false),
 
-/// Background threads this client owns. Plain `std.Thread` (not `Io.Group`/`Io.concurrent`
-/// onto `Io.Threaded`'s pooled workers) — reverted after the pooled-worker version shipped a
-/// Windows-only hover crash that survived two targeted point-fixes elsewhere (see git history
-/// around "rework using new Io" and the "utf16 fix"/"Attempt to fix crash on Windows" follow-ups)
-/// with the failure unchanged, which narrows it to this task-dispatch machinery itself. Each is
-/// joined (not detached) at `shutdownProcess`, including `startup_thread` — unlike the original
-/// pre-`Io.Group` version of this code, which detached the startup thread and never waited for
-/// it, a real use-after-free risk if shutdown landed mid-`spawnProcess`/mid-`handshake`.
-startup_thread: ?std.Thread = null,
-reader_thread: ?std.Thread = null,
-stderr_thread: ?std.Thread = null,
-dispatch_thread: ?std.Thread = null,
+/// Every background task this client owns (`startupThreadMain`, `readerThreadMain`,
+/// `stderrDrainThreadMain`, `dispatchThreadMain`) — see `ensureStarted`'s and
+/// `shutdownProcess`'s doc comments. One shared group rather than four separate
+/// `?std.Thread` fields: `shutdownProcess` needs to wait for all of them together anyway
+/// (there's no scenario where only some are running), and `Io.Group.concurrent` dispatches
+/// onto `Io.Threaded`'s pooled workers instead of a fresh OS thread per (re)start.
+tasks: std.Io.Group = .init,
 
 write_lock: SpinLock = .{},
 
@@ -1032,17 +1027,20 @@ fn ensureStarted(self: *Client, doc_path: []const u8) bool {
             // non-atomic global the draw thread also *writes* every frame
             // (`Editor.syncLoadedPluginDvuiContexts` → `dvui_context.inject`) — reading it
             // concurrently from another thread would race that writer with no synchronization,
-            // risking a torn read of the vtable pointer. A freshly spawned `std.Thread` sees
-            // this exact value from the moment it starts running, same guarantee `Io.Group`
-            // gave here — this capture is the last read of the global on this thread for this
+            // risking a torn read of the vtable pointer. `Io.Group.concurrent` guarantees the
+            // task is fully assigned a unit of concurrency before returning (unlike `Io.async`,
+            // which is allowed to fall back to running inline on this — the draw — thread under
+            // load), so this capture is the last read of the global on this thread for this
             // task; `startupThreadMain` only ever sees its own copy from here on.
             const io = dvui.io;
-            self.state.store(.starting, .release);
-            self.startup_thread = std.Thread.spawn(.{}, startupThreadMain, .{ self, io }) catch |err| {
-                dvui.log.warn("{s}: std.Thread.spawn(startupThreadMain) failed: {any}", .{ self.config.language_id, err });
-                self.state.store(.unavailable, .release);
+            self.tasks.concurrent(io, startupThreadMain, .{ self, io }) catch |err| {
+                // `ConcurrencyUnavailable` is a documented transient condition (pool
+                // exhaustion) — leave state as `not_started` so the next hover retries,
+                // rather than permanently disabling the client the way `.unavailable` would.
+                dvui.log.warn("{s}: Io.Group.concurrent(startupThreadMain) failed: {any}", .{ self.config.language_id, err });
                 return false;
             };
+            self.state.store(.starting, .release);
             return false;
         },
     }
@@ -1051,7 +1049,7 @@ fn ensureStarted(self: *Client, doc_path: []const u8) bool {
 /// Spawns the subprocess (see `spawnProcess`'s doc comment for why that's safe from a
 /// background thread now — it was not, before `darwin_spawn` replaced the fork-based
 /// `std.process.spawn` on the platform that mattered) and then runs the handshake — both on
-/// this one background thread, so `ensureStarted` never blocks the draw thread.
+/// this one `Io.Group`-dispatched task, so `ensureStarted` never blocks the draw thread.
 fn startupThreadMain(self: *Client, io: std.Io) void {
     // Wakes the UI on a failed start — without this, a `hover()`/etc. call that arrived while
     // zls was still starting up silently no-ops via `ensureStarted` returning false (before
@@ -1202,8 +1200,8 @@ fn handshake(self: *Client, io: std.Io) !void {
     const root = self.workspace_root orelse return error.NoWorkspace;
     const gpa = self.config.allocator;
 
-    self.reader_thread = try std.Thread.spawn(.{}, readerThreadMain, .{ self, io });
-    self.stderr_thread = try std.Thread.spawn(.{}, stderrDrainThreadMain, .{ self, io });
+    try self.tasks.concurrent(io, readerThreadMain, .{ self, io });
+    try self.tasks.concurrent(io, stderrDrainThreadMain, .{ self, io });
 
     const root_uri = try UriUtil.pathToUri(gpa, root);
     defer gpa.free(root_uri);
@@ -1278,7 +1276,7 @@ fn handshake(self: *Client, io: std.Io) !void {
 
     try self.sendNotification(io, "initialized", Protocol.EmptyObject{});
 
-    self.dispatch_thread = try std.Thread.spawn(.{}, dispatchThreadMain, .{ self, io });
+    try self.tasks.concurrent(io, dispatchThreadMain, .{ self, io });
 }
 
 fn shutdownProcess(self: *Client) void {
@@ -1289,29 +1287,17 @@ fn shutdownProcess(self: *Client) void {
     self.shutdown.store(true, .release);
     if (self.child) |*c| c.kill(io);
 
-    // Joins every thread this client may have started, `startup_thread` included — not just
-    // the three loop threads it starts partway through. Covers shutdown landing while still
-    // mid-`spawnProcess`/mid-`handshake` (state `.starting`, reader/stderr/dispatch not started
-    // yet): without joining `startup_thread` too, it would keep running past `self`'s lifetime,
-    // a real use-after-free. `shutdown`/`child.kill` above are what actually make each loop
-    // thread notice and exit promptly — the joins below are purely that wait, not the
-    // cancellation signal.
-    if (self.startup_thread) |t| {
-        t.join();
-        self.startup_thread = null;
-    }
-    if (self.reader_thread) |t| {
-        t.join();
-        self.reader_thread = null;
-    }
-    if (self.stderr_thread) |t| {
-        t.join();
-        self.stderr_thread = null;
-    }
-    if (self.dispatch_thread) |t| {
-        t.join();
-        self.dispatch_thread = null;
-    }
+    // Waits for every task in the group — `startupThreadMain` included, not just the three
+    // loop threads it starts partway through. The old per-thread `?std.Thread` fields could
+    // only ever join threads that had *already* been spawned by the time shutdown ran; if
+    // shutdown landed while still mid-`spawnProcess`/mid-handshake (state `.starting`, reader/
+    // stderr/dispatch not started yet), the detached startup thread was never waited on at
+    // all — a real use-after-free risk if it kept running past `self`'s lifetime. `Io.Group`
+    // tracks the whole family as one unit, so this now genuinely blocks until nothing is left
+    // touching `self`, regardless of which stage shutdown catches it at. `shutdown`/`child.kill`
+    // above are what actually make each loop thread notice and exit promptly — `await` here is
+    // purely the join, not the cancellation signal.
+    self.tasks.await(io) catch {};
 
     self.child = null;
     self.shutdown.store(false, .release);
