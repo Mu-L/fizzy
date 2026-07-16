@@ -2150,7 +2150,17 @@ fn resolveCompletionItem(item: std.json.Value, bytes: []const u8, byte_offset: u
 
     const word_start = wordStartBefore(bytes, byte_offset);
     if (word_start > bytes.len or byte_offset > bytes.len) return null;
-    const already_typed = bytes[word_start..byte_offset];
+    var already_typed = bytes[word_start..byte_offset];
+
+    // zls omits the leading `@` sigil from a builtin's `newText`/`insertText` — its
+    // `textEdit.range` starts just after the `@` since the server only means to replace the
+    // name, not the sigil. The `@` is already in the buffer, so when the candidate text itself
+    // doesn't repeat it, drop it from the derived prefix too, otherwise every builtin candidate
+    // fails the startsWith check below and gets dropped (typing `@i` never suggests `@intCast`).
+    if (already_typed.len > 0 and already_typed[0] == '@' and !std.mem.startsWith(u8, insert_text, "@")) {
+        already_typed = already_typed[1..];
+    }
+
     if (!std.mem.startsWith(u8, insert_text, already_typed)) return null;
     insert_text = insert_text[already_typed.len..];
 
