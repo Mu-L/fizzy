@@ -1156,7 +1156,18 @@ fn spawnChild(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, cwd:
 /// cargo, zvm, or anywhere else the user's own shell profile already knows about resolve
 /// correctly, without fizzy having to guess at or hardcode install locations itself. Caller
 /// owns the returned slice; returns null if `name` isn't found on either PATH.
+///
+/// Windows-only, short-circuits immediately: a GUI-launched app there already inherits the same
+/// session-wide PATH a terminal does (no launchd/LaunchServices-style gap to work around), so
+/// `std.process.spawn`'s own PATH search over the bare name already finds a normally-installed
+/// server. Necessary, not just redundant — `findInPath` below splits on POSIX `:`, which shreds
+/// a Windows `;`-separated PATH (itself full of `:` after every drive letter, e.g.
+/// `C:\Windows\...`) into fragments that aren't absolute paths at all, and
+/// `Io.Dir.accessAbsolute` asserts its input is absolute — hit as "reached unreachable code" on
+/// the very first language-server startup on Windows, independent of which mechanism spawned
+/// that background thread.
 fn resolveExecutable(gpa: std.mem.Allocator, io: std.Io, name: []const u8) ?[]u8 {
+    if (comptime builtin.os.tag == .windows) return null;
     if (std.mem.indexOfScalar(u8, name, '/') != null) return null;
 
     const inherited_path: ?[]const u8 = if (std.c.getenv("PATH")) |p| std.mem.span(p) else null;
@@ -1166,7 +1177,8 @@ fn resolveExecutable(gpa: std.mem.Allocator, io: std.Io, name: []const u8) ?[]u8
 }
 
 /// Searches each `:`-separated directory in `path_value` for `name`, in order, returning the
-/// first that exists. Caller owns the returned slice.
+/// first that exists. Caller owns the returned slice. POSIX-only (`:` separator) — see
+/// `resolveExecutable`'s doc comment for why Windows never reaches this.
 fn findInPath(gpa: std.mem.Allocator, io: std.Io, path_value: ?[]const u8, name: []const u8) ?[]u8 {
     const p = path_value orelse return null;
     var it = std.mem.splitScalar(u8, p, ':');
