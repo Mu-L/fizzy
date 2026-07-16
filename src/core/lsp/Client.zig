@@ -1775,17 +1775,9 @@ fn runCompletionJob(self: *Client, io: std.Io, pc: PendingCompletion) !void {
         gpa.free(c.raw_json);
     };
 
-    // Diagnostic only — captures the first candidate `resolveCompletionItem` rejects, so a
-    // "completions silently vanished" report can be told apart from "zls sent nothing" (the
-    // `raw_items.len == 0` branch above) without needing a debugger. See its use below.
-    var first_dropped_label: []const u8 = "";
-
     for (raw_items) |item_obj| {
         if (resolved.items.len >= completion_max_items) break;
-        const r = resolveCompletionItem(item_obj, pc.bytes, pc.byte_offset) orelse {
-            if (first_dropped_label.len == 0) first_dropped_label = jsonString(item_obj, "label") orelse "?";
-            continue;
-        };
+        const r = resolveCompletionItem(item_obj, pc.bytes, pc.byte_offset) orelse continue;
         const owned_label = gpa.dupe(u8, r.label) catch continue;
         const owned_text = gpa.dupe(u8, r.insert_text) catch {
             gpa.free(owned_label);
@@ -1831,13 +1823,6 @@ fn runCompletionJob(self: *Client, io: std.Io, pc: PendingCompletion) !void {
     }
 
     if (resolved.items.len == 0) {
-        var msg_buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(
-            &msg_buf,
-            "completion: zls returned {d} candidate(s) (e.g. \"{s}\") but none survived resolveCompletionItem",
-            .{ raw_items.len, first_dropped_label },
-        ) catch "completion: zls candidates were all filtered out";
-        self.config.log(self.config.language_id, .debug, msg);
         self.cacheCompletionResult(gpa, pc.key, null);
         return;
     }
