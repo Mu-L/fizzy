@@ -32,13 +32,29 @@ pub fn draw(_: ?*anyopaque) anyerror!void {
     var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer hbox.deinit();
 
-    OutputLog.lock();
-    defer OutputLog.unlock();
-    const lines = OutputLog.items();
+    // Snapshot into the frame arena rather than holding `OutputLog`'s lock across the draw
+    // below: that draw resolves the theme's mono font (see `mono` below), and some themes'
+    // fonts fail to resolve, which logs a warning — reentering `OutputLog.append` on this
+    // same thread. Holding the lock that long turns that into a self-deadlock (the log's
+    // spinlock is not reentrant), so we copy what we need and unlock before drawing anything.
+    const arena = dvui.currentWindow().arena();
+    const lines: []const OutputLog.Line = blk: {
+        OutputLog.lock();
+        defer OutputLog.unlock();
+        const src = OutputLog.items();
+        const copy = arena.alloc(OutputLog.Line, src.len) catch break :blk &.{};
+        for (src, copy) |s, *d| {
+            d.* = .{
+                .level = s.level,
+                .scope = arena.dupe(u8, s.scope) catch "",
+                .text = arena.dupe(u8, s.text) catch "",
+            };
+        }
+        break :blk copy;
+    };
 
     // Distinct scopes seen so far, in first-seen order — small (one per active plugin), so a
-    // linear scan per line is cheap. Arena-backed: pure per-frame scratch for the tab strip.
-    const arena = dvui.currentWindow().arena();
+    // linear scan per line is cheap.
     var scopes: std.ArrayListUnmanaged([]const u8) = .empty;
     for (lines) |line| {
         var seen = false;
