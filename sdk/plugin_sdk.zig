@@ -570,6 +570,14 @@ pub fn exportModules(
     sdk_mod.addImport("dvui", dvui_proxy_mod);
     sdk_mod.addImport("proxy_bridge", proxy_bridge_mod);
     sdk_mod.addImport("core", core_mod);
+    // See the matching comment in `build/sdk.zig`. `sdk_version.zig` needs no `repoPath` hop:
+    // unlike `src/…`, it lives at this package's root in *both* layouts (in-repo `fizzy/sdk/`
+    // and the release tarball, whose root is that same directory).
+    sdk_mod.addImport("sdk_version", b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("sdk_version.zig"),
+    }));
 
     b.modules.put(b.graph.arena, b.dupe("dvui"), dvui_proxy_mod) catch @panic("OOM");
     b.modules.put(b.graph.arena, b.dupe("proxy_bridge"), proxy_bridge_mod) catch @panic("OOM");

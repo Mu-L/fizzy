@@ -17,12 +17,12 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-block=$(awk '/pub const sdk_version = std\.SemanticVersion\{/,/\};/' src/sdk/sdk_version.zig)
+block=$(awk '/pub const sdk_version = std\.SemanticVersion\{/,/\};/' sdk/sdk_version.zig)
 major=$(grep -oE '\.major = [0-9]+' <<<"$block" | grep -oE '[0-9]+')
 minor=$(grep -oE '\.minor = [0-9]+' <<<"$block" | grep -oE '[0-9]+')
 patch=$(grep -oE '\.patch = [0-9]+' <<<"$block" | grep -oE '[0-9]+')
 if [[ -z "$major" || -z "$minor" || -z "$patch" ]]; then
-  echo "pack-sdk: failed to parse sdk_version from src/sdk/sdk_version.zig" >&2
+  echo "pack-sdk: failed to parse sdk_version from sdk/sdk_version.zig" >&2
   exit 1
 fi
 

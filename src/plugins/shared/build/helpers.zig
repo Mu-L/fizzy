@@ -27,7 +27,7 @@ pub const dylib_exports = [_][]const u8{
 /// relative import, same as `dylib_exports` above.
 pub const plugin_options_import = "fizzy_plugin_options";
 
-/// Derived from `src/sdk/sdk_version.zig` (`std`-only, unlike `version.zig` itself — see that
+/// Derived from `sdk/sdk_version.zig` (`std`-only, unlike `version.zig` itself — see that
 /// file's doc comment for why this can't just `@import` `version.zig` directly) rather than
 /// duplicated as a literal: a hand-copied version string here silently drifted out of sync with
 /// every `sdk_version` bump for a long stretch before this, since nothing forced anyone to
@@ -37,7 +37,7 @@ pub const current_sdk_version: []const u8 = std.fmt.comptimePrint("{d}.{d}.{d}",
     version_number.sdk_version.minor,
     version_number.sdk_version.patch,
 });
-const version_number = @import("../../../sdk/sdk_version.zig");
+const version_number = @import("../../../../sdk/sdk_version.zig");
 
 /// Identity read from a built-in's `plugin.zig.zon` at configure time, plus its raw source.
 /// Same type as `plugin_sdk.IdentityManifest` (both `@import` `manifest_identity.zig` directly)

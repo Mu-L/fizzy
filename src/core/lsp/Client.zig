@@ -328,6 +328,20 @@ config: Config = undefined,
 state: std.atomic.Value(StateTag) = .init(.not_started),
 workspace_root: ?[]u8 = null,
 child: ?std.process.Child = null,
+/// Serializes "publish a freshly spawned child" (`spawnProcess`), "start the tasks that read
+/// its pipes" (`handshake`), and "kill whatever child exists" (`shutdownProcess`) against each
+/// other. Without it, `shutdownProcess` samples `child` once and kills only what it happened to
+/// see: a startup task still inside `beforeInitialize`'s login-shell PATH lookup (hundreds of
+/// ms) goes on to spawn a server *after* that sample, nothing ever kills it, and the reader /
+/// stderr-drain tasks it starts sit in `readv` on that live server's pipes forever — so
+/// `tasks.await` below never returns and the app hangs at quit with no diagnostics. The
+/// `shutdown` flag alone can't close the window; it has to be tested and acted on under the
+/// same lock that publishes the child.
+///
+/// An `Io.Mutex`, not the `SpinLock` the rest of this file uses: those guard O(1) map/list work
+/// and never block, while this one is held across `Child.kill`'s SIGTERM + `wait4` reap — a
+/// contended waiter must actually sleep rather than spin out the child's whole death.
+child_lock: std.Io.Mutex = .init,
 next_id: std.atomic.Value(i64) = .init(1),
 encoding: Protocol.PositionEncoding = .utf16,
 /// Parsed from the `initialize` response's `capabilities.completionProvider.resolveProvider` —
@@ -1109,12 +1123,17 @@ fn startupThreadMain(self: *Client, io: std.Io) void {
     // `command[0]` to an absolute path via a login-shell PATH lookup that must not run on
     // the UI thread, and on Linux `spawnProcess`'s own resolver has no shell-env fallback.
     if (self.config.beforeInitialize) |hook| hook();
-    self.spawnProcess(io) catch {
+    self.spawnProcess(io) catch |err| {
+        // Not a server failure — the app is quitting (or the folder closed) out from under a
+        // startup that was still resolving/spawning. Say nothing and touch no host state: the
+        // wake callback would poke a UI that is already tearing down.
+        if (err == error.ShuttingDown) return;
         self.state.store(.unavailable, .release);
         self.config.refresh();
         return;
     };
     self.handshake(io) catch |err| {
+        if (err == error.ShuttingDown) return;
         dvui.log.warn("{s}: language server unavailable ({any})", .{ self.config.language_id, err });
         var msg_buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "language server unavailable ({any})", .{err}) catch "language server unavailable";
@@ -1165,13 +1184,29 @@ fn spawnProcess(self: *Client, io: std.Io) !void {
         break :blk argv_buf[0..self.config.command.len];
     } else self.config.command;
 
-    self.child = spawnChild(gpa, io, argv, root) catch |err| {
+    // Cheap pre-check: don't even spawn if shutdown already started. The authoritative test is
+    // the one below, under `child_lock`.
+    if (self.shutdown.load(.acquire)) return error.ShuttingDown;
+
+    const spawned = spawnChild(gpa, io, argv, root) catch |err| {
         dvui.log.warn("{s}: could not spawn \"{s}\" ({any}) — hover/goto-definition disabled for this session", .{ self.config.language_id, argv[0], err });
         var msg_buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "could not spawn \"{s}\" ({any}) — hover/goto-definition disabled for this session", .{ argv[0], err }) catch "could not spawn language server";
         self.config.log(self.config.language_id, .warn, msg);
         return err;
     };
+
+    self.child_lock.lockUncancelable(io);
+    defer self.child_lock.unlock(io);
+    // `shutdownProcess` already ran its kill and will never look at `child` again — publishing
+    // this one would strand it (and, once `handshake` started reading its pipes, hang `await`).
+    // Reap it here instead, on this thread, before anything can start reading from it.
+    if (self.shutdown.load(.acquire)) {
+        var orphan = spawned;
+        orphan.kill(io);
+        return error.ShuttingDown;
+    }
+    self.child = spawned;
 }
 
 fn spawnChild(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, cwd: []const u8) !std.process.Child {
@@ -1258,8 +1293,20 @@ fn handshake(self: *Client, io: std.Io) !void {
     const root = self.workspace_root orelse return error.NoWorkspace;
     const gpa = self.config.allocator;
 
-    try self.tasks.concurrent(io, readerThreadMain, .{ self, io });
-    try self.tasks.concurrent(io, stderrDrainThreadMain, .{ self, io });
+    // Both readers dereference `self.child.?.stdout.?` / `.stderr` on entry, and both block in
+    // `readv` on those pipes for as long as the server lives. Starting them under `child_lock`
+    // (with the shutdown test in the same critical section) makes the two orderings against
+    // `shutdownProcess` the only two possible: either they start first and its `kill` EOFs the
+    // pipes out from under them, or its `kill` lands first and we see `shutdown` and never
+    // start them at all. Neither leaves a task reading a pipe nobody will ever close — and
+    // neither dereferences a `child` that `childCleanupPosix` has already nulled.
+    {
+        self.child_lock.lockUncancelable(io);
+        defer self.child_lock.unlock(io);
+        if (self.shutdown.load(.acquire) or self.child == null) return error.ShuttingDown;
+        try self.tasks.concurrent(io, readerThreadMain, .{ self, io });
+        try self.tasks.concurrent(io, stderrDrainThreadMain, .{ self, io });
+    }
 
     const root_uri = try UriUtil.pathToUri(gpa, root);
     defer gpa.free(root_uri);
@@ -1343,7 +1390,15 @@ fn shutdownProcess(self: *Client) void {
     const io = dvui.io;
 
     self.shutdown.store(true, .release);
-    if (self.child) |*c| c.kill(io);
+    {
+        // Under `child_lock` so this can't interleave with `spawnProcess` publishing a child or
+        // `handshake` starting the tasks that read its pipes — see `child_lock`'s doc comment.
+        // Held only for the kill, never across the `await` below: the startup task takes this
+        // same lock, so awaiting under it would deadlock the two against each other.
+        self.child_lock.lockUncancelable(io);
+        defer self.child_lock.unlock(io);
+        if (self.child) |*c| c.kill(io);
+    }
 
     // Waits for every task in the group — `startupThreadMain` included, not just the three
     // loop threads it starts partway through. The old per-thread `?std.Thread` fields could

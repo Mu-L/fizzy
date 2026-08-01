@@ -5,14 +5,6 @@ const core_mod = @import("../sdk/core_module.zig");
 const dvui = @import("dvui");
 const velopack = @import("velopack.zig");
 
-// `sdk/sdk_version.zig` mirrors `src/sdk/sdk_version.zig` for the plugin package boundary.
-comptime {
-    const pack = @import("../sdk/sdk_version.zig").sdk_version;
-    const runtime = @import("../src/sdk/sdk_version.zig").sdk_version;
-    if (pack.major != runtime.major or pack.minor != runtime.minor or pack.patch != runtime.patch)
-        @compileError("sdk/sdk_version.zig drifted from src/sdk/sdk_version.zig — bump both");
-}
-
 pub const Options = struct {
     windows_msvc_libc_opt: ?[]const u8 = null,
     fetch_msvc_opt: ?bool = null,

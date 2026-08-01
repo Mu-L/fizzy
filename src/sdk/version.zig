@@ -54,10 +54,18 @@ pub const VersionTriplet = dylib.VersionTriplet;
 ///     Left untouched otherwise. Bump this, not major, for that.
 ///   * **major** — stays 0 until there's an actual stable 1.0 contract to commit to.
 ///
-/// The value itself lives in `sdk_version.zig`, not here — that file has no dependency
-/// beyond `std`, so `plugin_sdk.zig` / `helpers.zig` (build-script code, which can't import this
-/// file — see its own doc comment) can read the current version.
-pub const sdk_version = @import("sdk_version.zig").sdk_version;
+/// The value itself lives in `sdk/sdk_version.zig` — the single place it is ever edited — not
+/// here: that file has no dependency beyond `std`, so `plugin_sdk.zig` / `helpers.zig`
+/// (build-script code, which can't import this file — see its own doc comment) can read the
+/// current version. It sits in the `sdk/` package rather than beside this file because a build
+/// script cannot `@import` outside its own package root, and `sdk/` is a standalone package that
+/// third-party plugins depend on directly.
+///
+/// Reached as a *named* module, not a relative path: Zig confines a module's relative imports to
+/// its own root (`src/sdk/`), so a file one directory up is unreachable by path from here no
+/// matter which package the build calls this. The `sdk_version` module is wired at both sites
+/// that build `fizzy_sdk` — `build/sdk.zig` (app) and `sdk/plugin_sdk.zig` (third-party).
+pub const sdk_version = @import("sdk_version").sdk_version;
 
 /// Recorded `dylib.sdk_shape_fingerprint` — see the module doc above for what this hashes and
 /// why it is a single target/mode-invariant literal rather than a per-target table. Update this
