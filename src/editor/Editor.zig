@@ -418,26 +418,31 @@ pub fn init(
         fizzy_dark.font_heading = .find(.{ .family = "PlusJakartaSans", .size = editor.settings.font_heading_size, .weight = .bold });
         fizzy_dark.font_mono = .find(.{ .family = "CozetteVector", .size = editor.settings.font_mono_size });
 
-        var moi: dvui.Theme = fizzy_dark;
-        moi.name = "Moi";
-        moi.window = .{
+        var strawberry: dvui.Theme = fizzy_dark;
+        strawberry.name = "Strawberry";
+        strawberry.window = .{
             .fill = .{ .r = 84, .g = 12, .b = 26, .a = 255 },
             .border = .{ .r = 104, .g = 62, .b = 72, .a = 255 },
-            .text = .{ .r = 255, .g = 190, .b = 190, .a = 240 },
+            .text = .{ .r = 255, .g = 200, .b = 210, .a = 255 },
         };
 
-        moi.control = .{
-            .fill = moi.window.fill.?.lighten(10),
+        strawberry.control = .{
+            .fill = .{ .r = 206, .g = 54, .b = 76, .a = 255 },
             .border = .{ .r = 104, .g = 62, .b = 72, .a = 255 },
-            .text = .{ .r = 255, .g = 235, .b = 235, .a = 200 },
+            .text = .{ .r = 220, .g = 45, .b = 57, .a = 255 },
         };
-        moi.highlight = .{
-            .fill = moi.window.fill.?.lighten(10),
+        strawberry.highlight = .{
+            .fill = .{ .r = 236, .g = 64, .b = 89, .a = 255 },
+            .text = strawberry.window.fill.?,
         };
 
-        moi.fill = moi.control.fill.?;
-        moi.text = moi.window.text.?;
-        moi.focus = moi.highlight.fill.?;
+        strawberry.err = .{
+            .fill = .{ .r = 255, .g = 10, .b = 20, .a = 255 },
+        };
+
+        strawberry.fill = .{ .r = 124, .g = 24, .b = 52, .a = 255 };
+        strawberry.text = strawberry.window.text.?.lighten(-10);
+        strawberry.focus = strawberry.highlight.fill.?;
 
         var fizzy_light = fizzy_dark;
         fizzy_light.dark = false;
@@ -478,14 +483,14 @@ pub fn init(
             return error.FailedToAppendTheme;
         };
 
-        editor.themes.append(app.allocator, moi) catch {
-            dvui.log.err("Failed to append moi theme", .{});
-            return error.FailedToAppendMoiTheme;
-        };
-
         editor.themes.append(app.allocator, fizzy_light) catch {
             dvui.log.err("Failed to append fizzy light theme", .{});
             return error.FailedToAppendFizzyLightTheme;
+        };
+
+        editor.themes.append(app.allocator, strawberry) catch {
+            dvui.log.err("Failed to append moi theme", .{});
+            return error.FailedToAppendMoiTheme;
         };
 
         for (dvui.Theme.builtins) |b| {
@@ -1534,7 +1539,7 @@ pub fn postInit(editor: *Editor) !void {
             .id = sub.id,
             .title = sub.title,
             .draw = Menu.drawModelMenu,
-            .ctx = @constCast(@ptrCast(sub)),
+            .ctx = @ptrCast(@constCast(sub)),
         });
     }
 

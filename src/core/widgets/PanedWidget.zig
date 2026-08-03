@@ -252,7 +252,7 @@ pub fn draw(self: *PanedWidget) void {
             r.x = (rs.r.x + rs.r.w / 2) - r.w / 2;
             r = r.outset(dvui.Rect.Physical.all(rs.s * 2));
 
-            dvui.icon(@src(), "grip", icons.tvg.lucide.@"grip-horizontal", .{ .stroke_color = dvui.themeGet().color(.control, .fill) }, .{
+            dvui.icon(@src(), "grip", icons.tvg.lucide.@"grip-horizontal", .{ .stroke_color = dvui.themeGet().color(.content, .fill) }, .{
                 .rect = rs.rectFromPhysical(r),
             });
         },
@@ -261,7 +261,7 @@ pub fn draw(self: *PanedWidget) void {
             r.y = (rs.r.y + rs.r.h / 2) - r.h / 2;
             r = r.outset(dvui.Rect.Physical.all(2 * rs.s));
 
-            dvui.icon(@src(), "grip", icons.tvg.lucide.@"grip-vertical", .{ .stroke_color = dvui.themeGet().color(.control, .fill) }, .{
+            dvui.icon(@src(), "grip", icons.tvg.lucide.@"grip-vertical", .{ .stroke_color = dvui.themeGet().color(.content, .fill) }, .{
                 .rect = rs.rectFromPhysical(r),
             });
         },

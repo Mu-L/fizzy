@@ -232,7 +232,7 @@ pub fn AppInit(win: *dvui.Window) !void {
 }
 
 // Run as app is shutting down before dvui.Window.deinit()
-pub fn AppDeinit() void {
+pub fn AppDeinit(_: *dvui.Window) void {
     // Persist the current windowed frame while the window still exists. No-op off macOS.
     fizzy.backend.saveWindowGeometry(fizzy.app.window);
     // `editor.deinit` runs each plugin's `deinit` first (pixi's persists its `.fizproject` and

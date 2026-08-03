@@ -46,9 +46,17 @@ pub const Catalog = struct {
     mutex: std.Io.Mutex = .init,
     summary: ?ParsedSummary = null,
     shard: ?ParsedShard = null,
-    /// Handle to the most recent worker; joined on the next `refresh`/`deinit` so finished
-    /// threads are reclaimed and shutdown waits for any in-flight fetch.
-    worker_thread: ?std.Thread = null,
+    /// The refresh worker, as a cancelable `Io` task group rather than a bare `std.Thread`.
+    ///
+    /// Shutdown has to *stop* an in-flight fetch, not merely wait for it. Nothing in the fetch
+    /// path sets a network timeout, so a registry host that accepts nothing and refuses nothing
+    /// (blackholed route, captive portal) parks the worker in a blocking connect for as long as
+    /// the OS allows — with a `std.Thread`, `deinit`'s `join` inherits that wait and the whole
+    /// app hangs at quit with no diagnostics. A `std.Io.Group` is the same shape the LSP client
+    /// uses (`core/lsp/Client.zig`'s `tasks`): `cancel` requests cancelation *and* awaits, and
+    /// `Io.Threaded` interrupts the blocked syscall so the worker returns `error.Canceled`
+    /// promptly instead of sitting on a dead socket.
+    tasks: std.Io.Group = .init,
 
     /// `base_url` is the catalog root (e.g. `https://plugins.fizzyed.it/catalog`);
     /// `abi_fingerprint_hex` is this host's own fingerprint as `"0x..."`, matching a
@@ -61,10 +69,9 @@ pub const Catalog = struct {
     }
 
     pub fn deinit(self: *Catalog) void {
-        if (self.worker_thread) |t| {
-            t.join();
-            self.worker_thread = null;
-        }
+        // Cancels *and* awaits, so the worker is provably finished — and therefore done touching
+        // `summary`/`shard` — before they're freed below. No-op when nothing is in flight.
+        self.tasks.cancel(self.io);
         if (self.summary) |*p| p.deinit();
         self.summary = null;
         if (self.shard) |*p| p.deinit();
@@ -77,20 +84,24 @@ pub const Catalog = struct {
         return @enumFromInt(self.status_value.load(.acquire));
     }
 
-    /// Kick off a background refresh. No-op while one is already in flight.
+    /// Kick off a background refresh. No-op while one is already in flight. Must be called from
+    /// the UI thread — `Io.Group` is explicitly not threadsafe against its own `await`/`cancel`.
     pub fn refresh(self: *Catalog) void {
         if (self.status() == .fetching) return;
-        if (self.worker_thread) |t| { // reclaim a previous, already-finished worker
-            t.join();
-            self.worker_thread = null;
-        }
+        // Release the previous worker's group resources. `status() != .fetching` means it has
+        // already stored its final status, so this returns as soon as that task unwinds.
+        self.tasks.await(self.io) catch {};
         self.status_value.store(@intFromEnum(Status.fetching), .release);
-        self.worker_thread = std.Thread.spawn(.{}, worker, .{self}) catch {
+        // `concurrent`, not `async`: this must run on its own thread, never inline on the caller's.
+        self.tasks.concurrent(self.io, worker, .{self}) catch {
             self.status_value.store(@intFromEnum(Status.failed), .release);
             return;
         };
     }
 
+    /// Runs in the task group. Every failure path — including `error.Canceled` from a shutdown
+    /// mid-fetch — lands on `.failed`, which is also the right resting state for a canceled
+    /// refresh: the app is on its way down, and a later `refresh` would overwrite it anyway.
     fn worker(self: *Catalog) void {
         const fresh_summary = registry.fetchSummary(self.allocator, self.io, self.summary_url) catch {
             self.status_value.store(@intFromEnum(Status.failed), .release);

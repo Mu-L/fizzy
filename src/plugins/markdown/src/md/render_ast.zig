@@ -8,6 +8,7 @@ const sdk = @import("fizzy_sdk");
 const md = @import("cmark_parse.zig");
 const net_image = @import("net_image.zig");
 const html_images_mod = @import("html_images.zig");
+const image_format = @import("image_format.zig");
 const url_join = @import("url_join.zig");
 
 const is_windows = builtin.target.os.tag == .windows;
@@ -24,6 +25,12 @@ pub const RenderState = struct {
     image_cache: std.StringHashMapUnmanaged([]u8) = .empty,
     /// @intFromPtr(bytes.ptr) → natural image size, cached to avoid per-frame stbi_info.
     image_sizes: std.AutoHashMapUnmanaged(usize, dvui.Size) = .empty,
+    /// Set of @intFromPtr(bytes.ptr) for image bytes stb could not decode. Without this, a
+    /// corrupt image re-enters stbi from
+    /// *both* the preload pass and the render pass on every single frame, each attempt logging a
+    /// dvui warning, for as long as the document is open. Recorded once, then the placeholder
+    /// path is taken.
+    image_decode_failed: std.AutoHashMapUnmanaged(usize, void) = .empty,
     /// @intFromPtr(node.n) → ExtNodeKind (extension nodes only).
     ext_node_kinds: std.AutoHashMapUnmanaged(usize, ExtNodeKind) = .empty,
     /// Set of @intFromPtr(node.n) for every node whose subtree contains an IMAGE.
@@ -43,6 +50,7 @@ pub const RenderState = struct {
         self.clear(gpa);
         self.image_cache.deinit(gpa);
         self.image_sizes.deinit(gpa);
+        self.image_decode_failed.deinit(gpa);
         self.ext_node_kinds.deinit(gpa);
         self.subtree_has_image.deinit(gpa);
         self.table_col_counts.deinit(gpa);
@@ -58,6 +66,7 @@ pub const RenderState = struct {
         }
         self.image_cache.clearRetainingCapacity();
         self.image_sizes.clearRetainingCapacity();
+        self.image_decode_failed.clearRetainingCapacity();
         self.ext_node_kinds.clearRetainingCapacity();
         self.subtree_has_image.clearRetainingCapacity();
         self.table_col_counts.clearRetainingCapacity();
@@ -219,6 +228,10 @@ fn preloadSingleImage(raw_url: []const u8, ctx: RenderContext, arena: std.mem.Al
         else => return,
     };
 
+    // Skipped at render time (see `renderImageUrl`), so there is nothing to warm.
+    if (image_format.isSvg(bytes)) return;
+    if (rasterDecodeFailed(ctx, bytes)) return;
+
     const dvui_key = textureCacheKey(bytes);
 
     // Cache hit: texture already warm this frame, nothing to do.
@@ -230,12 +243,26 @@ fn preloadSingleImage(raw_url: []const u8, ctx: RenderContext, arena: std.mem.Al
         .name = raw_url,
         .invalidation = .ptr,
     } };
-    const tex = dvui.Texture.fromImageSource(source) catch return;
+    const tex = dvui.Texture.fromImageSource(source) catch {
+        markUndecodable(ctx, bytes);
+        return;
+    };
     ctx.rs.image_sizes.put(ctx.gpa, @intFromPtr(bytes.ptr), .{
         .w = @floatFromInt(tex.width),
         .h = @floatFromInt(tex.height),
     }) catch {};
     dvui.textureAddToCache(dvui_key, tex);
+}
+
+/// True once stb has already refused these bytes. Both paths (preload and render) ask before
+/// handing anything to stbi, so a corrupt image costs one warning for the whole document rather
+/// than two per frame.
+fn rasterDecodeFailed(ctx: RenderContext, bytes: []const u8) bool {
+    return ctx.rs.image_decode_failed.contains(@intFromPtr(bytes.ptr));
+}
+
+fn markUndecodable(ctx: RenderContext, bytes: []const u8) void {
+    ctx.rs.image_decode_failed.put(ctx.gpa, @intFromPtr(bytes.ptr), {}) catch {};
 }
 
 /// The cache key dvui uses for an `imageFile` source with `.ptr` invalidation. dvui's own
@@ -473,6 +500,26 @@ fn linkLabelPlainText(link: md.Node, arena: std.mem.Allocator) std.mem.Allocator
     return try list.toOwnedSlice(arena);
 }
 
+/// Stand-in for an image whose bytes we have but nothing could decode — stb refused it and, for
+/// an SVG, so did the TinyVG conversion. Shows the alt text rather than an error box (a row of
+/// those reads as the *document* being broken), as a link when the image came from the network so
+/// it's still reachable.
+fn renderUndecodableImage(alt: []const u8, url: []const u8, ctx: RenderContext, ids: *IdGen) void {
+    const text = if (alt.len > 0) alt else "image";
+    if (!net_image.isRemote(url)) {
+        renderMarkdownImagePlaceholder(text, ids);
+        return;
+    }
+    var tl = dvui.textLayout(@src(), .{}, .{
+        .expand = .horizontal,
+        .margin = .{ .y = 2, .h = 2 },
+        .background = ctx.background,
+        .id_extra = ids.next(),
+    });
+    defer tl.deinit();
+    addMarkdownLink(tl, url, text, .{ .font = dvui.Font.theme(.mono).larger(-1) });
+}
+
 fn renderMarkdownImagePlaceholder(msg: []const u8, ids: *IdGen) void {
     dvui.labelNoFmt(@src(), msg, .{}, .{
         .expand = .horizontal,
@@ -519,6 +566,25 @@ const RequestedSize = struct {
 /// Draw one image by URL — local path or remote — with an optional caption. Shared by
 /// `![alt](url)` and by `<img src>` pulled out of raw HTML.
 fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx: RenderContext, ids: *IdGen) void {
+    const arena = dvui.currentWindow().arena();
+    const url_trim = std.mem.trim(u8, raw_url, " \t\r\n");
+
+    const resolved = resolveImageBytes(ctx, arena, url_trim);
+
+    // SVG is skipped outright — nothing drawn, no placeholder, no gap. dvui's `svgToTvg` covers
+    // only a small subset of SVG (no `defs`, `clipPath`, gradients, `text`/`tspan`), so anything
+    // beyond a hand-authored icon — every shields.io badge, every exported logo — converted into
+    // wrong-looking artwork plus a burst of "unrecognized element" warnings per frame. A document
+    // that silently omits them reads better than one full of mangled ones.
+    //
+    // Resolved *before* the layout box exists so a skipped image leaves no vertical margin
+    // behind. Format is sniffed from the bytes rather than the URL: badge URLs routinely have no
+    // extension at all.
+    switch (resolved) {
+        .bytes => |b| if (image_format.isSvg(b)) return,
+        else => {},
+    }
+
     var outer = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
         .margin = .{ .y = 4, .h = 4 },
@@ -530,10 +596,7 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
     // Percentage widths are *not* resolved against this — see below.
     const avail_w = outer.data().contentRect().w;
 
-    const arena = dvui.currentWindow().arena();
-    const url_trim = std.mem.trim(u8, raw_url, " \t\r\n");
-
-    const bytes: []const u8 = switch (resolveImageBytes(ctx, arena, url_trim)) {
+    const bytes: []const u8 = switch (resolved) {
         .bytes => |b| b,
         .pending => {
             renderMarkdownImagePlaceholder("loading image…", ids);
@@ -555,6 +618,11 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
         },
     };
 
+    if (rasterDecodeFailed(ctx, bytes)) {
+        renderUndecodableImage(alt, url_trim, ctx, ids);
+        return;
+    }
+
     const dvui_key = textureCacheKey(bytes);
 
     // Fast path: texture already in dvui's cache from a prior visible frame.
@@ -573,7 +641,8 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
         const size_key = @intFromPtr(bytes.ptr);
         break :nat ctx.rs.image_sizes.get(size_key) orelse sz: {
             const sz = dvui.imageSize(source) catch {
-                renderMarkdownImagePlaceholder("unsupported or corrupt image", ids);
+                markUndecodable(ctx, bytes);
+                renderUndecodableImage(alt, url_trim, ctx, ids);
                 return;
             };
             ctx.rs.image_sizes.put(ctx.gpa, size_key, sz) catch {};
@@ -581,11 +650,31 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
         };
     };
 
-    if (nat.w <= 0 or nat.h <= 0) {
+    const size = displaySize(nat, want, avail_w) orelse {
         renderMarkdownImagePlaceholder("invalid image size", ids);
         return;
-    }
+    };
 
+    // `.expand = .ratio` would grow the image back out to whatever rect the parent hands it,
+    // ignoring the size computed above (this is what kept the pixi hero at full size despite its
+    // `width="25%"`). The size *is* the answer here, so ask for exactly it.
+    _ = dvui.image(@src(), .{ .source = source, .shrink = .ratio }, .{
+        .min_size_content = .{ .w = size.w, .h = size.h },
+        .max_size_content = dvui.Options.MaxSize.size(.{ .w = size.w, .h = size.h }),
+        .expand = .none,
+        .gravity_x = alignGravityX(want),
+        .label = .{ .text = if (alt.len > 0) alt else "markdown image" },
+        .id_extra = ids.next(),
+    });
+
+    renderImageCaption(alt, ctx, ids);
+}
+
+/// Point size to draw an image of natural size `nat` at, honouring what the markup asked for and
+/// the pane's ceilings. Null for a degenerate natural size. Shared by the raster and SVG paths so
+/// a `<img width="25%">` means the same thing either way.
+fn displaySize(nat: dvui.Size, want: RequestedSize, avail_w: f32) ?dvui.Size {
+    if (nat.w <= 0 or nat.h <= 0) return null;
     const r = nat.w / nat.h;
 
     // `width="25%"` is treated as a scale of the image's *intrinsic* size, not of the pane —
@@ -597,44 +686,35 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
     const target_w: f32 = requested_w orelse
         if (requested_h) |h| h * r else @min(nat.w, max_image_display_width);
     const target_h: f32 = if (requested_w == null and requested_h != null) requested_h.? else target_w / r;
+    if (target_w <= 0 or target_h <= 0) return null;
 
     const ceiling_w = if (avail_w > 0) @min(avail_w, max_image_display_width) else max_image_display_width;
     const ceiling_h = max_image_display_height;
     const fit = @min(1.0, @min(ceiling_w / target_w, ceiling_h / target_h));
-    const dw = target_w * fit;
-    const dh = target_h * fit;
+    return .{ .w = target_w * fit, .h = target_h * fit };
+}
 
-    // `.expand = .ratio` would grow the image back out to whatever rect the parent hands it,
-    // ignoring the size computed above (this is what kept the pixi hero at full size despite its
-    // `width="25%"`). The size *is* the answer here, so ask for exactly it.
-    const gravity_x: f32 = switch (want.alignment orelse .left) {
+fn alignGravityX(want: RequestedSize) f32 {
+    return switch (want.alignment orelse .left) {
         .left => 0,
         .center => 0.5,
         .right => 1,
     };
+}
 
-    _ = dvui.image(@src(), .{ .source = source, .shrink = .ratio }, .{
-        .min_size_content = .{ .w = dw, .h = dh },
-        .max_size_content = dvui.Options.MaxSize.size(.{ .w = dw, .h = dh }),
-        .expand = .none,
-        .gravity_x = gravity_x,
-        .label = .{ .text = if (alt.len > 0) alt else "markdown image" },
+fn renderImageCaption(alt: []const u8, ctx: RenderContext, ids: *IdGen) void {
+    if (alt.len == 0) return;
+    var cap = dvui.textLayout(@src(), .{}, .{
+        .expand = .horizontal,
+        .margin = .{ .y = 2, .h = 0 },
+        .background = ctx.background,
         .id_extra = ids.next(),
     });
-
-    if (alt.len > 0) {
-        var cap = dvui.textLayout(@src(), .{}, .{
-            .expand = .horizontal,
-            .margin = .{ .y = 2, .h = 0 },
-            .background = ctx.background,
-            .id_extra = ids.next(),
-        });
-        defer cap.deinit();
-        cap.addText(alt, .{
-            .font = dvui.Font.theme(.body).larger(-1),
-            .color_text = dvui.themeGet().color(.control, .text).opacity(0.65),
-        });
-    }
+    defer cap.deinit();
+    cap.addText(alt, .{
+        .font = dvui.Font.theme(.body).larger(-1),
+        .color_text = dvui.themeGet().color(.control, .text).opacity(0.65),
+    });
 }
 
 /// GFM task-list marker (`- [ ]` / `- [x]`), drawn rather than written.
@@ -1154,7 +1234,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 });
                 defer table_wrap.deinit();
 
-                var g = dvui.grid(@src(), .numCols(num_cols), .{
+                var g = dvui.grid(@src(), .{
                     .scroll_opts = .{
                         .horizontal_bar = .auto,
                         .vertical_bar = .hide,
@@ -1170,14 +1250,21 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 });
                 defer g.deinit();
 
-                const banded: dvui.GridWidget.CellStyle.Banded = .{
-                    .alt_cell_opts = .{
-                        .color_fill = dvui.themeGet().color(.control, .fill_press),
-                        .background = true,
-                    },
-                };
-
                 const cell_padding: dvui.Rect = .{ .x = 8, .y = 5, .w = 8, .h = 5 };
+
+                // dvui dropped `CellStyle.Banded` along with the grid rework, so the zebra
+                // striping is applied here: odd body rows get the alternate fill, everything
+                // else keeps the grid's own background.
+                const banded = struct {
+                    fn opts(row: usize, padding: dvui.Rect) dvui.Options {
+                        var o: dvui.Options = .{ .padding = padding };
+                        if (row % 2 == 1) {
+                            o.background = true;
+                            o.color_fill = dvui.themeGet().color(.control, .fill_press);
+                        }
+                        return o;
+                    }
+                };
 
                 var body_row: usize = 0;
                 var c = n.firstChild();
@@ -1191,10 +1278,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                         while (cl) |cell| : (cl = cell.nextSibling()) {
                             if (extKind(ctx, cell) != .table_cell) continue;
                             const label = linkLabelPlainText(cell, arena) catch "";
-                            const cell_pos: dvui.GridWidget.Cell = .colRow(col, 0);
-                            var hdr_cell_opts = banded.cellOptions(cell_pos);
-                            hdr_cell_opts.padding = cell_padding;
-                            var hcell = g.headerCell(@src(), col, hdr_cell_opts);
+                            const hcell = g.colHeader(col, banded.opts(0, cell_padding));
                             defer hcell.deinit();
                             dvui.labelNoFmt(@src(), label, .{}, .{
                                 .expand = .horizontal,
@@ -1210,10 +1294,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                         var cl = row.firstChild();
                         while (cl) |cell| : (cl = cell.nextSibling()) {
                             if (extKind(ctx, cell) != .table_cell) continue;
-                            const cell_pos: dvui.GridWidget.Cell = .colRow(col, body_row);
-                            var cell_opts = banded.cellOptions(cell_pos);
-                            cell_opts.padding = cell_padding;
-                            var cell_box = g.bodyCell(@src(), cell_pos, cell_opts);
+                            const cell_box = g.cell(.{ .col = col, .row = body_row }, banded.opts(body_row, cell_padding));
                             defer cell_box.deinit();
                             renderInlineFlowContainer(cell, .{ .background = false }, ctx, ids);
                             col += 1;

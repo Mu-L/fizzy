@@ -18,6 +18,18 @@ const line_number_pad_left: f32 = 4;
 const text_gap_after_numbers: f32 = 12;
 const syntax_highlight_max_bytes: usize = 4 * 1024 * 1024;
 
+/// The raw|split|preview bar sits *over* the document, so it reads as chrome rather than content:
+/// one text size down from the body font, with tighter button padding to match. A function, not a
+/// constant — `Font.theme` reads the live theme, which isn't comptime-known.
+fn pillFont() dvui.Font {
+    return dvui.Font.theme(.body).larger(-1);
+}
+
+/// Raw|split|preview sash geometry. Same values every other split in the app uses (see
+/// `workbench_layout.zig` / `panel_layout.zig`) so the handle looks and reacts identically.
+const handle_size = 10;
+const handle_dist = 60;
+
 const chromeless = dvui.Options{
     .background = false,
     .margin = dvui.Rect{},
@@ -46,22 +58,41 @@ pub fn draw(doc: *Document, id_extra: u64, gpa: std.mem.Allocator) !bool {
 
     drawPreviewTogglePill(doc, id_extra);
 
-    if (doc.preview_collapsed) {
-        if (doc.preview_side == .raw) {
-            return try drawEditor(doc, ext, id_extra, gpa);
-        }
-        try drawPreviewPane(doc, preview.?, ext, id_extra, gpa);
-        return false;
-    }
-
+    // One paned for all three modes: `.raw` and `.preview` are this same widget animated to an
+    // end stop, so the preview slides in and out from the right like a document opening to the
+    // side rather than the pane's contents being swapped underneath the user.
     var paned = core.dvui.paned(@src(), .{
         .direction = .horizontal,
         .collapsed_size = 0,
         .split_ratio = &doc.preview_split_ratio,
-        .handle_size = 6,
-        .handle_dynamic = .{},
+        // Min == max thickness, matching every other sash in the app (workbench splits, the
+        // explorer, the bottom panel): only the handle's *visibility* animates with mouse
+        // proximity. A smaller `handle_size` than `handle_size_max` makes `handleGap` grow as the
+        // pointer approaches, which shoves both panes' contents sideways under the cursor.
+        .handle_size = handle_size,
+        .handle_dynamic = .{ .handle_size_max = handle_size, .distance_max = handle_dist },
     }, .{ .expand = .both, .background = false, .id_extra = @intCast(id_extra + 0x1000) });
     defer paned.deinit();
+
+    // A drag is the user choosing a new `.split` position — remember it (and treat dragging the
+    // sash to either end as picking that mode), then leave the ratio alone this frame.
+    if (paned.dragging) {
+        if (paned.split_ratio.* >= 1.0) {
+            doc.preview_mode = .raw;
+        } else if (paned.split_ratio.* <= 0.0) {
+            doc.preview_mode = .preview;
+        } else {
+            doc.preview_mode = .split;
+            doc.preview_split_ratio_user = paned.split_ratio.*;
+        }
+    } else {
+        // `animateSplit` is a no-op once the ratio is already there, so this is safe every frame.
+        // Opening eases with `outBack` and closing with `outQuint`, matching the explorer and
+        // bottom panel (`Explorer.zig`, `panel_layout.zig`).
+        const target = doc.preview_mode.splitRatio(doc.preview_split_ratio_user);
+        const closing = doc.preview_mode == .raw;
+        paned.animateSplit(target, if (closing) dvui.easing.outQuint else dvui.easing.outBack);
+    }
 
     var changed = false;
     if (paned.showFirst()) {
@@ -106,24 +137,22 @@ fn drawPreviewTogglePill(doc: *Document, id_extra: u64) void {
     defer row.deinit();
 
     drawPreviewPillButton(doc, "Raw", .raw, id_extra + 0x3001);
-    drawPreviewPillButton(doc, "Preview", .preview, id_extra + 0x3002);
+    drawPreviewPillButton(doc, "Split", .split, id_extra + 0x3002);
+    drawPreviewPillButton(doc, "Preview", .preview, id_extra + 0x3003);
 }
 
-fn drawPreviewPillButton(doc: *Document, label: []const u8, side: Document.PreviewSide, id_extra: u64) void {
-    const active = doc.preview_side == side;
+fn drawPreviewPillButton(doc: *Document, label: []const u8, mode: Document.PreviewMode, id_extra: u64) void {
+    const active = doc.preview_mode == mode;
     if (dvui.button(@src(), label, .{}, .{
         .background = active,
         .style = if (active) .highlight else .control,
+        .font = pillFont(),
+        .padding = .{ .x = 6, .y = 1, .w = 6, .h = 1 },
         .id_extra = @intCast(id_extra),
     })) {
-        if (doc.preview_collapsed and doc.preview_side == side) {
-            doc.preview_collapsed = false;
-        } else if (!doc.preview_collapsed) {
-            doc.preview_side = side;
-            doc.preview_collapsed = true;
-        } else {
-            doc.preview_side = side;
-        }
+        // Each button names a mode outright — the old pair toggled *and* selected, so the same
+        // click meant different things depending on the state you couldn't see.
+        doc.preview_mode = mode;
     }
 }
 
@@ -927,6 +956,8 @@ fn drawHoverAndGotoDefinition(doc: *Document, ext: []const u8, te: *TextEntryWid
     _ = dvui.dataGet(null, tt.data().id, "_last_span", TextEntryWidget.Span);
     _ = dvui.dataGet(null, tt.data().id, "_query_span", TextEntryWidget.Span);
     _ = dvui.dataGet(null, tt.data().id, "_pending_query_span", TextEntryWidget.Span);
+    _ = dvui.dataGet(null, tt.data().id, "_loading_span", TextEntryWidget.Span);
+    _ = dvui.dataGet(null, tt.data().id, "_loading_since_ns", i128);
 
     // `hovered_span` requires the mouse to be over the *source token*, so it goes null the
     // instant the mouse moves onto the tooltip itself — exactly the case `interactive` above
@@ -993,6 +1024,32 @@ fn drawHoverAndGotoDefinition(doc: *Document, ext: []const u8, te: *TextEntryWid
     const hover = if (query_span) |span| sdk.host().hoverFor(ext, doc.path, doc.text.items, span.start) else null;
     tt.init_options.suppress = if (hover) |h| h.text.len == 0 else false;
 
+    // Belt-and-suspenders against a provider that never resolves (wedged LSP, missed wake):
+    // if the same query span has been pending longer than `hover_loading_timeout_ms`, stop
+    // showing the loading placeholder and surface a short failure instead of sitting on
+    // "Just a moment…" until the app is restarted.
+    const hover_loading_timeout_ms: i64 = 8000;
+    var hover_timed_out = false;
+    if (hover == null) {
+        if (query_span) |span| {
+            const prev = dvui.dataGet(null, tt.data().id, "_loading_span", TextEntryWidget.Span);
+            const same = if (prev) |p| (p.start == span.start and p.end == span.end) else false;
+            if (!same) {
+                dvui.dataSet(null, tt.data().id, "_loading_span", span);
+                dvui.dataSet(null, tt.data().id, "_loading_since_ns", dvui.frameTimeNS());
+            } else if (dvui.dataGet(null, tt.data().id, "_loading_since_ns", i128)) |since| {
+                const elapsed_ms = @divTrunc(dvui.frameTimeNS() - since, std.time.ns_per_ms);
+                if (elapsed_ms >= hover_loading_timeout_ms) hover_timed_out = true;
+            }
+            // Keep polling while pending so a late answer (or the timeout) is noticed even
+            // with a stationary mouse.
+            dvui.refresh(null, @src(), tt.data().id);
+        }
+    } else {
+        dvui.dataRemove(null, tt.data().id, "_loading_span");
+        dvui.dataRemove(null, tt.data().id, "_loading_since_ns");
+    }
+
     if (tt.shown()) {
         if (query_span) |span| {
             if (hover) |h| {
@@ -1002,6 +1059,8 @@ fn drawHoverAndGotoDefinition(doc: *Document, ext: []const u8, te: *TextEntryWid
                 // Empty text: suppressed via `tt.init_options.suppress` above — `shown()`
                 // either never committed to showing, or is mid-close-fade with nothing left
                 // to draw. Either way, nothing to do here.
+            } else if (hover_timed_out) {
+                drawHoverLoadingFailed(id_extra);
             } else {
                 drawHoverLoading(id_extra);
             }
@@ -1016,6 +1075,15 @@ fn drawHoverLoading(id_extra: u64) void {
     dvui.label(@src(), "Just a moment...", .{}, .{
         .color_text = dvui.themeGet().color(.window, .text).opacity(0.6),
         .id_extra = @intCast(id_extra + 0x7400),
+    });
+}
+
+/// Shown when a hover lookup stays pending past `hover_loading_timeout_ms` — see the call
+/// site. Distinct from a confirmed-empty answer (which suppresses the tooltip entirely).
+fn drawHoverLoadingFailed(id_extra: u64) void {
+    dvui.label(@src(), "Hover timed out", .{}, .{
+        .color_text = dvui.themeGet().color(.window, .text).opacity(0.6),
+        .id_extra = @intCast(id_extra + 0x7401),
     });
 }
 

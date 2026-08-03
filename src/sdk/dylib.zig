@@ -147,6 +147,31 @@ const entry_symbol_types = .{
     dvui_context.SetContextFn,
 };
 
+/// dvui state the host hands to a plugin **by pointer**, for the plugin to dereference with its
+/// own dvui copy's layout (`dvui_context.inject`: `dvui.current_window = w`, `dvui.debug = d.*`).
+///
+/// These need their own entry for the same reason `HoverResult` and `CompletionItem` do, only
+/// with sharper teeth. `SetContextFn`'s signature is already hashed above, but that only pins the
+/// *pointer* — `hashTypeShape` deliberately never follows a data pointer into the pointee, so
+/// nothing about `Window`'s interior reached the fingerprint. Every field the plugin reads
+/// through that pointer is at an offset its own dvui build computed, so a field inserted anywhere
+/// in `Window` shifts every later field for the plugin while the host writes the new layout.
+///
+/// That is not hypothetical: dvui `ed2f1c67` added `Window.icon_mesh_cache` as field 51, which
+/// moved `current_parent`. Plugins built against the previous pin kept loading (the fingerprint
+/// had not moved) and then segfaulted on the first `dvui.parentGet()` — a null vtable read inside
+/// `Widget.data()`. Hashing the shape of what is shared by pointer turns that into a clean
+/// `err_abi_mismatch` at `dlopen` and, via `version.zig`'s guard, forces the `sdk_version` bump
+/// that tells authors to rebuild.
+///
+/// Note the practical consequence, which differs from the boundary types above: `Window` is large
+/// and changes often upstream, so most non-cosmetic dvui bumps will now move the fingerprint. That
+/// is the honest answer — those bumps genuinely do break every installed plugin.
+const dvui_shared_state_types = .{
+    dvui.Window,
+    dvui.Debug,
+};
+
 /// Optimize-mode layout class. `Debug`/`ReleaseSafe` embed a `std.debug.SafetyLock` inside every
 /// by-value `std.HashMapUnmanaged` (shifting sibling field offsets); `ReleaseFast`/`ReleaseSmall`
 /// zero-size it. A host and plugin in different classes have genuinely incompatible offsets even
@@ -194,6 +219,7 @@ pub const sdk_shape_fingerprint: u64 = blk: {
     var h = fingerprint.seed;
     h = fingerprint.hashAllShape(h, sdk_boundary_types, 6);
     h = fingerprint.hashAllShape(h, entry_symbol_types, 3);
+    h = fingerprint.hashAllShape(h, dvui_shared_state_types, 6);
     break :blk h;
 };
 

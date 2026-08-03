@@ -11,17 +11,18 @@
 //! `collectGroups` and renders only the commands that survived, with the matched characters of
 //! each title tinted. A query that matches one keybind draws one branch with one row.
 //!
-//! **Column layout matches dvui's grid "fit window" demo:** every frame
-//! `columnLayoutProportional` sizes columns to the grid's content width (Command flexes;
-//! Shortcut/Reset stay fixed). No header resize handles — those are a separate demo mode
-//! (`user_resizable`) and only mutate one column, which fights a fit-to-pane layout.
+//! **Columns fit the pane:** the grid measures columns and rows from their cell contents, re-fit
+//! whenever the row set changes, and Shortcut/Reset are declared `cols_rigid` so the horizontal
+//! expand lands entirely on Command. No header resize handles — user-resizable columns fight a
+//! fit-to-pane layout.
 //!
 //! **The grids never report a width to the explorer.** The explorer pane is a horizontally
 //! scrolling area, so a child that asks for more width than the viewport makes the pane scroll —
 //! and because a scroll container hands its children `max(virtual_size.w, viewport.w)`, a grid
 //! sized from its parent's width would then ask for that new, larger width the next frame and
 //! ratchet wider every frame. The grid is capped with `max_size_content = .width(0)` so it
-//! contributes nothing to the pane's virtual width.
+//! contributes nothing to the pane's virtual width; a table wider than the pane scrolls inside
+//! its own grid rather than widening the explorer.
 const std = @import("std");
 const builtin = @import("builtin");
 const dvui = @import("dvui");
@@ -38,9 +39,6 @@ const fuzzy = core.fuzzy;
 /// Command id currently waiting for a key press, or null when idle. Points into
 /// `host.commands` (stable for the session while the plugin stays loaded).
 var recording: ?[]const u8 = null;
-
-/// Shared column widths across every owner grid.
-var col_widths: [3]f32 = .{ 0, 0, 0 };
 
 /// Owners present in this set are expanded. Default (absent) is collapsed — the pane opens as a
 /// short list of owners rather than a wall of tables.
@@ -75,10 +73,6 @@ pub fn isRecording() bool {
 pub fn deinit(gpa: std.mem.Allocator) void {
     open_owners.deinit(gpa);
 }
-
-/// Proportional layout ratios for `columnLayoutProportional`: negative = flex share of leftover,
-/// positive = fixed px. Command takes the remainder; Shortcut/Reset keep a comfortable width.
-const col_ratios = [3]f32{ -1, 140, 64 };
 
 // ---- match model --------------------------------------------------------------------------
 
@@ -394,19 +388,15 @@ fn drawConflicts(editor: *fizzy.Editor, platform: keymap.Platform, theme: dvui.T
     }
 }
 
-/// Last-column heading with no trailing separator — `gridHeading(…, null, …)` still draws one,
-/// which read as a tiny fourth column.
-fn drawResetHeading(grid: *dvui.GridWidget, cell_style: dvui.GridWidget.CellStyle) void {
-    const cell_pos: dvui.GridWidget.Cell = .colRow(2, 0);
-    var cell = grid.headerCell(@src(), 2, cell_style.cellOptions(cell_pos));
+/// Last-column heading. Not sortable — there is nothing to order by — so it stays a plain label
+/// rather than dvui's sortable heading button.
+fn drawResetHeading(grid: *dvui.GridWidget, cell_opts: dvui.Options, label_opts: dvui.Options) void {
+    const cell = grid.colHeader(2, cell_opts);
     defer cell.deinit();
 
-    dvui.labelNoFmt(@src(), "Reset", .{}, cell_style.options(cell_pos).override(.{
-        .expand = .horizontal,
+    dvui.labelNoFmt(@src(), "Reset", .{}, label_opts.override(.{
         .gravity_x = 0.5,
         .gravity_y = 0.5,
-        .background = false,
-        .corners = .{},
     }));
 }
 
@@ -418,16 +408,26 @@ fn drawOwnerGrid(
     platform: keymap.Platform,
     theme: dvui.Theme,
 ) void {
-    var grid = dvui.grid(@src(), .colWidths(&col_widths), .{
+    var grid = dvui.grid(@src(), .{
         .scroll_opts = .{
             // Vertical: none — the grid grows with its rows and the explorer pane scrolls.
-            // Horizontal: none — columns are fit to the grid width every frame (dvui "fit window").
-            .horizontal = .none,
+            //
+            // Horizontal: `.auto`, and that is what stops a narrowing explorer from crushing the
+            // table. The grid divides `viewport.w - sum(column widths)` among the flexible
+            // columns, which goes *negative* once the pane is narrower than the content — but it
+            // clamps that share to zero when horizontal scrolling is available, on the grounds
+            // that there is somewhere for the overflow to go. With `.none` there is nowhere, so
+            // Command shrank without limit until the table was a sliver. Now the columns hold
+            // their measured content width and the grid scrolls instead.
+            .horizontal = .auto,
             .vertical = .none,
-            .horizontal_bar = .hide,
+            .horizontal_bar = .auto_overlay,
             .vertical_bar = .hide,
         },
-        .resize_rows = false,
+        // Shortcut and Reset are exempt from the horizontal expand, so they stay at the width
+        // their contents need and the Command column absorbs everything left over. This is the
+        // new grid's replacement for the old `col_ratios` (-1, 140, 64) proportional layout.
+        .cols_rigid = &.{ 1, 2 },
     }, .{
         .id_extra = id_extra,
         .expand = .horizontal,
@@ -438,73 +438,104 @@ fn drawOwnerGrid(
         .background = true,
         .color_fill = theme.color(.window, .fill).opacity(0.25),
         .corners = .all(4),
+        // dvui's grid defaults carry `.border = .all(1)`; these tables sit inside the settings
+        // tree and are separated by their fill alone.
+        .border = .{},
     });
-    defer grid.deinit();
+    // Deliberately not `defer`red — the edge hints below have to be drawn after the grid closes
+    // so they land on top of the table and outside its scroll clip. Keep this function free of
+    // early returns.
 
-    // Same pattern as dvui's grid demo `.fit_window`: recompute widths from the grid's content
-    // rect every frame so the table tracks the pane. Positive ratios are fixed; `-1` flexes.
+    // The new grid measures columns *and* rows from cell contents instead of taking widths from
+    // the caller, so a re-fit is needed whenever the row set changes — searching swaps the rows
+    // out underneath us and stale sizes would keep the shape of whatever was showing before.
     //
-    // `columnLayoutProportional` always subtracts `scrollbar_padding_defaults.w` (room for a
-    // vertical bar). We hide that bar, so add it back — otherwise a ~10px strip of grid
-    // background shows past the last column and the row/header fills don't reach the edge.
-    dvui.columnLayoutProportional(
-        &col_ratios,
-        &col_widths,
-        grid.data().contentRect().w + dvui.GridWidget.scrollbar_padding_defaults.w,
-    );
+    // Only when it changes: `autoSize` re-arms itself (and refreshes) each frame until the
+    // measurements settle, so calling it unconditionally every frame leaves the grid in a
+    // permanent relayout loop that repaints the whole pane forever.
+    const content_key = blk: {
+        var h = std.hash.Wyhash.init(0x9e3d1);
+        for (group.rows.items) |row| {
+            h.update(row.cmd.id);
+            h.update(row.keys);
+        }
+        break :blk h.final();
+    };
+    const key_id = "__fizzy_content_key";
+    if (dvui.dataGet(null, grid.data().id, key_id, u64) != content_key) {
+        dvui.dataSet(null, grid.data().id, key_id, content_key);
+        grid.autoSize(.{ .auto = .both });
+    }
 
     // Alphabetical by command until the user clicks a heading. `.unsorted` is only ever the
     // grid's *initial* state — a click always leaves it ascending or descending, and that is
     // what the grid persists — so this can't stomp a sort the user picked.
-    if (grid.sort_direction == .unsorted) grid.colSortSet(0, .ascending);
+    if (grid.sort_dir == .unsorted) {
+        grid.sort_col = 0;
+        grid.sort_dir = .ascending;
+    }
 
-    const banded: dvui.GridWidget.CellStyle.Banded = .{
-        .cell_opts = .{
-            .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
-            .background = true,
-        },
-        .alt_cell_opts = .{
-            .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
-            .background = true,
-            .color_fill = theme.color(.control, .fill).opacity(0.22),
-        },
+    const banded: Banded = .{ .theme = theme };
+
+    const heading_cell_opts: dvui.Options = .{
+        .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
+        .background = true,
+        .color_fill = theme.color(.control, .fill).opacity(0.35),
     };
 
-    const heading_style: dvui.GridWidget.CellStyle = .{
-        .cell_opts = .{
-            .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
-            .background = true,
-            .color_fill = theme.color(.control, .fill).opacity(0.35),
-        },
-        .opts = .{
-            .expand = .horizontal,
-            .gravity_y = 0.5,
-            .font = dvui.Font.theme(.body).withWeight(.bold),
-            .color_text = theme.color(.window, .text).opacity(0.7),
-        },
+    // The heading control is dvui's own sortable button now, so it draws no fill of its own —
+    // the cell behind it carries the heading colour.
+    const heading_label_opts: dvui.Options = .{
+        .expand = .horizontal,
+        .gravity_y = 0.5,
+        .background = false,
+        .corners = .{},
+        .font = dvui.Font.theme(.body).withWeight(.bold),
+        .color_text = theme.color(.window, .text).opacity(0.7),
     };
 
-    var plain_heading_style = heading_style;
-    plain_heading_style.opts.background = false;
-
-    // Sortable headers with static separators only (fit-window mode — not user-resizable).
-    var sort_dir: dvui.GridWidget.SortDirection = .unsorted;
-    _ = dvui.gridHeadingSortable(@src(), grid, 0, "Command", &sort_dir, null, heading_style);
-    _ = dvui.gridHeadingSortable(@src(), grid, 1, "Shortcut", &sort_dir, null, heading_style);
-    drawResetHeading(grid, plain_heading_style);
+    inline for (.{ .{ 0, "Command" }, .{ 1, "Shortcut" } }) |heading| {
+        const cell = grid.colHeader(heading[0], heading_cell_opts);
+        defer cell.deinit();
+        _ = cell.headerSortable(heading[1], heading_label_opts);
+    }
+    drawResetHeading(grid, heading_cell_opts, heading_label_opts);
 
     // Sorting reorders the rows this branch already filtered down to, so it composes with search.
     const rows = dvui.currentWindow().arena().dupe(Row, group.rows.items) catch group.rows.items;
-    if (sort_dir != .unsorted) {
-        const sort_col = grid.sort_col_number;
-        const asc = sort_dir == .ascending;
-        std.sort.pdq(Row, rows, SortCtx{ .col = sort_col, .asc = asc }, SortCtx.lessThan);
+    if (grid.sort_dir != .unsorted) {
+        const asc = grid.sort_dir == .ascending;
+        std.sort.pdq(Row, rows, SortCtx{ .col = grid.sort_col, .asc = asc }, SortCtx.lessThan);
     }
 
     for (rows, 0..) |row, ri| {
         drawCommandRow(grid, editor, row.cmd, query, ri, platform, theme, banded);
     }
+
+    // Copies, because `deinit` invalidates the widget.
+    const grid_rs = grid.data().borderRectScale();
+    const si = grid.msi.*;
+    grid.deinit();
+
+    // The same "there is more content this way" hint every other viewport in the app draws, so a
+    // table wider than the pane reads as scrollable rather than as one that is simply cut off.
+    // Vertical is null: these grids never scroll on that axis, they grow and the explorer scrolls.
+    wdvui.drawScrollEdgeShadows(null, grid_rs, &si, .{});
 }
+
+/// Zebra striping for the body rows. dvui dropped `GridWidget.CellStyle.Banded` when the grid
+/// was reworked, so the alternating fill lives here now.
+const Banded = struct {
+    theme: dvui.Theme,
+
+    fn cellOptions(self: Banded, row: usize) dvui.Options {
+        return .{
+            .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
+            .background = true,
+            .color_fill = if (row % 2 == 1) self.theme.color(.control, .fill).opacity(0.22) else null,
+        };
+    }
+};
 
 const SortCtx = struct {
     col: usize,
@@ -528,7 +559,7 @@ fn drawCommandRow(
     row: usize,
     platform: keymap.Platform,
     theme: dvui.Theme,
-    banded: dvui.GridWidget.CellStyle.Banded,
+    banded: Banded,
 ) void {
     const shortcut = shortcutFor(editor, c.id, platform);
     const keys_text = if (shortcut) |s| s.keys else "—";
@@ -537,8 +568,7 @@ fn drawCommandRow(
     const has_override = Keybinds.hasUserOverride(editor, c.id);
 
     {
-        const cell_pos: dvui.GridWidget.Cell = .colRow(0, row);
-        var cell = grid.bodyCell(@src(), cell_pos, banded.cellOptions(cell_pos));
+        const cell = grid.cell(.{ .col = 0, .row = row }, banded.cellOptions(row));
         defer cell.deinit();
 
         var left = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -553,17 +583,20 @@ fn drawCommandRow(
             .margin = .all(0),
             .padding = .all(0),
         });
+        // The command id is an identifier the user can type (into `keybinds.zon`, the palette),
+        // so it takes the smaller mono face — the same treatment the command palette gives the
+        // provenance line under its titles.
         wdvui.labelHighlighted(@src(), c.id, query, true, .{
             .expand = .horizontal,
             .margin = .all(0),
             .padding = .all(0),
+            .font = dvui.Font.theme(.mono).larger(-1),
             .color_text = theme.color(.window, .text).opacity(0.45),
         });
     }
 
     {
-        const cell_pos: dvui.GridWidget.Cell = .colRow(1, row);
-        var cell = grid.bodyCell(@src(), cell_pos, banded.cellOptions(cell_pos));
+        const cell = grid.cell(.{ .col = 1, .row = row }, banded.cellOptions(row));
         defer cell.deinit();
 
         // Hand-built rather than `dvui.button` so the recording state can put a dot next to the
@@ -617,8 +650,7 @@ fn drawCommandRow(
     }
 
     {
-        const cell_pos: dvui.GridWidget.Cell = .colRow(2, row);
-        var cell = grid.bodyCell(@src(), cell_pos, banded.cellOptions(cell_pos));
+        const cell = grid.cell(.{ .col = 2, .row = row }, banded.cellOptions(row));
         defer cell.deinit();
 
         // Always occupy the reset column so binding/unbinding never shifts column widths.

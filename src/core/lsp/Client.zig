@@ -528,6 +528,24 @@ pub fn onFolderClose(self: *Client) void {
     self.workspace_root = null;
 }
 
+/// Kill the language server (if running / stuck / crashed) and reset to `not_started` so the
+/// next `warmUp`/`hover`/… re-spawns it. Safe on the UI/command thread — blocks until
+/// background tasks exit (same as `onFolderClose`). Use from a plugin Command when the server
+/// has wedged (e.g. after a crash leaves state `.unavailable`, which otherwise lasts until
+/// the folder is reopened).
+pub fn restart(self: *Client) void {
+    if (self.state.load(.acquire) == .not_started) {
+        self.config.log(self.config.language_id, .info, "language server not running");
+        return;
+    }
+    self.shutdownProcess();
+    self.workspaceRootUpdate();
+    self.config.log(self.config.language_id, .info, "language server restarted");
+    // Wake the UI so a tooltip stuck on "Just a moment…" (from `.unavailable` → null hover)
+    // gets another poll; the next hover/warmUp will re-spawn via `ensureStarted`.
+    self.config.refresh();
+}
+
 pub fn deinit(self: *Client) void {
     self.shutdownProcess();
     if (self.workspace_root) |r| self.config.allocator.free(r);
@@ -642,11 +660,12 @@ fn setResolveReturnScratch(self: *Client, gpa: std.mem.Allocator, text: []const 
 /// background fetch for next time.
 pub fn hover(self: *Client, path: []const u8, bytes: []const u8, byte_offset: usize) ?HoverResult {
     if (path.len == 0) return null;
-    if (!self.ensureStarted(path)) return null;
 
     const gpa = self.config.allocator;
     const key: CacheKey = .{ .path_hash = std.hash.Wyhash.hash(0, path), .byte_offset = byte_offset, .content_hash = std.hash.Wyhash.hash(0, bytes) };
 
+    // Serve a still-valid cache hit even when the server has crashed — better than blanking
+    // every tooltip the moment the pipe closes. Only after a miss do we check liveness.
     self.hover_cache_lock.lock();
     if (self.hover_cache.get(key)) |entry| {
         if (entry.text == null and !entry.confirmed_negative) {
@@ -682,6 +701,13 @@ pub fn hover(self: *Client, path: []const u8, bytes: []const u8, byte_offset: us
             return result;
         }
     }
+    // `.unavailable` is terminal until `restart` / folder reopen — returning null here would
+    // leave the tooltip on "Just a moment…" forever. Checked before `in_flight` so a request
+    // that was mid-flight when the server died doesn't keep looking pending either.
+    if (self.state.load(.acquire) == .unavailable) {
+        self.hover_cache_lock.unlock();
+        return .{ .text = "Language server unavailable" };
+    }
     if (self.in_flight.contains(key)) {
         self.hover_cache_lock.unlock();
         return null;
@@ -691,6 +717,13 @@ pub fn hover(self: *Client, path: []const u8, bytes: []const u8, byte_offset: us
         return null;
     };
     self.hover_cache_lock.unlock();
+
+    if (!self.ensureStarted(path)) {
+        // Still starting (or no workspace root yet) — drop the optimistic in_flight mark so
+        // the next frame can re-enter; `null` keeps the loading placeholder honest.
+        self.clearInFlight(key);
+        return null;
+    }
 
     const owned_path = gpa.dupe(u8, path) catch {
         self.clearInFlight(key);
@@ -1422,6 +1455,8 @@ fn shutdownProcess(self: *Client) void {
     }
     self.hover_cache.clearAndFree(gpa);
     self.in_flight.clearAndFree(gpa);
+    self.unconfirmed_negative_keys.clearAndFree(gpa);
+    self.pending_negative_wake = null;
     self.hover_cache_lock.unlock();
 
     self.completion_cache_lock.lock();
@@ -1449,6 +1484,23 @@ fn shutdownProcess(self: *Client) void {
         self.completion_pending = null;
     }
     self.completion_pending_lock.unlock();
+
+    self.signature_help_cache_lock.lock();
+    var sh_it = self.signature_help_cache.iterator();
+    while (sh_it.next()) |e| {
+        if (e.value_ptr.result) |r| gpa.free(r.label);
+    }
+    self.signature_help_cache.clearAndFree(gpa);
+    self.signature_help_in_flight.clearAndFree(gpa);
+    self.signature_help_cache_lock.unlock();
+
+    self.signature_help_pending_lock.lock();
+    if (self.signature_help_pending) |pending| {
+        gpa.free(pending.path);
+        gpa.free(pending.bytes);
+        self.signature_help_pending = null;
+    }
+    self.signature_help_pending_lock.unlock();
 
     self.resolve_cache_lock.lock();
     var rc_it = self.resolve_cache.iterator();
@@ -1485,6 +1537,7 @@ fn shutdownProcess(self: *Client) void {
     self.response_map_lock.unlock();
 
     self.encoding = .utf16;
+    self.completion_resolve_supported = false;
     self.state.store(.not_started, .release);
 }
 
@@ -1570,9 +1623,17 @@ fn readerThreadMain(self: *Client, io: std.Io) void {
     var rdr = self.child.?.stdout.?.readerStreaming(io, &buf);
     while (!self.shutdown.load(.acquire)) {
         const body = Protocol.readMessage(gpa, &rdr.interface) catch {
-            // zls exited or its stdout pipe closed — degrade to unavailable like a failed
-            // spawn; no restart-on-crash for this basic implementation.
-            self.state.store(.unavailable, .release);
+            // Server exited or its stdout pipe closed. Degrade to `.unavailable` (same as a
+            // failed spawn) rather than auto-respawning — a crash loop would be worse than a
+            // stuck session, and the owning plugin exposes a restart Command for recovery.
+            // Wake the UI: without this, a hover that arrived mid-crash keeps showing
+            // "Just a moment…" until some unrelated input forces a frame (and even then only
+            // once `hover` notices `.unavailable` — see that method).
+            if (!self.shutdown.load(.acquire)) {
+                self.state.store(.unavailable, .release);
+                self.config.log(self.config.language_id, .warn, "language server exited unexpectedly");
+                self.config.refresh();
+            }
             return;
         };
         var owned = true;
@@ -1762,6 +1823,21 @@ fn runHoverJob(self: *Client, io: std.Io, j: HoverJob) !void {
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
     defer parsed.deinit();
     const resp = Protocol.parseResponse(parsed.value);
+    // A JSON-RPC `error` (request cancelled, server busy, content-modified, …) is
+    // inconclusive — not the same as a successful null hover. Caching it as a negative would
+    // wrongly suppress / confirm-empty the position and can strand subsequent hovers on a
+    // poisoned key. Leave uncached (same as timeout); `in_flight` clears via the dispatch
+    // loop's defer so the next poll retries.
+    if (resp.err != null) {
+        if (jsonString(resp.err.?, "message")) |msg| {
+            var msg_buf: [256]u8 = undefined;
+            const line = std.fmt.bufPrint(&msg_buf, "hover rejected: {s}", .{msg}) catch "hover rejected";
+            self.config.log(self.config.language_id, .warn, line);
+        } else {
+            self.config.log(self.config.language_id, .warn, "hover rejected");
+        }
+        return;
+    }
     // A missing/null result or absent contents just means "no hover info here" (the common
     // case for most tokens) — cached as a negative entry, not logged as an error.
     const result = resp.result orelse {

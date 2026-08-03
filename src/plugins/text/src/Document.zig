@@ -12,8 +12,24 @@ const is_wasm = builtin.target.cpu.arch == .wasm32;
 
 const Document = @This();
 
-/// Which side is shown while the raw|preview split is collapsed.
-pub const PreviewSide = enum { raw, preview };
+/// What the document tab shows when its language has a preview pane: the editor alone, both
+/// side by side, or the preview alone. `.split` is one paned widget with both sides drawn —
+/// `.raw` and `.preview` are that same widget run to either end, so switching slides the
+/// preview in and out as a tray rather than swapping the pane's contents.
+pub const PreviewMode = enum {
+    raw,
+    split,
+    preview,
+
+    /// Sash position this mode settles at. `.split` uses the user's remembered ratio.
+    pub fn splitRatio(self: PreviewMode, user_ratio: f32) f32 {
+        return switch (self) {
+            .raw => 1.0,
+            .split => user_ratio,
+            .preview => 0.0,
+        };
+    }
+};
 
 /// Fizzy document id (monotonic, allocated from the host).
 id: u64,
@@ -88,10 +104,15 @@ completion_selected: usize = 0,
 /// (which sets/refreshes it for the new frame) doesn't run until after `processEvents()`.
 completion_anchor: ?usize = null,
 
-/// Raw|preview split state when a language plugin registers a preview pane.
+/// Raw|split|preview state when a language plugin registers a preview pane.
+///
+/// `preview_split_ratio` is the *live* sash position — the paned widget drives it, and so does
+/// the open/close animation, which runs it to 1 (preview tray fully closed) or 0 (editor fully
+/// closed). `preview_split_ratio_user` is the position `.split` returns to: the last one the
+/// user actually dragged the sash to, which the animation would otherwise overwrite.
+preview_mode: PreviewMode = .split,
 preview_split_ratio: f32 = 0.5,
-preview_collapsed: bool = false,
-preview_side: PreviewSide = .raw,
+preview_split_ratio_user: f32 = 0.5,
 
 /// Undo/redo history — see `textcore.History` for the capture + grouping strategy.
 history: tc.History = .{},

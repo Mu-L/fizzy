@@ -79,7 +79,7 @@ pub fn draw(_: ?*anyopaque) anyerror!void {
     }
     last_seen_count = lines.len;
 
-    var scroll = dvui.scrollArea(@src(), .{ .scroll_info = &scroll_info }, .{ .expand = .both });
+    var scroll = dvui.scrollArea(@src(), .{ .scroll_info = &scroll_info }, .{ .expand = .both, .background = false });
 
     const mono: dvui.Options = .{ .font = dvui.Font.theme(.mono) };
     const message_color: dvui.Options = .{ .color_text = dvui.themeGet().color(.window, .text).opacity(0.6) };
@@ -127,7 +127,7 @@ fn drawTabStrip(scopes: []const []const u8) void {
     var strip = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .vertical,
         .min_size_content = .{ .w = 120 },
-        .background = true,
+        .background = false,
         .gravity_x = 1.0,
         .color_fill = dvui.themeGet().color(.control, .fill),
     });
@@ -144,8 +144,9 @@ fn drawTab(src: std.builtin.SourceLocation, label: []const u8, id_extra: usize, 
         .id_extra = id_extra,
         .expand = .horizontal,
         .margin = .{ .x = 2, .y = 1 },
-        .color_fill = if (selected) dvui.themeGet().color(.window, .fill) else .transparent,
-        .color_text = if (selected) dvui.themeGet().color(.window, .text) else dvui.themeGet().color(.control, .text),
+        .color_fill = if (selected) null else .transparent,
+        .style = if (selected) .highlight else null,
+        .padding = .all(1),
     });
     if (clicked) {
         if (id_extra == 0) {

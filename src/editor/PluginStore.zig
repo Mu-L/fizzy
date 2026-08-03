@@ -120,6 +120,20 @@ const Job = struct {
     is_update: bool,
     err_buf: [64]u8 = undefined,
     err_len: usize = 0,
+    /// This job's download worker, as a cancelable `Io` task group rather than a detached
+    /// `std.Thread`. The worker writes `err_buf`/`err_len`/`status` back into the `Job`, so the
+    /// `Job` must not be freed while it is alive — and a detached thread gave `freeJob` no way to
+    /// know. Nothing in the download path sets a network timeout either, so a stalled or
+    /// blackholed release host keeps that worker running arbitrarily long: quitting mid-download
+    /// left a live thread writing into freed memory. `Group.cancel` both interrupts the blocked
+    /// syscall (the worker returns `error.Canceled`) *and* awaits the task, so `freeJob` is
+    /// provably the last toucher of the `Job`. One group per job rather than one shared group,
+    /// because `await`/`cancel` are all-or-nothing over a group and jobs are freed individually.
+    ///
+    /// Same shape as `core/lsp/Client.zig`'s `tasks` and the store catalog's refresh worker. Not
+    /// threadsafe against its own `await`/`cancel`, so every group operation stays on the UI
+    /// thread (`draw` → `startDownload`, `tick`, `deinit`).
+    tasks: std.Io.Group = .init,
 };
 
 var jobs: std.StringArrayHashMapUnmanaged(*Job) = .empty;
@@ -685,7 +699,7 @@ fn drawChangelogPlaceholder() void {
     defer box.deinit();
 
     const muted = dvui.themeGet().color(.window, .text).opacity(0.7);
-    dvui.icon(@src(), "ChangelogPlaceholder", icons.tvg.lucide.@"history", .{ .stroke_color = muted }, .{
+    dvui.icon(@src(), "ChangelogPlaceholder", icons.tvg.lucide.history, .{ .stroke_color = muted }, .{
         .gravity_x = 0.5,
         .min_size_content = .{ .w = 32, .h = 32 },
         .margin = .{ .h = 8 },
@@ -722,6 +736,8 @@ fn resolveRegistryUrl() []const u8 {
 
 pub fn deinit() void {
     if (comptime builtin.target.cpu.arch == .wasm32) return;
+    // `freeJob` cancels and awaits each job's download worker before freeing it, so quitting
+    // mid-install can't leave a worker writing into a freed `Job` (see `Job.tasks`).
     for (jobs.values()) |job| freeJob(job);
     jobs.deinit(fizzy.app.allocator);
     for (pending_actions.items) |action| switch (action) {
@@ -748,7 +764,11 @@ pub fn deinit() void {
     }
 }
 
+/// Frees a job and everything it owns. Cancels and awaits its download worker first — see
+/// `Job.tasks` — so nothing can be writing into the `Job` as it goes away. No-op for a job whose
+/// worker never started or has already finished.
 fn freeJob(job: *Job) void {
+    job.tasks.cancel(dvui.io);
     fizzy.app.allocator.free(job.id);
     fizzy.app.allocator.free(job.url);
     fizzy.app.allocator.free(job.sha256);
@@ -983,8 +1003,12 @@ fn publisherFor(entry: StoreEntry) ?[]const u8 {
 /// Owner of `fizzy_repo_url` — the publisher every bundled built-in is attributed to.
 const fizzy_publisher = "fizzyedit";
 
-fn worker(job: *Job) void {
-    store.download.download(fizzy.app.allocator, dvui.io, job.url, job.sha256, job.dest) catch |err| {
+/// Runs in `job.tasks`. `io` is passed in rather than read from `dvui.io` here so the worker never
+/// races the UI thread writing that global (same reason `core/lsp/Client.zig` threads `io` through
+/// its task mains). A shutdown mid-download lands on `.failed` via `error.Canceled`, which nothing
+/// outlives — `freeJob` is what awaited us.
+fn worker(job: *Job, io: std.Io) void {
+    store.download.download(fizzy.app.allocator, io, job.url, job.sha256, job.dest) catch |err| {
         const n = @min(@errorName(err).len, job.err_buf.len);
         @memcpy(job.err_buf[0..n], @errorName(err)[0..n]);
         job.err_len = n;
@@ -998,7 +1022,8 @@ fn removeJob(id: []const u8) void {
     if (jobs.fetchSwapRemove(id)) |kv| freeJob(kv.value);
 }
 
-/// Kick off a download for `id`'s selected release on a worker thread.
+/// Kick off a download for `id`'s selected release on a worker task. UI-thread only (`draw`), like
+/// every other `Job.tasks` operation.
 fn startDownload(id: []const u8, release: store.ShardRelease, is_update: bool) void {
     removeJob(id); // replace any prior failed job
     const dl = release.downloadFor(compat.hostKey()) orelse return;
@@ -1011,13 +1036,13 @@ fn startDownload(id: []const u8, release: store.ShardRelease, is_update: bool) v
         freeJob(job);
         return;
     };
-    const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
+    // `concurrent`, not `async`: the download must run off the UI thread, never inline here.
+    job.tasks.concurrent(dvui.io, worker, .{ job, dvui.io }) catch {
         _ = jobs.swapRemove(job.id);
         freeJob(job);
         setStatus("could not start download for '{s}'", .{id});
         return;
     };
-    thread.detach();
 }
 
 /// Allocate a `Job` with all strings owned; `errdefer` unwinds every partial allocation so a
@@ -1268,26 +1293,12 @@ fn draw(_: ?*anyopaque) anyerror!void {
     const maybe_snapshot = cat.acquire();
     defer cat.release();
 
-    // Very first fetch: draw one spinner instead of the split. Both panes would otherwise render
-    // cards that are visibly half-empty and then fill themselves in — the store list is empty
-    // until the summary lands, and every *installed* card is missing its registry half
-    // (description, author, "store vX", update availability), since those cards build from local
-    // state alone and only get enriched once a snapshot exists. A manual refresh deliberately
-    // does *not* come through here: a snapshot is already present, so the existing cards stay put
-    // under the smaller inline banner below rather than blanking the whole pane.
-    if (maybe_snapshot == null and cat.status() == .fetching) {
-        const now = fizzy.perf.nanoTimestamp();
-        const started = first_fetch_started_ns orelse blk: {
-            first_fetch_started_ns = now;
-            break :blk now;
-        };
-        if (now - started < first_fetch_placeholder_max_ns) {
-            drawFetchingPlaceholder();
-            return;
-        }
-    } else {
-        first_fetch_started_ns = null;
-    }
+    // Registry availability is a property of the *store* pane alone. The installed pane is built
+    // entirely from local state (loaded plugins, disabled ids, load failures, the plugins
+    // directory) and needs no network at all, so it always draws immediately — offline, behind a
+    // captive portal, or while the very first fetch is still in flight. Installed cards simply
+    // render their local half until a snapshot arrives to enrich them (see `have_snapshot`).
+    have_snapshot = maybe_snapshot != null;
 
     const arena = dvui.currentWindow().arena();
     const editor = fizzy.editor;
@@ -1370,28 +1381,6 @@ fn draw(_: ?*anyopaque) anyerror!void {
     }
     rankEntries(&installed_entries, &query);
 
-    // Surface registry-fetch state above the split (installed plugins still render below it).
-    // Only the *refresh* case lands here — the first-fetch case returned above with a full-pane
-    // placeholder instead, since there is nothing worth drawing under this banner yet.
-    switch (cat.status()) {
-        .fetching => {
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .margin = .{ .y = 8 } });
-            defer row.deinit();
-            fizzy.dvui.bubbleSpinner(@src(), .{
-                .min_size_content = .{ .w = 18, .h = 18 },
-                .gravity_y = 0.5,
-                .color_text = dvui.themeGet().color(.window, .text),
-                .padding = .{ .w = 8 },
-            }, .{});
-            dvui.labelNoFmt(@src(), "Refreshing plugin registry…", .{}, .{ .gravity_y = 0.5 });
-        },
-        .failed => if (maybe_snapshot == null) dvui.labelNoFmt(@src(), "Could not reach the plugin registry.", .{}, .{
-            .margin = .{ .y = 8 },
-            .color_text = dvui.themeGet().color(.err, .text),
-        }),
-        else => {},
-    }
-
     // Upper/lower split — identical shape and autosizing behaviour to the Pixi tools pane's
     // layers/palettes split (`explorer/tools.zig`): the installed pane autofits snugly to its
     // content every frame, up to `installed_max_split_ratio`, unless the sash is actively being
@@ -1401,7 +1390,9 @@ fn draw(_: ?*anyopaque) anyerror!void {
         .direction = .vertical,
         .collapsed_size = 0,
         .handle_size = 10,
-        .handle_dynamic = .{},
+        // Same reveal distance as every other sash in the app; the default 20 made this one
+        // appear much later than its neighbours for no reason.
+        .handle_dynamic = .{ .handle_size_max = 10, .distance_max = 60 },
     }, .{ .expand = .both, .background = false });
     defer paned.deinit();
 
@@ -1438,22 +1429,24 @@ fn draw(_: ?*anyopaque) anyerror!void {
     prev_installed_shown = shown_installed;
 
     if (paned.showSecond()) {
-        _ = drawStoreSection(store_entries.items, filter_text);
+        _ = drawStoreSection(store_entries.items, filter_text, cat.status());
     }
 }
 
-/// Monotonic timestamp at which the current first-fetch placeholder started showing, or null when
-/// the placeholder isn't up. Paired with `first_fetch_placeholder_max_ns` to time-box it: nothing
-/// in the catalog fetch path sets a network timeout, so a registry that is unreachable *without
-/// failing* (captive portal, blackholed DNS) parks `Catalog.status()` on `.fetching` indefinitely.
-/// Left unbounded, that would hide the installed pane forever — and managing installed plugins
-/// needs no registry data at all. After the cap the split renders as usual, with the smaller
-/// inline "Refreshing…" banner still showing that a fetch is outstanding.
-var first_fetch_started_ns: ?i128 = null;
-const first_fetch_placeholder_max_ns: i128 = 6 * std.time.ns_per_s;
+/// True while the catalog holds a parsed snapshot — i.e. the registry half of every card is real
+/// rather than merely unknown-so-far. Set once per `draw` (under the catalog lock) and read by the
+/// card drawing helpers, which run inside that same pass.
+///
+/// The distinction matters because "the store has no build for this host" and "we have not been
+/// able to ask the store" look identical from a null `entry.release`, and only the first is a
+/// genuine, user-actionable problem. Offline, the second is what's true — so the red
+/// "No compatible build in store" text is suppressed rather than accusing every installed plugin
+/// of being unpublished. See `drawCardControls`/`drawStoreCardControls`.
+var have_snapshot = false;
 
-/// Centered "Fetching store…" spinner shown in place of the whole split during the very first
-/// catalog fetch. See the call site in `draw` for why the refresh case doesn't use this.
+/// Centered "Fetching store…" spinner, drawn inside the *store* pane only while the very first
+/// catalog fetch is in flight. The installed pane above it is unaffected: it renders from local
+/// state and never waits on the network (see `draw`).
 fn drawFetchingPlaceholder() void {
     var center = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .both,
@@ -1478,6 +1471,45 @@ fn drawFetchingPlaceholder() void {
         .gravity_y = 0.5,
         .color_text = dvui.themeGet().color(.window, .text).opacity(0.8),
     });
+}
+
+/// Store pane empty state when the registry could not be reached and we have nothing cached:
+/// what happened, that it doesn't affect the pane above, and a way to try again. Offline is an
+/// ordinary state for this pane, not an error banner over the whole tab.
+fn drawUnreachablePlaceholder() void {
+    const theme = dvui.themeGet();
+    const muted = theme.color(.window, .text).opacity(0.7);
+
+    var center = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = false });
+    defer center.deinit();
+
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .gravity_x = 0.5,
+        .gravity_y = 0.5,
+        .background = false,
+    });
+    defer col.deinit();
+
+    dvui.icon(@src(), "StoreOffline", icons.tvg.lucide.@"cloud-off", .{ .stroke_color = muted }, .{
+        .gravity_x = 0.5,
+        .min_size_content = .{ .w = 28, .h = 28 },
+        .margin = .{ .h = 6 },
+    });
+    dvui.labelNoFmt(@src(), "Can't reach the plugin store", .{}, .{
+        .gravity_x = 0.5,
+        .color_text = muted,
+    });
+    var tl = dvui.textLayout(@src(), .{ .break_lines = true }, .{
+        .background = false,
+        .gravity_x = 0.5,
+        .max_size_content = .{ .w = 240, .h = std.math.floatMax(f32) },
+        .font = dvui.Font.theme(.body),
+    });
+    tl.addText("Your installed plugins above still work normally.", .{ .color_text = muted.opacity(0.8) });
+    tl.deinit();
+    if (dvui.button(@src(), "Try again", .{}, .{ .gravity_x = 0.5, .margin = .{ .y = 6 } })) {
+        if (catalog) |*c| c.refresh();
+    }
 }
 
 /// How many cards the entry animation staggers across before every later card shares the last
@@ -1509,8 +1541,25 @@ fn cardAnimator(src: std.builtin.SourceLocation, entry: StoreEntry, index: usize
 /// `explorer/Explorer.zig` uses, so a manually-shrunk pane or an overly-wide card still scrolls
 /// with the usual visual hint instead of clipping silently. Returns the shown count (unused by
 /// the caller now that the store pane no longer drives the paned autofit).
-fn drawStoreSection(entries: []const StoreEntry, filter_text: []const u8) usize {
-    dvui.labelNoFmt(@src(), "STORE", .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .x = 8 } });
+///
+/// This pane — and only this pane — owns the registry's loading/offline states: the spinner while
+/// the first fetch is in flight, the unreachable empty state when it fails, and a small inline
+/// spinner beside the header while a refresh runs over already-shown cards.
+fn drawStoreSection(entries: []const StoreEntry, filter_text: []const u8, status: store.Status) usize {
+    {
+        var header = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer header.deinit();
+        dvui.labelNoFmt(@src(), "STORE", .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .x = 8 } });
+        // A refresh over existing cards is a footnote, not a takeover: the cards stay put and this
+        // spinner is the only sign a fetch is outstanding.
+        if (status == .fetching and have_snapshot) {
+            fizzy.dvui.bubbleSpinner(@src(), .{
+                .min_size_content = .{ .w = 14, .h = 14 },
+                .gravity_y = 0.5,
+                .color_text = dvui.themeGet().color(.window, .text).opacity(0.7),
+            }, .{});
+        }
+    }
 
     var pane_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = false });
     defer pane_box.deinit();
@@ -1529,15 +1578,23 @@ fn drawStoreSection(entries: []const StoreEntry, filter_text: []const u8) usize 
         shown += 1;
         drawStoreCard(entry);
     }
-    // The first fetch never reaches here (`draw` returns early with a full-pane spinner), so an
-    // empty list at this point genuinely means the store has nothing to show.
     if (shown == 0) {
-        dvui.labelNoFmt(
-            @src(),
-            if (filter_text.len > 0) "No store plugins match the filter." else "No plugins available in the store.",
-            .{},
-            .{ .margin = .{ .y = 8 } },
-        );
+        if (!have_snapshot) {
+            // Nothing cached yet, so the empty list says nothing about the store's contents —
+            // it's still loading, or we couldn't ask. `.idle` can only be a fetch about to start
+            // (see `draw`'s `first_draw_done`), so it reads as loading too.
+            switch (status) {
+                .failed => drawUnreachablePlaceholder(),
+                else => drawFetchingPlaceholder(),
+            }
+        } else {
+            dvui.labelNoFmt(
+                @src(),
+                if (filter_text.len > 0) "No store plugins match the filter." else "No plugins available in the store.",
+                .{},
+                .{ .margin = .{ .y = 8 } },
+            );
+        }
     }
 
     scroll.deinit();
@@ -1673,32 +1730,25 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
     const theme = dvui.themeGet();
     const selected = if (Readme.selectedId()) |sid| std.mem.eql(u8, sid, entry.id) else false;
     // Disabled plugins read as a faded card: half the surface fill opacity and half the shadow.
-    const disabled = fizzy.editor.isPluginDisabled(entry.id);
+    //const disabled = fizzy.editor.isPluginDisabled(entry.id);
 
     const fill = if (selected)
         theme.color(.control, .fill).opacity(0.5)
     else
-        theme.color(.content, .fill).opacity(if (disabled) 0.5 else 1.0);
-    const shadow_alpha: f32 = if (disabled) 0.125 else 0.25;
+        theme.color(.content, .fill).opacity(0.0);
 
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{}, .{
         .id_extra = hashId(entry.id),
         .expand = .horizontal,
         .min_size_content = .{ .w = card_min_w },
-        .margin = .all(3),
+        .margin = .{ .x = 3, .y = 3, .w = 12, .h = 3 },
         .padding = .{ .x = 8, .y = 6, .w = 8, .h = 6 },
         .corners = dvui.CornerRect.all(8),
         .background = true,
         .color_fill = fill,
         .color_fill_hover = theme.color(.control, .fill).opacity(0.5),
-        .color_fill_press = theme.color(.control, .fill_press),
-        .box_shadow = .{
-            .color = .black,
-            .corners = dvui.CornerRect.all(8),
-            .fade = 4,
-            .alpha = shadow_alpha,
-        },
+        .color_fill_press = theme.color(.control, .fill).opacity(0.9),
     });
     defer bw.deinit();
     // Hover highlight without consuming click events, so the inner controls get first dibs; the
@@ -1805,10 +1855,22 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
                 if (desc_label.ellipsized) {
                     dvui.tooltip(
                         @src(),
-                        .{ .active_rect = desc_label.data().borderRectScale().r, .position = .vertical },
+                        .{
+                            .active_rect = desc_label.data().borderRectScale().r,
+                            .position = .vertical,
+                            .delay = 500_000,
+                        },
                         "{s}",
                         .{desc_label.label_str},
-                        .{},
+                        .{
+                            .border = .all(0),
+                            .box_shadow = .{
+                                .color = .black,
+                                .corners = dvui.CornerRect.all(8),
+                                .fade = 4,
+                                .alpha = 0.25,
+                            },
+                        },
                     );
                 }
                 desc_label.deinit();
@@ -2073,6 +2135,10 @@ fn drawCardControls(entry: StoreEntry) void {
             if (selectedRelease(entry)) |rel| {
                 if (dvui.button(@src(), "Reinstall", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
                     startDownload(entry.id, rel, false);
+            } else if (!have_snapshot) {
+                // No catalog yet (offline, or the first fetch is still running), so we genuinely
+                // don't know whether a build exists — say nothing rather than claim there is none.
+                // Uninstall below still works; the card gains a Reinstall once a snapshot lands.
             } else {
                 // No build for this host in the fetched shard, so there is nothing to reinstall
                 // *from*. Say why (short form — this card also carries the wrapped failure text,
@@ -2104,6 +2170,10 @@ fn drawCardControls(entry: StoreEntry) void {
             startDownload(entry.id, rel, false);
         return;
     }
+
+    // Same "we couldn't ask" caveat as the broken branch above — an unfetched catalog is not
+    // evidence of a missing build.
+    if (!have_snapshot) return;
 
     // Registry row with no host-compatible release and nothing on disk: the *store* hasn't
     // published a build for this exact Fizzy version/arch yet — nothing the user can fix
