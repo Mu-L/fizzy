@@ -58,6 +58,15 @@ const start_options_base: dvui.App.StartOptions = .{
     },
 };
 
+/// macOS only: is the process image inside a `.app` bundle (as opposed to a loose
+/// `zig-out/bin/fizzy` from `zig build run`)? Mirrors `auto_update.installLayoutSupported`'s
+/// probe, minus its Velopack gating.
+fn runningFromAppBundle(io: std.Io) bool {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.process.executablePath(io, &buf) catch return false;
+    return std.mem.indexOf(u8, buf[0..n], ".app/") != null;
+}
+
 fn startOptions() dvui.App.StartOptions {
     var opts = start_options_base;
 
@@ -70,6 +79,15 @@ fn startOptions() dvui.App.StartOptions {
     if (comptime builtin.target.cpu.arch != .wasm32) {
         opts.gpa = appAllocator();
         const main_init = dvui.App.main_init orelse return opts;
+        // SDL's Cocoa backend implements SDL_SetWindowIcon as `[NSApp setApplicationIconImage:]`,
+        // i.e. it replaces the whole *application* icon while we run. That hands AppKit a finished
+        // bitmap, skipping the system treatment (rounded-rect backdrop, mask) it applies to the
+        // bundle's `.icns` — so the Dock icon visibly loses its background the moment fizzy
+        // launches. Inside a bundle the `.icns` is already the right icon; leave it alone. Loose
+        // dev builds have no bundle icon at all, so there we still want the runtime one.
+        if (comptime builtin.os.tag == .macos) {
+            if (runningFromAppBundle(main_init.io)) opts.icon = null;
+        }
         if (paths.configFolderZ(&pref_path_buf, main_init.io, fizzy.processEnviron(), ".")) |pref_path| {
             pref_path_len = pref_path.len;
             opts.pref_path = pref_path_buf[0..pref_path_len :0];
@@ -98,7 +116,7 @@ pub const dvui_app: dvui.App = .{
 };
 
 pub fn main(main_init: std.process.Init) !u8 {
-    std.log.info("Fizzy version {s}", .{build_opts.app_version});
+    std.log.info("Fizzy version {s} ({s})", .{ build_opts.app_version, @tagName(@import("builtin").mode) });
 
     if (comptime auto_update.impl) {
         // appRunHook handles Velopack's install/uninstall/firstrun CLI flags and
@@ -132,11 +150,30 @@ fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime
     dvui.App.logFn(level, scope, format, args);
 }
 
+/// `FIZZY_LOG_REFRESH=1` logs every `dvui.refresh` with the source location that asked for it.
+///
+/// This answers the one question a profiler cannot: when the app will not go to sleep, a profile
+/// shows where the time goes, but "who keeps asking for another frame" is a different question and
+/// usually a different culprit. dvui already tracks it — this just exposes the switch, since fizzy
+/// does not surface dvui's debug window.
+///
+/// Expect a lot of output: it logs per refresh, per frame. Pipe it and count by source line; the
+/// caller that appears on every single frame is the one keeping the app awake.
+fn initRefreshLogFromEnv() void {
+    if (comptime @import("builtin").target.cpu.arch == .wasm32) return;
+    const raw = std.c.getenv("FIZZY_LOG_REFRESH") orelse return;
+    if (std.mem.eql(u8, std.mem.span(raw), "0")) return;
+    _ = dvui.debug.logRefresh(true);
+    std.log.info("refresh logging on (FIZZY_LOG_REFRESH)", .{});
+}
+
 // Runs before the first frame, after backend and dvui.Window.init()
 pub fn AppInit(win: *dvui.Window) !void {
     // Snapshot the platform from DVUI's keybind selection. On native this is a
     // no-op; on wasm it tells `fizzy.platform.isMacOS()` what browser we're in.
     fizzy.platform.cacheFromWindow(win);
+    fizzy.hitch.initFromEnv();
+    initRefreshLogFromEnv();
 
     // Apply the macOS window chrome and install the Space monitor while the
     // window is still hidden (see startOptions: opts.hidden = true), so the
@@ -245,6 +282,8 @@ pub fn AppDeinit(_: *dvui.Window) void {
 
 // Run each frame to do normal UI
 pub fn AppFrame() !dvui.App.Result {
+    fizzy.hitch.frameBegin();
+    defer fizzy.hitch.frameEnd();
     singleton.drainPending();
     return try fizzy.editor.tick();
 }

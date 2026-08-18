@@ -1712,6 +1712,14 @@ const card_min_w: f32 = 280;
 /// longest description happens to be", which is exactly what the scrollArea must not do.
 const card_text_no_floor: f32 = 1;
 
+/// The one card text line that does *not* get `card_text_no_floor`: the title. A card whose name
+/// has been squeezed away is unusable — you can't tell which plugin the controls belong to — so
+/// the title reports up to this much width and the scrollArea grows a horizontal bar rather than
+/// eating into it. Bounded by construction (unlike a description, whose length is unbounded and
+/// author-controlled): a title longer than this still reports only this much and ellipsizes, so
+/// the card's min width can't drift with the catalog's longest name.
+const card_title_min_w: f32 = 96;
+
 /// Padding for every text line inside a card's info column. `LabelWidget.defaults` is
 /// `Rect.all(6)`, which across four always-drawn lines (title/description/author/row2) adds ~48px
 /// of pure whitespace to a card whose text is only ~64px tall. The lines are already separated by
@@ -1827,7 +1835,7 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
                     .font = title_font.withWeight(.bold),
                     .expand = .horizontal,
                     .padding = card_text_padding,
-                    .max_size_content = .{ .w = card_text_no_floor, .h = std.math.floatMax(f32) },
+                    .max_size_content = .{ .w = card_title_min_w, .h = std.math.floatMax(f32) },
                 });
                 if (releaseDate(entry)) |date| {
                     dvui.labelNoFmt(@src(), date, .{}, .{
@@ -2028,6 +2036,91 @@ const part_separator = " · ";
 /// words per line without going all the way out to the card's actual (fluid) width.
 const min_failure_wrap_w: f32 = 220;
 
+/// The optimize class every published store build is produced in: the plugin release CI
+/// (`fizzyedit/plugin-build-action`) always builds `-Doptimize=ReleaseFast`. A property of the
+/// store, not of any one plugin.
+const store_optimize_class = "fast";
+
+/// False when this Fizzy is a `Debug`/`ReleaseSafe` build. Such a host folds the `"safe"`
+/// optimize class into its `abi_fingerprint` (see `dylib.optimize_safety_class`), so it fetches a
+/// shard URL the store never publishes under, and *every* plugin — including ones whose SDK
+/// version matches this host exactly — reads "No compatible build in store". That message points
+/// at the store, but the cause is entirely local and comptime-known, so say so instead. Same
+/// condition the local load path reports as `error.AbiBuildEnvMismatch` ("SDK versions match, but
+/// optimize mode does not match").
+const host_optimize_matches_store = std.mem.eql(u8, dylib.optimize_safety_class, store_optimize_class);
+
+/// Cap on the reported min width of the no-build message (same `max_size_content` trick as
+/// `card_text_no_floor`, just with a usable floor instead of ~0). The message sits in the controls
+/// column, which is *not* expand-horizontal: whatever it reports, it takes out of the info column
+/// beside it. Left uncapped, a long message plus the icon reserved so much of a narrowed card that
+/// the title/description — all of which report ~0 and yield — collapsed to nothing while the error
+/// text alone stayed fully drawn. Capped, it ellipsizes (its tooltip carries the full text either
+/// way) and the title keeps its own floor below.
+const no_build_msg_max_w: f32 = 110;
+
+/// The "nothing here to install" message, shown wherever no host-compatible release resolved —
+/// identical in both panes (store card, installed card, detail header) so a card never changes
+/// width just by which list it's in. Out-of-class hosts (see `host_optimize_matches_store`) get
+/// the optimize-mode wording plus the same alert icon a failed local load carries; the tooltip
+/// holds the long-form explanation in both cases.
+fn drawNoStoreBuild(opts: dvui.Options) void {
+    const theme = dvui.themeGet();
+
+    var no_build_box = dvui.box(@src(), .{ .dir = .horizontal }, opts.override(.{ .gravity_y = 0.5 }));
+    defer no_build_box.deinit();
+
+    if (!host_optimize_matches_store) {
+        dvui.icon(
+            @src(),
+            "StoreOptimizeMismatchIcon",
+            icons.tvg.lucide.@"circle-alert",
+            .{ .stroke_color = theme.color(.err, .fill), .fill_color = theme.color(.err, .fill) },
+            .{ .gravity_y = 0.5, .margin = .{ .x = 2 }, .min_size_content = .{ .w = 14, .h = 14 } },
+        );
+    }
+
+    dvui.labelNoFmt(
+        @src(),
+        if (host_optimize_matches_store) "No store build" else "Needs release",
+        .{},
+        .{
+            .color_text = theme.color(.err, .text),
+            .font = dvui.Font.theme(.mono),
+            .gravity_y = 0.5,
+            .max_size_content = .{ .w = no_build_msg_max_w, .h = std.math.floatMax(f32) },
+        },
+    );
+
+    if (host_optimize_matches_store) {
+        dvui.tooltip(
+            @src(),
+            .{ .active_rect = no_build_box.data().borderRectScale().r },
+            "No compatible build in store (SDK {d}.{d}.{d} · ABI 0x{x} · {s})",
+            .{ version.sdk_version.major, version.sdk_version.minor, version.sdk_version.patch, dylib.abi_fingerprint, compat.hostKey() },
+            .{},
+        );
+    } else {
+        dvui.tooltip(
+            @src(),
+            .{ .active_rect = no_build_box.data().borderRectScale().r },
+            "This Fizzy is a {s} build. Store plugins are published ReleaseFast only, so the " ++
+                "optimize mode does not match even when the SDK version does. Run zig build run -Doptimize=ReleaseFast, or build the plugin from source in {s}. " ++
+                "(SDK {d}.{d}.{d} · ABI 0x{x} · {s})",
+            .{
+                @tagName(builtin.mode),
+                @tagName(builtin.mode),
+                version.sdk_version.major,
+                version.sdk_version.minor,
+                version.sdk_version.patch,
+                dylib.abi_fingerprint,
+                compat.hostKey(),
+            },
+            .{},
+        );
+    }
+}
+
 /// Join `parts` with " · ", truncating (rather than overflowing) if `buf` is too small.
 fn joinParts(buf: []u8, parts: []const []const u8) []const u8 {
     var len: usize = 0;
@@ -2102,19 +2195,26 @@ fn drawCardControls(entry: StoreEntry) void {
 
     const loaded = editor.host.pluginById(entry.id) != null;
     const disabled = editor.isPluginDisabled(entry.id);
+    const failed = entry.kind == .failed or editor.isFailedUserPlugin(entry.id);
+    // On disk, never loaded, and nothing in memory describes it — a build dropped into
+    // `plugins/<id>/` that fizzy has not classified yet (no `.plugins.<id>.enabled` on record, no
+    // load attempt, no failure). `Editor.reconcileDiscoveredPlugins` normally promotes these to
+    // `.disabled` (which carries the Enabled checkbox), but it runs off the watcher, so a card can
+    // still be drawn in this state — it must offer a way *in*, not just Uninstall.
+    const untracked = !loaded and !disabled and !failed and (entry.kind == .on_disk or isOnDisk(entry.id));
     // A build sitting in the plugins dir that isn't running: it failed to load (ABI/SDK mismatch,
     // etc.), or it is simply there with nothing in memory describing it. Either way it is on disk
     // like any installed plugin, so it must stay actionable (reinstall / uninstall) rather than
     // dead-ending at a bare "Failed" label — or, worse, at no card at all.
-    const broken = entry.kind == .failed or entry.kind == .on_disk or
-        editor.isFailedUserPlugin(entry.id) or (!loaded and !disabled and isOnDisk(entry.id));
+    const broken = failed or untracked;
 
     // Present on disk in some form: loaded, disabled-on-disk, sideloaded local, or a broken build.
     if (loaded or disabled or entry.kind == .local or entry.kind == .disabled or broken) {
-        // Enable/disable only makes sense for a plugin that can actually load — a mismatched
-        // (never-loaded) build has nothing to toggle, so skip the checkbox for the pure-broken case.
-        if (loaded or disabled) {
-            var enabled = !disabled;
+        // Enable/disable for anything that has a build to load: running, disabled, or an
+        // unclassified directory. A *failed* build is the one case with nothing to toggle — it
+        // already tried and lost — so it gets the Retry button below instead.
+        if (loaded or disabled or untracked) {
+            var enabled = loaded;
             if (dvui.checkbox(@src(), &enabled, "Enabled", .{ .gravity_y = 0.5 })) queueSetEnabled(entry.id, enabled);
         }
         // Replace with a host-compatible registry build, just before uninstall:
@@ -2132,31 +2232,28 @@ fn drawCardControls(entry: StoreEntry) void {
                     startDownload(entry.id, rel, true);
             }
         } else if (broken) {
+            // A locally built plugin that lost its load has no registry release to reinstall
+            // *from*, so Retry is the whole fix once the author rebuilds it in place: it re-runs
+            // the load against whatever is on disk now and clears the failure record on success.
+            if (failed) {
+                if (dvui.button(@src(), "Retry", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
+                    queueSetEnabled(entry.id, true);
+            }
             if (selectedRelease(entry)) |rel| {
                 if (dvui.button(@src(), "Reinstall", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
                     startDownload(entry.id, rel, false);
-            } else if (!have_snapshot) {
+            } else if (!have_snapshot or untracked) {
                 // No catalog yet (offline, or the first fetch is still running), so we genuinely
                 // don't know whether a build exists — say nothing rather than claim there is none.
                 // Uninstall below still works; the card gains a Reinstall once a snapshot lands.
+                // An untracked build stays quiet too: its Enabled checkbox is the action here, and
+                // "no store build" is irrelevant noise for something never installed from the store.
             } else {
                 // No build for this host in the fetched shard, so there is nothing to reinstall
                 // *from*. Say why (short form — this card also carries the wrapped failure text,
                 // and the controls row shares its width with it) instead of leaving a lone trash
                 // icon next to an unexplained "Failed to load".
-                var no_build_box = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } });
-                defer no_build_box.deinit();
-                dvui.labelNoFmt(@src(), "No store build", .{}, .{
-                    .color_text = theme.color(.err, .text),
-                    .font = dvui.Font.theme(.mono),
-                });
-                dvui.tooltip(
-                    @src(),
-                    .{ .active_rect = no_build_box.data().borderRectScale().r },
-                    "No compatible build in store (SDK {d}.{d}.{d} · ABI 0x{x} · {s})",
-                    .{ version.sdk_version.major, version.sdk_version.minor, version.sdk_version.patch, dylib.abi_fingerprint, compat.hostKey() },
-                    .{},
-                );
+                drawNoStoreBuild(.{ .margin = .{ .x = 4 } });
             }
         }
         if (dvui.buttonIcon(@src(), "Uninstall", icons.tvg.lucide.@"trash-2", .{}, .{ .stroke_color = theme.color(.err, .text) }, .{ .gravity_y = 0.5 }))
@@ -2179,21 +2276,7 @@ fn drawCardControls(entry: StoreEntry) void {
     // published a build for this exact Fizzy version/arch yet — nothing the user can fix
     // locally (unlike a failed local build, handled above), so the wording and the tooltip
     // both point at "the store doesn't have one" rather than "rebuild your plugin".
-    {
-        var no_build_box = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
-        defer no_build_box.deinit();
-        dvui.labelNoFmt(@src(), "No compatible build in store", .{}, .{
-            .color_text = theme.color(.err, .text),
-            .font = dvui.Font.theme(.mono),
-        });
-        dvui.tooltip(
-            @src(),
-            .{ .active_rect = no_build_box.data().borderRectScale().r },
-            "No compatible build in store (SDK {d}.{d}.{d} · ABI 0x{x} · {s})",
-            .{ version.sdk_version.major, version.sdk_version.minor, version.sdk_version.patch, dylib.abi_fingerprint, compat.hostKey() },
-            .{},
-        );
-    }
+    drawNoStoreBuild(.{});
 }
 
 /// Upper-pane (store) card controls: browse-only. Just an in-flight job status, an Install
@@ -2231,21 +2314,7 @@ fn drawStoreCardControls(entry: StoreEntry) void {
 
     // Registry row with no host-compatible release: the *store* hasn't published a build for
     // this exact Fizzy version/arch yet.
-    {
-        var no_build_box = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
-        defer no_build_box.deinit();
-        dvui.labelNoFmt(@src(), "No compatible build in store", .{}, .{
-            .color_text = theme.color(.err, .text),
-            .font = dvui.Font.theme(.mono),
-        });
-        dvui.tooltip(
-            @src(),
-            .{ .active_rect = no_build_box.data().borderRectScale().r },
-            "No compatible build in store (SDK {d}.{d}.{d} · ABI 0x{x} · {s})",
-            .{ version.sdk_version.major, version.sdk_version.minor, version.sdk_version.patch, dylib.abi_fingerprint, compat.hostKey() },
-            .{},
-        );
-    }
+    drawNoStoreBuild(.{});
 }
 
 /// A repo URL plus an optional path within it to look under for `README.md` / `ICON.png`.

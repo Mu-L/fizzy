@@ -5,6 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const dvui = @import("dvui");
 const sdk = @import("fizzy_sdk");
+const perf = @import("core").perf;
 const tc = @import("textcore/textcore.zig");
 const TextEntryWidget = @import("widgets/TextEntryWidget.zig");
 
@@ -30,6 +31,32 @@ pub const PreviewMode = enum {
         };
     }
 };
+
+/// Last `.split` sash position chosen this session. The mode itself persists as the markdown
+/// plugin setting `default_md_view` (via the `"markdown"` service); the ratio is session-only
+/// so a one-off drag doesn't rewrite settings.zon every frame of a sash move.
+pub var sticky_split_ratio: f32 = 0.5;
+
+/// Record the user's raw|split|preview choice: persists markdown's `default_md_view` and
+/// remembers the split sash ratio for documents opened later this session.
+pub fn rememberPreviewMode(mode: PreviewMode, user_ratio: f32) void {
+    sticky_split_ratio = user_ratio;
+    const md = sdk.host().getServiceTyped(sdk.services.markdown.Api) orelse return;
+    md.setDefaultView(switch (mode) {
+        .raw => .raw,
+        .split => .split,
+        .preview => .preview,
+    });
+}
+
+fn defaultPreviewMode() PreviewMode {
+    const md = sdk.host().getServiceTyped(sdk.services.markdown.Api) orelse return .split;
+    return switch (md.defaultView()) {
+        .raw => .raw,
+        .split => .split,
+        .preview => .preview,
+    };
+}
 
 /// Fizzy document id (monotonic, allocated from the host).
 id: u64,
@@ -87,6 +114,12 @@ scroll_y: f32 = 0,
 /// (`break_lines = false`), so one source line is exactly one visual row and `line *
 /// line_height` is an exact, not approximate, scroll target.
 pending_scroll_line: ?u32 = null,
+/// The same reveal, for the preview pane — `LanguageSupport.previewReveal`, consumed by
+/// `TextEditor.drawPreviewPane`. Separate from `pending_scroll_line` because the two are
+/// consumed by different panes, and either may be the only one showing: `.raw` never draws a
+/// preview, `.preview` never draws the editor. Dropped unconsumed at the end of a frame that
+/// drew no preview, so turning one on later doesn't replay a jump from minutes ago.
+pending_preview_line: ?u32 = null,
 
 /// Owned completion candidates for the current completion list, if any — each `.label`/`.text`
 /// is a copy (`sdk.language.CompletionItem` fields from `sdk.host().completionFor(...)` are
@@ -123,6 +156,22 @@ history: tc.History = .{},
 /// edit gets a fresh id that never collides with the one recorded at save time.
 clean_op_id: u64 = 0,
 
+/// Debounce state for `Host.notifyDocumentContentChanged` — see `tickContentChanged`.
+///
+/// Keyed on `history.topOpId()` rather than a hash of the text: the id already changes on
+/// exactly the events we care about (any genuinely new edit) and comparing two integers costs
+/// nothing per frame, whereas hashing a large file every frame to find out it didn't change is
+/// the sort of thing that quietly eats a millisecond on every keystroke.
+notify_seen_op_id: u64 = 0,
+notify_sent_op_id: u64 = 0,
+/// `perf.nanoTimestamp()` after which the current burst counts as settled.
+notify_due_ns: i128 = 0,
+
+/// How long the text has to stop changing before observers hear about it. Long enough that
+/// ordinary typing produces one notification per pause rather than per character, short enough
+/// that it feels immediate when you stop.
+const notify_debounce_ns: i128 = 300 * std.time.ns_per_ms;
+
 /// 64 MiB — generous for source files; guards against opening something huge by mistake.
 const max_file_bytes: usize = 64 * 1024 * 1024;
 
@@ -134,10 +183,17 @@ pub fn fromBytes(path: []const u8, bytes: []const u8) !Document {
     try text.appendSlice(gpa, bytes);
     const path_copy = try gpa.dupe(u8, path);
     errdefer gpa.free(path_copy);
+    // Seed from the persisted `default_md_view` setting (and this session's sash ratio). Start
+    // the sash *at* the mode's resting position rather than animating there: the tray sliding
+    // open is feedback for a choice the user just made, not for every file they open.
+    const mode = defaultPreviewMode();
     var doc = Document{
         .id = sdk.host().allocDocId(),
         .path = path_copy,
         .text = text,
+        .preview_mode = mode,
+        .preview_split_ratio = mode.splitRatio(sticky_split_ratio),
+        .preview_split_ratio_user = sticky_split_ratio,
     };
     doc.refreshLineCount();
     return doc;
@@ -243,6 +299,37 @@ pub fn isDirty(self: *const Document) bool {
     return self.history.topOpId() != self.clean_op_id;
 }
 
+/// Broadcast this document's live contents to every plugin, now.
+///
+/// The text plugin owns `.md` (and everything else nothing claimed), so a plugin that indexes
+/// markdown links, counts words, or previews structure can only see unsaved text if we hand it
+/// over — nothing in the SDK exposes another plugin's buffer.
+pub fn notifyContentChanged(self: *Document) void {
+    self.notify_seen_op_id = self.history.topOpId();
+    self.notify_sent_op_id = self.notify_seen_op_id;
+    sdk.host().notifyDocumentContentChanged(self.path, self.text.items);
+}
+
+/// Per-frame half of the debounce. Returns true while a notification is still pending, which
+/// the caller passes up through `tickOpenDocuments` to keep frames coming — otherwise the app
+/// idles the moment you stop typing and the pending notification waits for whatever happens to
+/// wake it next.
+pub fn tickContentChanged(self: *Document) bool {
+    const top = self.history.topOpId();
+    if (top != self.notify_seen_op_id) {
+        // Still changing — restart the clock. A held key or a paste storm therefore produces
+        // one notification at the end, not one per event.
+        self.notify_seen_op_id = top;
+        self.notify_due_ns = perf.nanoTimestamp() + notify_debounce_ns;
+        return true;
+    }
+    if (self.notify_sent_op_id == top) return false;
+    if (perf.nanoTimestamp() < self.notify_due_ns) return true;
+
+    self.notifyContentChanged();
+    return false;
+}
+
 /// Write the current contents back to `path`.
 pub fn save(self: *Document) !void {
     if (comptime is_wasm) return error.Unsupported;
@@ -253,6 +340,10 @@ pub fn save(self: *Document) !void {
     // same reason.
     self.history.closeGroup();
     self.clean_op_id = self.history.topOpId();
+    // Immediately, not on the debounce: an observer that also watches the filesystem is about
+    // to see this write land, and it should have our version of the contents first so it can
+    // recognize the on-disk change as already accounted for.
+    self.notifyContentChanged();
 }
 
 /// Replace in-memory contents from disk and clear undo history (external change / discard).

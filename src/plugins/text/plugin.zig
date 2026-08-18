@@ -59,6 +59,7 @@ const vtable: sdk.Plugin.VTable = .{
     .documentHasNativeExtension = documentHasNativeExtension,
     .documentHasRecognizedSaveExtension = documentHasRecognizedSaveExtension,
     // rendering + lifecycle
+    .tickOpenDocuments = tickOpenDocuments,
     .drawDocument = drawDocument,
     .closeDocument = closeDocument,
     .reloadDocument = reloadDocument,
@@ -276,6 +277,9 @@ fn revealPosition(_: *anyopaque, handle: DocHandle, line: u32, character: u32) v
     const doc = docFrom(handle) orelse return;
     doc.pending_sel = .collapsed(doc.byteOffsetForLineCharacter(line, character));
     doc.pending_scroll_line = line;
+    // Both panes show the same document, so a reveal means both. Set unconditionally — whether
+    // the extension has a preview, and whether it is on screen, is `TextEditor`'s to know.
+    doc.pending_preview_line = line;
 }
 fn bindDocumentToPane(_: *anyopaque, _: DocHandle, _: dvui.Id, _: *anyopaque, _: bool) void {
     // Text editing needs no pane/canvas binding; the text widget manages its own state.
@@ -305,6 +309,18 @@ fn reloadDocument(_: *anyopaque, handle: DocHandle) anyerror!void {
 }
 fn isDirty(_: *anyopaque, handle: DocHandle) bool {
     return (docFrom(handle) orelse return false).isDirty();
+}
+
+/// Drive each open document's content-change debounce. Returns true while any of them still
+/// owes a notification, so fizzy keeps drawing until the burst settles instead of idling with
+/// one pending.
+fn tickOpenDocuments(state: *anyopaque) bool {
+    const st: *State = @ptrCast(@alignCast(state));
+    var pending = false;
+    for (st.docs.values()) |doc| {
+        if (doc.tickContentChanged()) pending = true;
+    }
+    return pending;
 }
 fn saveDocument(state: *anyopaque, handle: DocHandle) anyerror!void {
     const doc = docFrom(handle) orelse return;
