@@ -156,7 +156,6 @@ pub const Preview = struct {
         if (self.ast_root == null and self.parse_job == null) {
             self.content_hash = h;
             self.rs.clear(gpa);
-            dvui.log.info("markdown: async parse start ({d} bytes)", .{content.len});
             self.startParseJob(content, gpa, h);
             return;
         }
@@ -246,10 +245,6 @@ pub const Preview = struct {
         self.rs.deinit(gpa);
         self.rs = job.rs;
         job.rs = .{};
-        dvui.log.info("markdown: async parse ready ({d} bytes, {d} top-level blocks)", .{
-            job.bytes.len,
-            self.rs.blocks.len(),
-        });
         job.destroy();
         self.parse_job = null;
         dvui.refresh(null, @src(), null);

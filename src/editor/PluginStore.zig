@@ -64,14 +64,8 @@ var catalog: ?store.Catalog = null;
 var registry_url_owned: ?[]u8 = null;
 var first_draw_done = false;
 
-/// Upper/lower split (installed plugins on top, store on bottom) — same shape and autosizing
-/// behaviour as the Pixi tools pane (`explorer/tools.zig`'s layers/palettes split): the top
-/// pane's height autofits to its content every frame, and a manual drag becomes the new ceiling
-/// so autofit never grows back past a size the user deliberately chose. The split ratio itself
-/// is owned internally by the `PanedWidget` (persisted via `dvui.data`); only the ceiling and
-/// the previous shown-count (to detect when a refit is needed) are ours to track. See `draw`.
-var installed_max_split_ratio: f32 = 0.5;
-var prev_installed_shown: usize = 0;
+const PaneTab = enum { store, installed };
+var selected_pane_tab: PaneTab = .store;
 
 var store_scroll_info: dvui.ScrollInfo = .{ .horizontal = .auto };
 var installed_scroll_info: dvui.ScrollInfo = .{ .horizontal = .auto };
@@ -647,15 +641,15 @@ fn drawCreditLink(src: std.builtin.SourceLocation, text: []const u8, url: ?[]con
 fn drawDetailTabs() void {
     var strip = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
-        .padding = .{ .x = 12 },
+        .padding = .{ .x = 12, .y = 6, .h = 12 },
     });
     defer strip.deinit();
 
-    drawDetailTab(@src(), "DETAILS", 0, selected_detail_tab == .details);
-    drawDetailTab(@src(), "CHANGELOG", 1, selected_detail_tab == .changelog);
+    if (tabButton(@src(), "DETAILS", 0, selected_detail_tab == .details)) selected_detail_tab = .details;
+    if (tabButton(@src(), "CHANGELOG", 1, selected_detail_tab == .changelog)) selected_detail_tab = .changelog;
 }
 
-fn drawDetailTab(src: std.builtin.SourceLocation, label: []const u8, id_extra: usize, selected: bool) void {
+fn tabButton(src: std.builtin.SourceLocation, label: []const u8, id_extra: usize, selected: bool) bool {
     const theme = dvui.themeGet();
 
     // Sized to the label's own width (no expand), so the underline drawn below — which does
@@ -669,15 +663,11 @@ fn drawDetailTab(src: std.builtin.SourceLocation, label: []const u8, id_extra: u
         .id_extra = id_extra,
         .background = false,
         .border = dvui.Rect.all(0),
-        .margin = dvui.Rect.all(0),
+        .margin = dvui.Rect.all(2),
         .padding = .{ .x = 4, .y = 6, .w = 4, .h = 4 },
         .color_text = if (selected) theme.color(.window, .text) else theme.color(.control, .text),
-        .font = tab_font.withSize(tab_font.size - 1),
+        .font = tab_font.withSize(tab_font.size),
     });
-    if (clicked) {
-        selected_detail_tab = if (id_extra == 0) .details else .changelog;
-    }
-
     var underline = dvui.box(@src(), .{}, .{
         .id_extra = id_extra,
         .expand = .horizontal,
@@ -686,6 +676,8 @@ fn drawDetailTab(src: std.builtin.SourceLocation, label: []const u8, id_extra: u
         .color_fill = if (selected) theme.color(.window, .text) else .transparent,
     });
     underline.deinit();
+
+    return clicked;
 }
 
 /// CHANGELOG's content until real GitHub Releases fetching lands (tracked separately) — an
@@ -1254,8 +1246,8 @@ fn rankEntries(entries: *std.ArrayListUnmanaged(StoreEntry), query: *const fuzzy
 
 fn draw(_: ?*anyopaque) anyerror!void {
     // Unlike the old flat list, the tab now fills the full explorer viewport height
-    // (`expand = .both`, not just `.horizontal`) so the upper/lower paned split below gets a
-    // genuinely bounded height to divide — each pane then scrolls its own overflow (see
+    // (`expand = .both`, not just `.horizontal`) so the section below the tab strip gets a
+    // genuinely bounded height — it then scrolls its own overflow (see
     // `drawStoreSection`/`drawInstalledSection`) rather than the whole tab growing forever and
     // leaning on the explorer's own scrollArea (`files.zig`'s tree still does that; we don't).
     var vbox = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
@@ -1303,7 +1295,7 @@ fn draw(_: ?*anyopaque) anyerror!void {
     const arena = dvui.currentWindow().arena();
     const editor = fizzy.editor;
 
-    // Store entries (upper pane): one row per registry plugin, independent of local install
+    // Store entries (STORE tab): one row per registry plugin, independent of local install
     // state — a pure "what does the store publish" list. See `drawStoreCard`.
     var store_entries: std.ArrayListUnmanaged(StoreEntry) = .empty;
     if (maybe_snapshot) |snap| {
@@ -1320,7 +1312,7 @@ fn draw(_: ?*anyopaque) anyerror!void {
     }
     rankEntries(&store_entries, &query);
 
-    // Installed entries (lower pane): everything genuinely present locally — loaded,
+    // Installed entries (INSTALLED tab): everything genuinely present locally — loaded,
     // disabled-on-disk, sideloaded, or a failed/rejected build — enriched with a matching
     // registry row (for "store vX" / Update-availability) wherever the registry knows the id too.
     var installed_entries: std.ArrayListUnmanaged(StoreEntry) = .empty;
@@ -1381,55 +1373,36 @@ fn draw(_: ?*anyopaque) anyerror!void {
     }
     rankEntries(&installed_entries, &query);
 
-    // Upper/lower split — identical shape and autosizing behaviour to the Pixi tools pane's
-    // layers/palettes split (`explorer/tools.zig`): the installed pane autofits snugly to its
-    // content every frame, up to `installed_max_split_ratio`, unless the sash is actively being
-    // dragged or an animation is in flight — a manual drag becomes the new ceiling so autofit
-    // never grows back past a size the user deliberately chose.
-    var paned = fizzy.dvui.paned(@src(), .{
-        .direction = .vertical,
-        .collapsed_size = 0,
-        .handle_size = 10,
-        // Same reveal distance as every other sash in the app; the default 20 made this one
-        // appear much later than its neighbours for no reason.
-        .handle_dynamic = .{ .handle_size_max = 10, .distance_max = 60 },
-    }, .{ .expand = .both, .background = false });
-    defer paned.deinit();
+    drawPaneTabs(cat.status());
 
-    if (paned.dragging) installed_max_split_ratio = paned.split_ratio.*;
-
-    var shown_installed: usize = 0;
-    if (paned.showFirst()) {
-        shown_installed = drawInstalledSection(installed_entries.items, filter_text);
+    switch (selected_pane_tab) {
+        .store => _ = drawStoreSection(store_entries.items, filter_text, cat.status()),
+        .installed => _ = drawInstalledSection(installed_entries.items, filter_text),
     }
+}
 
-    // Must run between `showFirst` and `showSecond` — `getFirstFittedRatio` reads the min size
-    // the first pane's just-drawn content published.
-    const autofit = !paned.dragging and !paned.animating;
-    if (dvui.firstFrame(paned.data().id) or prev_installed_shown != shown_installed or autofit) {
-        if (dvui.firstFrame(paned.data().id)) {
-            // Min sizes for the subtree aren't published yet on the very first frame — so a fit
-            // computed right now would be wrong. Nudge open (never hard-close to exactly 0):
-            // `showFirst` below gates whether the installed pane's content runs *at all*, so a
-            // 0 here would deadlock — the pane could never publish a size to refit from again,
-            // and only a manual drag of the sash would ever reopen it. Refit properly next frame.
-            paned.split_ratio.* = 1.0;
-        } else {
-            const ratio = paned.getFirstFittedRatio(.{
-                .min_split = 0,
-                .max_split = @min(installed_max_split_ratio, 0.6),
-                .min_size = 0,
-            });
-            const diff = @abs(ratio - paned.split_ratio.*);
-            if (diff > 0.000001) {
-                paned.animateSplit(ratio, dvui.easing.outBack);
-            }
-        }
-    }
-    prev_installed_shown = shown_installed;
+/// Store / Installed strip below the filter row. Same look as the detail page's
+/// DETAILS/CHANGELOG strip (`drawDetailTabs`), plus the store's refresh spinner pinned to the
+/// right so an in-flight fetch stays visible from either tab.
+fn drawPaneTabs(status: store.Status) void {
+    var strip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .padding = .{ .x = 12, .y = 6, .h = 6 },
+    });
+    defer strip.deinit();
 
-    if (paned.showSecond()) {
-        _ = drawStoreSection(store_entries.items, filter_text, cat.status());
+    if (tabButton(@src(), "STORE", 0, selected_pane_tab == .store)) selected_pane_tab = .store;
+    if (tabButton(@src(), "INSTALLED", 1, selected_pane_tab == .installed)) selected_pane_tab = .installed;
+
+    // A refresh over existing cards is a footnote, not a takeover: the cards stay put and this
+    // spinner is the only sign a fetch is outstanding.
+    if (status == .fetching and have_snapshot) {
+        fizzy.dvui.bubbleSpinner(@src(), .{
+            .min_size_content = .{ .w = 14, .h = 14 },
+            .gravity_x = 1.0,
+            .gravity_y = 0.5,
+            .color_text = dvui.themeGet().color(.window, .text).opacity(0.7),
+        }, .{});
     }
 }
 
@@ -1536,31 +1509,15 @@ fn cardAnimator(src: std.builtin.SourceLocation, entry: StoreEntry, index: usize
     });
 }
 
-/// Lower pane: a pure "browse the store" list, one card per registry plugin. Wrapped in its
+/// STORE tab: a pure "browse the store" list, one card per registry plugin. Wrapped in its
 /// own scrollArea (independent of the installed pane above) with the same edge-shadow treatment
-/// `explorer/Explorer.zig` uses, so a manually-shrunk pane or an overly-wide card still scrolls
-/// with the usual visual hint instead of clipping silently. Returns the shown count (unused by
-/// the caller now that the store pane no longer drives the paned autofit).
+/// `explorer/Explorer.zig` uses, so a narrow pane or an overly-wide card still scrolls with the
+/// usual visual hint instead of clipping silently. Returns the shown count (unused).
 ///
 /// This pane — and only this pane — owns the registry's loading/offline states: the spinner while
 /// the first fetch is in flight, the unreachable empty state when it fails, and a small inline
 /// spinner beside the header while a refresh runs over already-shown cards.
 fn drawStoreSection(entries: []const StoreEntry, filter_text: []const u8, status: store.Status) usize {
-    {
-        var header = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer header.deinit();
-        dvui.labelNoFmt(@src(), "STORE", .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .x = 8 } });
-        // A refresh over existing cards is a footnote, not a takeover: the cards stay put and this
-        // spinner is the only sign a fetch is outstanding.
-        if (status == .fetching and have_snapshot) {
-            fizzy.dvui.bubbleSpinner(@src(), .{
-                .min_size_content = .{ .w = 14, .h = 14 },
-                .gravity_y = 0.5,
-                .color_text = dvui.themeGet().color(.window, .text).opacity(0.7),
-            }, .{});
-        }
-    }
-
     var pane_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = false });
     defer pane_box.deinit();
 
@@ -1605,13 +1562,11 @@ fn drawStoreSection(entries: []const StoreEntry, filter_text: []const u8, status
     return shown;
 }
 
-/// Upper pane: everything genuinely present locally, grouped under "Local" (sideloaded dylibs)
+/// INSTALLED tab: everything genuinely present locally, grouped under "Local" (sideloaded dylibs)
 /// and "Built-in" (bundled + static built-ins) headers. This is the *only* place enable/disable,
 /// update, uninstall, and failed-to-load detail show up — see `drawCard`. Returns the shown
-/// count (drives the paned autofit refit trigger in `draw`).
+/// count (unused).
 fn drawInstalledSection(entries: []const StoreEntry, filter_text: []const u8) usize {
-    dvui.labelNoFmt(@src(), "INSTALLED", .{}, .{ .font = dvui.Font.theme(.heading), .margin = .{ .y = 4 } });
-
     var pane_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = false });
     defer pane_box.deinit();
 
@@ -1662,7 +1617,7 @@ fn drawInstalledSection(entries: []const StoreEntry, filter_text: []const u8) us
     return shown;
 }
 
-/// Small uppercase-ish section label above a group of cards in the upper pane. `id_extra`
+/// Small uppercase-ish section label above a group of cards in the INSTALLED tab. `id_extra`
 /// disambiguates the "Local" and "Built-in" calls, which otherwise share a source location.
 fn drawSectionHeader(title: []const u8, id_extra: usize) void {
     dvui.labelNoFmt(@src(), title, .{}, .{
@@ -1678,15 +1633,15 @@ fn isBuiltIn(id: []const u8) bool {
     return isBundled(id);
 }
 
-/// Lower-pane card: full state — enabled checkbox, update/uninstall, failed-to-load detail —
+/// INSTALLED-tab card: full state — enabled checkbox, update/uninstall, failed-to-load detail —
 /// via `drawCardControls`/`infoLine` (which still shows "installed vX"). See `drawCardShell`.
 fn drawCard(entry: StoreEntry) void {
     var buf: [192]u8 = undefined;
     drawCardShell(entry, drawCardControls, infoLine(&buf, entry), true);
 }
 
-/// Upper-pane card: browse-only — just an install button or a "no compatible build" message via
-/// `drawStoreCardControls`/`storeInfoLine` (never "installed vX": that's the lower pane's job,
+/// STORE-tab card: browse-only — just an install button or a "no compatible build" message via
+/// `drawStoreCardControls`/`storeInfoLine` (never "installed vX": that's the INSTALLED tab's job,
 /// even for a store plugin the user happens to already have installed). See `drawCardShell`.
 fn drawStoreCard(entry: StoreEntry) void {
     var buf: [192]u8 = undefined;
@@ -2010,7 +1965,7 @@ fn infoLine(buf: []u8, entry: StoreEntry) []const u8 {
 }
 
 /// Compose the dim `id · store v{latest}` line for a store (upper-pane) card into `buf`. Unlike
-/// `infoLine`, this never shows install state — the upper pane is a pure "what does the store
+/// `infoLine`, this never shows install state — the STORE tab is a pure "what does the store
 /// publish" list, even for a plugin the user happens to already have installed (see `drawCard`).
 fn storeInfoLine(buf: []u8, entry: StoreEntry) []const u8 {
     var latest_buf: [40]u8 = undefined;
