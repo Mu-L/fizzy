@@ -1398,6 +1398,9 @@ pub fn unloadPlugin(editor: *Editor, id: []const u8, force: bool) UnloadError!vo
     // Remove all contributions + services + active-id references (before dlclose), then
     // run the plugin's own teardown.
     editor.host.unregisterPlugin(plugin);
+    // The bottom panel borrows `BottomView.id` slices (grouping keys, per-split active tab)
+    // that live in the image we're about to unmap — drop them while they're still readable.
+    editor.panel.forgetUnregisteredViews(&editor.host);
     fizzy.backend.rebuildDynamicNativeMenus();
     plugin.deinit();
 

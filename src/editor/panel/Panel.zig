@@ -85,6 +85,33 @@ pub fn viewIndex(self: *Panel, host: *fizzy.Editor.Host, view_id: []const u8) ?u
     return null;
 }
 
+/// Drop panel bookkeeping that still names a bottom view which is no longer registered.
+///
+/// Both the keys of `view_groupings` and each workspace's `active_view_id` are *borrowed*
+/// `BottomView.id` slices, and for a runtime-loaded plugin those live in the plugin image's
+/// static memory. Unregistering the plugin's contributions doesn't touch them, so without this
+/// the panel goes on hashing and comparing strings that point into an unmapped library on every
+/// frame it draws.
+///
+/// Call *after* `Host.unregisterPlugin` (so the doomed views are already out of
+/// `bottom_views`) and *before* `dlclose` (so these slices are still readable) — the same
+/// ordering contract `unregisterPlugin` documents for the active-selection ids.
+pub fn forgetUnregisteredViews(self: *Panel, host: *fizzy.Editor.Host) void {
+    var i = self.view_groupings.count();
+    while (i > 0) {
+        i -= 1;
+        if (self.viewIndex(host, self.view_groupings.keys()[i]) == null) {
+            self.view_groupings.swapRemoveAt(i);
+        }
+    }
+
+    for (self.workspaces.values()) |*workspace| {
+        const active = workspace.active_view_id orelse continue;
+        // `rebuildWorkspaces` re-picks a live view for the grouping on the next draw.
+        if (self.viewIndex(host, active) == null) workspace.active_view_id = null;
+    }
+}
+
 pub fn activeViewInGrouping(self: *Panel, host: *fizzy.Editor.Host, grouping: u64) ?*fizzy.Editor.Host.BottomView {
     const workspace = self.workspaces.get(grouping) orelse return null;
     if (workspace.active_view_id) |active_id| {
