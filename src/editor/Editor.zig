@@ -139,6 +139,20 @@ infobar: Infobar,
 /// The root folder that will be searched for files and a .fizproject file
 folder: ?[]const u8 = null,
 
+/// Folder strings unlinked from `folder` but possibly still borrowed by the frame in progress.
+///
+/// `EditorAPI.folder` hands plugins the pointer itself, and a plugin can close or switch the
+/// project from *inside* its own draw — the file tree's project row does exactly that from its
+/// context menu, then keeps drawing with the `path` it read at the top of the function. Freeing
+/// there is a use-after-free in every caller still holding the slice, so the old string is
+/// parked here and released at the top of the next frame instead (the same shape as the
+/// workbench's retired directory listings).
+folder_retired: std.ArrayListUnmanaged([]const u8) = .empty,
+
+/// Set by `closeProjectFolder`; the teardown itself runs at the top of the next frame so plugin
+/// `onFolderClose` hooks and the ignore-rule teardown never fire mid-draw either.
+pending_folder_close: bool = false,
+
 /// Whether a text-input widget held keyboard focus at the end of the last frame.
 ///
 /// `dvui.wantTextInput` is the cross-cutting signal — dvui's own `TextEntryWidget`, the text
@@ -147,6 +161,14 @@ folder: ?[]const u8 = null,
 /// answer. That is fine for deciding who owns a clipboard verb: focus doesn't change between
 /// the keystroke and the frame that handles it.
 text_input_focused: bool = false,
+/// Whether any plugin asked to keep painting this frame — one poll of every plugin's
+/// `needsContinuousRepaint`, sampled in `tick` and read by everything that needs the answer.
+///
+/// One poll, not several, because the hook is allowed to be a *consuming* read: a plugin whose
+/// panel is only sometimes drawn answers from a "did I draw" flag it clears as it reports (atlas
+/// does exactly this), so a second poll in the same frame answers false and the two callers
+/// disagree about the same frame.
+plugins_drawing: bool = false,
 /// From `.fizignore` (preferred) or `.gitignore` at the project root; used by the Files explorer.
 ignore: IgnoreRules = .{},
 
@@ -764,12 +786,42 @@ pub const FailedPlugin = struct {
     /// it. Lets the store show "current version" for a build that is on disk but rejected —
     /// null only when the dylib couldn't even be opened for probing.
     plugin_version: ?std.SemanticVersion = null,
+    /// The rejected build's mtime + size when it was recorded, so
+    /// `reconcileFailedPluginBinaries` can tell "still the same broken file" from "the author
+    /// rebuilt it". Both zero when the stat failed, which reads as "never matches" — the safe
+    /// direction, same as `PluginLoader.LoadedLib`'s stamp.
+    source_mtime_ns: i128 = 0,
+    source_size: u64 = 0,
+};
+
+/// A file's mtime + size, the pair every "did this build change underneath us?" check in this
+/// file compares. Zeroes when the file could not be stat'd, which reads as "matches nothing".
+const FileStamp = struct {
+    mtime_ns: i128 = 0,
+    size: u64 = 0,
+
+    fn of(path: []const u8) FileStamp {
+        if (comptime builtin.target.cpu.arch == .wasm32) return .{};
+        const st = std.Io.Dir.cwd().statFile(dvui.io, path, .{}) catch return .{};
+        return .{ .mtime_ns = st.mtime.nanoseconds, .size = st.size };
+    }
+
+    fn eql(self: FileStamp, other: FileStamp) bool {
+        return self.mtime_ns == other.mtime_ns and self.size == other.size;
+    }
 };
 
 /// Record a failed user-plugin load so the UI can surface it. `id` and `reason` are copied
 /// (the caller keeps ownership of its arguments). Best-effort: on OOM the failure is dropped
 /// after being logged at the call site.
-fn recordPluginFailure(editor: *Editor, id: []const u8, reason: []const u8, detail: ?[]const u8, plugin_version: ?std.SemanticVersion) void {
+fn recordPluginFailure(
+    editor: *Editor,
+    id: []const u8,
+    reason: []const u8,
+    detail: ?[]const u8,
+    plugin_version: ?std.SemanticVersion,
+    stamp: FileStamp,
+) void {
     const id_owned = fizzy.app.allocator.dupe(u8, id) catch return;
     const reason_owned = fizzy.app.allocator.dupe(u8, reason) catch {
         fizzy.app.allocator.free(id_owned);
@@ -786,6 +838,8 @@ fn recordPluginFailure(editor: *Editor, id: []const u8, reason: []const u8, deta
         .reason = reason_owned,
         .detail = detail_owned,
         .plugin_version = plugin_version,
+        .source_mtime_ns = stamp.mtime_ns,
+        .source_size = stamp.size,
     }) catch {
         fizzy.app.allocator.free(id_owned);
         fizzy.app.allocator.free(reason_owned);
@@ -865,7 +919,7 @@ fn recordLoadFailure(editor: *Editor, id: []const u8, path: []const u8, err: Plu
     // `recordPluginFailure` appends unconditionally; drop any prior record so repeated attempts
     // (enable → fail → enable → fail) leave one row, not a growing pile of duplicate cards.
     editor.clearFailedUserPlugin(id);
-    editor.recordPluginFailure(id, reason, detail, if (probe) |info| info.plugin_version else null);
+    editor.recordPluginFailure(id, reason, detail, if (probe) |info| info.plugin_version else null, .of(path));
 }
 
 /// One-shot: moves any pre-R10 flat `{plugins_dir}/{id}.{ext}` into its own
@@ -972,7 +1026,7 @@ pub fn loadUserPlugins(editor: *Editor, config_folder: []const u8) void {
             } else {
                 dvui.log.err("user plugin '{s}': id already registered by a built-in; skipped", .{plugin_id});
                 const probe = PluginLoader.probeVersionInfo(path);
-                editor.recordPluginFailure(plugin_id, "id already registered by a built-in plugin", null, if (probe) |info| info.plugin_version else null);
+                editor.recordPluginFailure(plugin_id, "id already registered by a built-in plugin", null, if (probe) |info| info.plugin_version else null, .of(path));
             }
             fizzy.app.allocator.free(path);
             continue;
@@ -992,7 +1046,7 @@ pub fn loadUserPlugins(editor: *Editor, config_folder: []const u8) void {
 
         appendLoadedPluginLib(editor, loaded) catch {
             dvui.log.err("user plugin '{s}': out of memory storing LoadedLib", .{plugin_id});
-            editor.recordPluginFailure(plugin_id, "ran out of memory while loading", null, loaded.version_info.plugin_version);
+            editor.recordPluginFailure(plugin_id, "ran out of memory while loading", null, loaded.version_info.plugin_version, .of(loaded.path));
             continue;
         };
         dvui.log.info("user plugin '{s}' loaded from {s} in {d}ms", .{
@@ -1256,9 +1310,7 @@ pub const UnloadError = error{ NotUnloadable, DirtyDocuments };
 /// registered. On success the lib is appended to `loaded_plugin_libs`.
 pub fn loadUserPluginById(editor: *Editor, id: []const u8) !void {
     if (comptime builtin.target.cpu.arch == .wasm32) return error.NotUnloadable;
-    const file_name = try PluginLoader.pluginFilename(id, fizzy.app.allocator);
-    defer fizzy.app.allocator.free(file_name);
-    const path = try std.fs.path.join(fizzy.app.allocator, &.{ editor.config_folder, "plugins", id, file_name });
+    const path = try userPluginPath(fizzy.app.allocator, editor, id);
     errdefer fizzy.app.allocator.free(path);
 
     const loaded = PluginLoader.loadAndRegister(&editor.host, fizzy.app.allocator, path, id, .{
@@ -2302,11 +2354,11 @@ pub fn markWindowRatiosDirty(editor: *Editor) void {
     editor.window_ratios_save_deadline_ns = fizzy.perf.nanoTimestamp() + Settings.autosave_timeout_ns;
 }
 
-fn activelyDrawing(editor: *Editor) bool {
-    for (editor.host.plugins.items) |plugin| {
-        if (plugin.needsContinuousRepaint()) return true;
-    }
-    return false;
+/// This frame's answer, sampled in `tick` — see `plugins_drawing`. Callers run after that
+/// sample; on the first frame, before any sample, it reads false, which is the harmless
+/// direction (an autosave happens one frame earlier than it might have).
+fn activelyDrawing(editor: *const Editor) bool {
+    return editor.plugins_drawing;
 }
 
 /// Composes fizzy's own fields (`Settings.serialize`) together with every plugin's pending
@@ -2597,6 +2649,70 @@ fn restampLoadedPlugin(editor: *Editor, id: []const u8) void {
     }
 }
 
+/// Retries a plugin whose load failed once its build on disk changes.
+///
+/// The companion to `reconcileChangedPluginBinaries`, which only ever looks at plugins that are
+/// *running* — a build that was rejected (wrong SDK, stale ABI fingerprint, a half-written file)
+/// isn't in `loaded_plugin_libs` at all, so nothing rechecked it and the store's Retry button was
+/// the only way back in. The overwhelmingly common case is an author rebuilding the plugin they
+/// just got a load error for: the rebuild lands in the same `plugins/<id>/` directory the config
+/// watcher already covers, so the fix is to compare the rejected build's stamp against disk and
+/// load again when they differ.
+///
+/// A retry that fails re-records the failure with the *new* stamp, so a build that is simply
+/// broken is attempted once per rebuild rather than once per watcher event. A plugin the user
+/// disabled is left alone: "off" is a decision, not a failure to recover from.
+pub fn reconcileFailedPluginBinaries(editor: *Editor) void {
+    if (comptime builtin.target.cpu.arch == .wasm32) return;
+    const gpa = fizzy.app.allocator;
+
+    // Collect first: a retry mutates `failed_user_plugins` (both on success, via
+    // `clearFailedUserPlugin`, and on failure, which re-records), so the ids have to be our own
+    // copies — the same reason `reconcileChangedPluginBinaries` collects before reloading.
+    var retry: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (retry.items) |id| gpa.free(id);
+        retry.deinit(gpa);
+    }
+
+    for (editor.failed_user_plugins.items) |f| {
+        if (isBundledPluginId(f.id)) continue;
+        if (editor.isPluginDisabled(f.id)) continue;
+        const path = userPluginPath(gpa, editor, f.id) catch continue;
+        defer gpa.free(path);
+        const stamp: FileStamp = .of(path);
+        // Zeroes mean the build is gone or unreadable right now (a rebuild deletes and rewrites
+        // it): nothing to load, and the next watcher event brings the finished file.
+        if (stamp.mtime_ns == 0 and stamp.size == 0) continue;
+        if (stamp.eql(.{ .mtime_ns = f.source_mtime_ns, .size = f.source_size })) continue;
+        const id = gpa.dupe(u8, f.id) catch continue;
+        retry.append(gpa, id) catch {
+            gpa.free(id);
+            continue;
+        };
+    }
+
+    for (retry.items) |id| {
+        // Exactly what the store's Retry button does (`PluginStore.queueSetEnabled(id, true)`),
+        // so a recovered plugin ends up in the same state either way — enabled on record, loaded,
+        // failure record cleared.
+        if (editor.setPluginEnabled(id, true, false)) {
+            dvui.log.info("plugin watcher: '{s}' loaded from its rebuilt binary after an earlier failure", .{id});
+        } else |err| {
+            // `loadUserPluginById` already logged and re-recorded the failure (with the new
+            // stamp), so this build won't be retried again until it changes once more.
+            dvui.log.info("plugin watcher: rebuilt '{s}' still fails to load ({s})", .{ id, @errorName(err) });
+        }
+    }
+}
+
+/// `<config>/plugins/<id>/<id>.<ext>` — where a user plugin's build lives. Caller frees.
+fn userPluginPath(gpa: std.mem.Allocator, editor: *Editor, id: []const u8) ![]u8 {
+    const file_name = try PluginLoader.pluginFilename(id, gpa);
+    defer gpa.free(file_name);
+    return std.fs.path.join(gpa, &.{ editor.config_folder, "plugins", id, file_name });
+}
+
 /// Rescans `<config>/plugins/` for directories not already loaded / tracked-disabled / failed,
 /// and adds each as a disabled entry without writing settings.zon — a plugin dropped straight
 /// into the folder must not auto-execute (R12). Store installs write `.enabled = true` themselves.
@@ -2749,6 +2865,12 @@ const handle_size = 10;
 const handle_dist = 60;
 
 pub fn tick(editor: *Editor) !dvui.App.Result {
+    // Folder lifetime, before anything draws: free the strings earlier frames retired, then
+    // apply a close queued from last frame's draw. `EditorAPI.folder` hands out the pointer
+    // itself, so both have to land where no draw can be holding it. See `folder_retired`.
+    editor.releaseRetiredFolders();
+    editor.applyPendingFolderClose();
+
     editor.window_opacity = if (dvui.themeGet().dark) editor.settings.window_opacity_dark else editor.settings.window_opacity_light;
 
     // Ease the window background between translucent (windowed) and fully opaque
@@ -2899,9 +3021,21 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
     {
         var any_drawing = false;
         fizzy.perf.draw_stroke_buf_count = 0;
+        // Every plugin, with no early exit: the hook is a broadcast, and a plugin that clears
+        // per-frame state as it answers (see `plugins_drawing`) must be asked on every frame it
+        // could be drawn on, not only until the first `true`.
         for (editor.host.plugins.items) |plugin| {
             if (plugin.needsContinuousRepaint()) any_drawing = true;
         }
+        editor.plugins_drawing = any_drawing;
+        // The hook's whole promise: "keep repainting rather than idling until input". Without
+        // this it was only ever telemetry — dvui decides on its own whether to sleep, and it has
+        // no idea a plugin is mid-animation, waiting on a worker it can only collect from a
+        // frame, or counting down a debounce that only advances on frames that run. Every such
+        // plugin had to call `dvui.refresh` itself and the hook did nothing, which is exactly the
+        // "it starts, then freezes until I move the mouse" the graph panel showed once the app
+        // was allowed to sleep.
+        if (any_drawing) dvui.refresh(null, @src(), null);
         fizzy.perf.drawFrameBegin(any_drawing);
     }
     defer fizzy.perf.drawFrameEnd();
@@ -3620,10 +3754,15 @@ pub fn setProjectFolder(editor: *Editor, path_in: []const u8) !void {
     const path = try fizzy.paths.normalize(fizzy.app.allocator, path_in);
     defer fizzy.app.allocator.free(path);
 
-    if (editor.folder) |folder| {
+    // Opening a folder makes a close queued during this frame's draw moot.
+    editor.pending_folder_close = false;
+
+    if (editor.folder != null) {
         editor.ignore.deinit(fizzy.app.allocator);
         for (editor.host.plugins.items) |plugin| plugin.onFolderClose();
-        fizzy.app.allocator.free(folder);
+        // Not freed here: this runs from menus and plugin draws, and the outgoing string may
+        // still be borrowed by whoever is mid-frame. See `folder_retired`.
+        editor.retireFolder();
     }
     editor.folder = try fizzy.app.allocator.dupe(u8, path);
     editor.command_palette.invalidate();
@@ -3641,14 +3780,42 @@ pub fn setProjectFolder(editor: *Editor, path_in: []const u8) !void {
     if (editor.folder_watcher) |*w| w.setFolder(editor.folder);
 }
 
+/// Queue the project close; the teardown runs at the top of the next frame
+/// (`applyPendingFolderClose`).
+///
+/// Deferred because this is reachable from inside a plugin's draw — the file tree's
+/// project-row context menu calls it through `Host.closeProjectFolder` and then goes on to
+/// draw the project row, its rows, and its ignore-screened listings using the folder it read
+/// before the menu ran. Tearing all of that down underneath the draw that is still using it
+/// crashes in whatever touches the folder string next.
 pub fn closeProjectFolder(editor: *Editor) void {
-    if (editor.folder) |folder| {
-        if (editor.folder_watcher) |*w| w.setFolder(null);
-        editor.ignore.deinit(fizzy.app.allocator);
-        for (editor.host.plugins.items) |plugin| plugin.onFolderClose();
-        fizzy.app.allocator.free(folder);
-        editor.folder = null;
-    }
+    if (editor.folder == null) return;
+    editor.pending_folder_close = true;
+}
+
+/// Move the current folder string out of `folder` without freeing it — see `folder_retired`.
+fn retireFolder(editor: *Editor) void {
+    const folder = editor.folder orelse return;
+    editor.folder = null;
+    editor.folder_retired.append(fizzy.app.allocator, folder) catch fizzy.app.allocator.free(folder);
+}
+
+/// Release folder strings retired by earlier frames. Called at the top of `tick`, before
+/// anything draws, which is the one point at which nothing can still be holding one.
+fn releaseRetiredFolders(editor: *Editor) void {
+    for (editor.folder_retired.items) |folder| fizzy.app.allocator.free(folder);
+    editor.folder_retired.clearRetainingCapacity();
+}
+
+/// Perform a close queued by `closeProjectFolder` during an earlier frame.
+fn applyPendingFolderClose(editor: *Editor) void {
+    if (!editor.pending_folder_close) return;
+    editor.pending_folder_close = false;
+    if (editor.folder == null) return;
+    if (editor.folder_watcher) |*w| w.setFolder(null);
+    editor.ignore.deinit(fizzy.app.allocator);
+    for (editor.host.plugins.items) |plugin| plugin.onFolderClose();
+    editor.retireFolder();
 }
 
 pub fn saving(editor: *Editor) bool {
@@ -4604,5 +4771,7 @@ pub fn deinit(editor: *Editor) !void {
     editor.keymap.deinit(fizzy.app.allocator);
 
     if (editor.folder) |folder| fizzy.app.allocator.free(folder);
+    editor.releaseRetiredFolders();
+    editor.folder_retired.deinit(fizzy.app.allocator);
     editor.arena.deinit();
 }

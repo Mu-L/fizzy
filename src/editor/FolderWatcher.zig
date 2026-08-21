@@ -265,7 +265,9 @@ pub fn tick(self: *FolderWatcher, editor: *fizzy.Editor) void {
     {
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (!self.shared.empty()) self.coalesce_deadline_ns = now + debounce_ns;
+        // Only *start* a window; extending it on every tick would postpone the fan-out forever,
+        // because the buffer stays non-empty until the swap below drains it.
+        if (!self.shared.empty() and self.coalesce_deadline_ns == 0) self.coalesce_deadline_ns = now + debounce_ns;
     }
     if (self.coalesce_deadline_ns == 0) return;
     if (now < self.coalesce_deadline_ns) {

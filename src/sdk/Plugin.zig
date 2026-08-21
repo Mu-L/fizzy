@@ -202,6 +202,15 @@ pub const VTable = struct {
     endFrame: ?*const fn (state: *anyopaque) void = null,
     /// [broadcast] True while the plugin needs fizzy to keep repainting continuously (an
     /// active stroke, a running animation, a background job) rather than idling until input.
+    ///
+    /// Polled once per frame, from inside the frame, before most plugin drawing happens — so a
+    /// plugin that answers out of "was I drawn" state is reporting on the *previous* frame, and
+    /// may consume that state as it answers. Returning true asks for one more frame, not a
+    /// permanent wakeup: keep returning it for as long as the work lasts.
+    ///
+    /// This is a request to fizzy, not a substitute for `dvui.refresh` from a *background
+    /// thread* — a worker that finishes while the app is asleep still has to wake the loop
+    /// itself (`sdk.refresh()`), because nothing is polling anything until something does.
     needsContinuousRepaint: ?*const fn (state: *anyopaque) bool = null,
 
     // ---- folder lifecycle ----

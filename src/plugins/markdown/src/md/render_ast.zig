@@ -270,6 +270,9 @@ pub const RenderState = struct {
     /// Resolver generation `wikilink_resolved` was populated against. `maxInt` means "nothing
     /// memoized yet", which no real generation counter will collide with.
     wikilink_generation: u64 = std.math.maxInt(u64),
+    /// A pointer button is down: the reader has started a click and it has not been delivered
+    /// yet. Drives the layout freeze in `renderTopLevel` — see `blocks_frozen`.
+    pointer_down: bool = false,
 
     /// Where every top-level block sits, in document order: its source extent (enough to guess a
     /// height before it has ever been laid out) and its measured height once it has. Without the
@@ -1647,6 +1650,43 @@ fn renderTopLevel(doc_node: md.Node, ids: *IdGen, ctx: RenderContext) void {
     var resettle_below_left: usize = if (width_in_flux) 0 else resettle_below_budget;
     var resettle_above_left: usize = if (width_in_flux) 0 else resettle_above_budget;
 
+    // Nothing may move while a click is in flight.
+    //
+    // A click is matched *geometrically*, against the run rects this frame's layout produces —
+    // but the reader aimed at the frame they could see, which is the one before the press at
+    // best, and several frames before the release for an unhurried click. Any block above the
+    // pointer that changes height in that window slides the whole document under it, and the
+    // click lands on whatever text moved into the gap. That is not a rare edge: a block's first
+    // measurement is systematically wrong (dvui sizes a widget from what its children reported
+    // the frame before, which is why `.measured` still wants another pass), so every block
+    // newly drawn while scrolling shifts everything below it exactly one frame later. The
+    // reported symptom was a wikilink opening a *different* note — one from earlier in the same
+    // document, i.e. the text the shift pushed down into the cursor.
+    //
+    // So from press to release the document is pinned to the picture the reader was looking at:
+    // no off-screen re-measures, and every block that has a real height held to it. Settling
+    // resumes the moment the button comes up, at the cost of the odd deferred frame.
+    var saw_release = false;
+    var saw_press = false;
+    for (dvui.events()) |*e| {
+        if (e.evt != .mouse) continue;
+        const me = e.evt.mouse;
+        if (!me.button.pointer() and me.button != .middle) continue;
+        switch (me.action) {
+            .press => saw_press = true,
+            .release => saw_release = true,
+            else => {},
+        }
+    }
+    const frozen = rs.pointer_down or saw_press or saw_release;
+    rs.pointer_down = (rs.pointer_down or saw_press) and !saw_release;
+    if (frozen) {
+        resettle_below_left = 0;
+        resettle_above_left = 0;
+        // The measurements this frame refused are still owed; come back for them.
+        dvui.refresh(null, @src(), null);
+    }
+
     // Skipped blocks used to each get their own empty `box` with `min_size_content = h`. On a
     // multi-thousand-block document that meant thousands of widgets per frame even when only a
     // handful were on screen — the open hitch and the steady ~20ms frames while a large preview
@@ -1742,9 +1782,15 @@ fn renderTopLevel(doc_node: md.Node, ids: *IdGen, ctx: RenderContext) void {
         const block_state = rs.blocks.stateAt(index);
         // ...and never while the column width is moving: that is precisely when the block has to
         // be allowed to relearn its height, and a pin there would hold it at its pre-resize size.
+        //
+        // The click freeze above pins on a broader rule for the length of one click: any block
+        // with a height that came from a real layout, table or not. `.estimated` is excluded
+        // because there is nothing to hold it to — a block that has never been laid out is one
+        // the reader has never seen, so it cannot be what they aimed at either.
+        const pinnable = block_state == .settled or block_state == .deferred;
         const pin_h: ?f32 = if (known_h > 0 and !width_in_flux and
-            (block_state == .settled or block_state == .deferred) and
-            rs.subtree_has_table.contains(@intFromPtr(ch.n))) known_h else null;
+            ((frozen and block_state != .estimated) or
+                (pinnable and rs.subtree_has_table.contains(@intFromPtr(ch.n))))) known_h else null;
         var wrapper = box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
             .id_extra = index,
@@ -1788,7 +1834,12 @@ fn renderTopLevel(doc_node: md.Node, ids: *IdGen, ctx: RenderContext) void {
         // froze the *collapsed* first-frame measurement of a table the reader had never visited
         // and never revisited it, leaving the document ~1300px short per table.
         const partial = rs.block_rows_pending > 0;
-        rs.blocks.record(ctx.gpa, index, .{ .h = measured, .partial = partial }, metrics, ctx.column_width);
+        // A pinned block measured exactly what it was pinned to, which says nothing about what
+        // it wants to be. Filing that would promote a first, still-settling measurement to
+        // `.settled` at the lagged height — the freeze would then *persist* the very error it
+        // exists to hide from one click.
+        if (!frozen or pin_h == null)
+            rs.blocks.record(ctx.gpa, index, .{ .h = measured, .partial = partial }, metrics, ctx.column_width);
         const after_h = rs.blocks.heightAt(index, metrics, ctx.column_width);
         if (diag and known_h > 0 and @abs(after_h - known_h) > diag_height_jump) {
             dvui.log.warn(

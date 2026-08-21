@@ -316,8 +316,7 @@ fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u
     }
 
     if ((dvui.menuItemLabel(@src(), "New Folder...", .{}, .{ .expand = .horizontal })) != null) {
-        const new_folder_path = try std.fs.path.join(dvui.currentWindow().arena(), &.{ project_path, "New Folder" });
-        std.Io.Dir.createDirAbsolute(dvui.io, new_folder_path, .default_dir) catch dvui.log.err("Failed to create folder: {s}", .{new_folder_path});
+        createFolderInteractive(project_path);
 
         fw2.close();
     }
@@ -608,6 +607,42 @@ pub fn invalidateDirCache() void {
 /// changed path — a file appearing in `a/b/c.md` only invalidates `a/b`.
 pub fn invalidateDirCacheFor(directory: []const u8) void {
     if (dir_cache.getIndex(directory)) |idx| retireCachedListingAt(idx);
+}
+
+/// A `.modified` event for a file that may or may not be new.
+///
+/// A file's *contents* changing leaves its parent's listing exactly as it was, and that is by
+/// far the most common event there is (every save of every open document), so the tree wants to
+/// ignore it. But on macOS a brand-new file arrives as `.modified` too: FSEvents coalesces
+/// ItemCreated and ItemModified onto one event, and nightwatch resolves that pair to `.modified`
+/// because a rewrite of an existing file through `O_CREAT` sets ItemCreated as well. Ignoring
+/// every `.modified` therefore meant a file created outside fizzy never appeared in the tree.
+///
+/// So: re-read the parent only when its cached listing has never seen this name. A save of an
+/// already-listed file still costs one binary search and no disk access.
+pub fn noteFileModified(path: []const u8) void {
+    const parent = std.fs.path.dirname(path) orelse return;
+    const idx = dir_cache.getIndex(parent) orelse return; // not cached: nothing to re-read
+    if (listingHasFile(dir_cache.values()[idx], std.fs.path.basename(path))) return;
+    retireCachedListingAt(idx);
+}
+
+/// Binary search of the file half of a listing (`entries[dir_count..]`, sorted by name — see
+/// `cachedLessThan`). A per-save lookup must not walk a listing that can be hundreds of
+/// thousands of entries long.
+fn listingHasFile(listing: *const CachedListing, name: []const u8) bool {
+    const files_only = listing.entries[listing.dir_count..];
+    var lo: usize = 0;
+    var hi: usize = files_only.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        switch (std.mem.order(u8, files_only[mid].name, name)) {
+            .lt => lo = mid + 1,
+            .gt => hi = mid,
+            .eq => return true,
+        }
+    }
+    return false;
 }
 
 /// Cached, sorted, ignore-screened listing for `directory`, reading it from disk on a miss.
@@ -1297,14 +1332,8 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *wdvui.TreeWidget, u
 
                         if ((dvui.menuItemLabel(@src(), "New Folder...", .{}, .{ .expand = .horizontal })) != null) {
                             switch (entry.kind) {
-                                .directory => {
-                                    const new_folder_path = try std.fs.path.join(dvui.currentWindow().arena(), &.{ abs_path, "New Folder" });
-                                    std.Io.Dir.createDirAbsolute(dvui.io, new_folder_path, .default_dir) catch dvui.log.err("Failed to create folder: {s}", .{new_folder_path});
-                                },
-                                .file => {
-                                    const new_folder_path = try std.fs.path.join(dvui.currentWindow().arena(), &.{ entry_dir, "New Folder" });
-                                    std.Io.Dir.createDirAbsolute(dvui.io, new_folder_path, .default_dir) catch dvui.log.err("Failed to create folder: {s}", .{new_folder_path});
-                                },
+                                .directory => createFolderInteractive(abs_path),
+                                .file => createFolderInteractive(entry_dir),
                                 else => {},
                             }
 
@@ -1898,10 +1927,53 @@ pub fn renamePath(full_path: []const u8, new_path: []const u8, kind: std.Io.File
 /// inline Delete). Logs and continues on failure.
 pub fn deletePath(path: []const u8) void {
     invalidateAfterDiskChange();
-    if (pathIsDirAbsolute(path)) {
-        std.Io.Dir.deleteDirAbsolute(dvui.io, path) catch dvui.log.err("Failed to delete folder: {s}", .{path});
+    const is_dir = pathIsDirAbsolute(path);
+    if (is_dir) {
+        std.Io.Dir.deleteDirAbsolute(dvui.io, path) catch {
+            dvui.log.err("Failed to delete folder: {s}", .{path});
+            return;
+        };
     } else {
-        std.Io.Dir.deleteFileAbsolute(dvui.io, path) catch dvui.log.err("Failed to delete file: {s}", .{path});
+        std.Io.Dir.deleteFileAbsolute(dvui.io, path) catch {
+            dvui.log.err("Failed to delete file: {s}", .{path});
+            return;
+        };
+    }
+    closeDocumentsForDeletedPath(path, is_dir);
+}
+
+/// Close whatever the delete just removed from under the editor: the document for `path`, or —
+/// when `path` was a directory — every open document beneath it. The other half of what
+/// `renamePath` does for open documents; without it a deleted file keeps its tab, its editor and
+/// (for markdown) its preview, all bound to a path that no longer exists.
+///
+/// Routed through `closeDocById`, so an unsaved document still raises the normal unsaved-close
+/// dialog rather than having its edits discarded silently — the file being gone from disk is
+/// exactly when those edits are the only copy left.
+fn closeDocumentsForDeletedPath(path: []const u8, is_dir: bool) void {
+    if (!is_dir) {
+        // `docFromPath` collapses lexical spellings of the same file, which a manual compare
+        // against `documentPath` would not.
+        const doc = runtime.host().docFromPath(path) orelse return;
+        runtime.host().closeDocById(doc.id) catch |err| {
+            dvui.log.err("Failed to close deleted document: {any} ({s})", .{ err, path });
+        };
+        return;
+    }
+
+    // Ids first: closing mutates the open-document list this walks.
+    const arena = dvui.currentWindow().arena();
+    var ids: std.ArrayListUnmanaged(u64) = .empty;
+    var i: usize = 0;
+    while (i < runtime.host().openDocCount()) : (i += 1) {
+        const doc = runtime.host().docByIndex(i) orelse continue;
+        if (!isStrictPathDescendant(doc.owner.documentPath(doc), path)) continue;
+        ids.append(arena, doc.id) catch break;
+    }
+    for (ids.items) |id| {
+        runtime.host().closeDocById(id) catch |err| {
+            dvui.log.err("Failed to close deleted document: {any}", .{err});
+        };
     }
 }
 
@@ -1916,6 +1988,41 @@ pub fn createFilePath(path: []const u8) !void {
 pub fn createDirPath(path: []const u8) !void {
     invalidateAfterDiskChange();
     try std.Io.Dir.createDirAbsolute(dvui.io, path, .default_dir);
+}
+
+/// Backing store for `new_file_path` when the tree creates the path itself.
+///
+/// Deliberately *not* `EditorAPI.setExplorerNewFilePath`: that writes fizzy's own statically
+/// linked copy of this module (`Explorer.files`), which is a different global from the one this
+/// draw code reads once workbench is loaded as a dylib. A path produced here therefore has to
+/// be kept here. A fixed buffer rather than an allocation because the consumer only nulls the
+/// pointer, it never frees it.
+var new_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+/// "New Folder..." from either context menu (the project row and a folder row run the same
+/// code): create the folder, then hand the tree its path so the row that appears next frame
+/// opens its inline rename editor with the name selected — the same handoff the New File dialog
+/// makes through `new_file_path`. A folder that could not be created focuses nothing.
+pub fn createFolderInteractive(parent: []const u8) void {
+    const arena = dvui.currentWindow().arena();
+    // "New Folder", then "New Folder 2", "New Folder 3"… — creating a second one must not fail
+    // just because the first is still called what it was created as.
+    var name_buf: [32]u8 = undefined;
+    var n: usize = 1;
+    const path = while (n <= 1000) : (n += 1) {
+        const name = if (n == 1)
+            "New Folder"
+        else
+            std.fmt.bufPrint(&name_buf, "New Folder {d}", .{n}) catch return;
+        const candidate = std.fs.path.join(arena, &.{ parent, name }) catch return;
+        std.Io.Dir.accessAbsolute(dvui.io, candidate, .{}) catch break candidate;
+    } else return;
+
+    createDirPath(path) catch {
+        dvui.log.err("Failed to create folder: {s}", .{path});
+        return;
+    };
+    new_file_path = std.fmt.bufPrint(&new_path_buf, "{s}", .{path}) catch null;
 }
 
 /// Remove stale selections whose underlying file no longer exists (e.g. moved by a multi-drag).

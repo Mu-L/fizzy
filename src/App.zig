@@ -144,9 +144,10 @@ pub const std_options: std.Options = .{
 };
 
 // Forwards every log call to dvui's usual sink (stderr on native, the browser console on
-// web) and also into `fizzy.OutputLog`, so fizzy's "Output" bottom panel can show it.
+// web) and also into `fizzy.OutputLog`, so fizzy's "Output" bottom panel can show it — except
+// while `FIZZY_LOG_REFRESH` is on, see `refresh_log_active`.
 fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
-    fizzy.OutputLog.append(level, scope, format, args);
+    if (!refresh_log_active) fizzy.OutputLog.append(level, scope, format, args);
     dvui.App.logFn(level, scope, format, args);
 }
 
@@ -159,13 +160,23 @@ fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime
 ///
 /// Expect a lot of output: it logs per refresh, per frame. Pipe it and count by source line; the
 /// caller that appears on every single frame is the one keeping the app awake.
+///
+/// While it is on, log lines bypass `fizzy.OutputLog` (see `refresh_log_active`) and go to stderr
+/// only: the Output panel grows by a row per logged refresh, that growth changes its scroll
+/// container's virtual size, and the resulting `dvui.refresh` asks for another frame — so with the
+/// panel visible the diagnostic keeps the app awake all by itself, and reports its own feedback
+/// loop as the culprit.
 fn initRefreshLogFromEnv() void {
     if (comptime @import("builtin").target.cpu.arch == .wasm32) return;
     const raw = std.c.getenv("FIZZY_LOG_REFRESH") orelse return;
     if (std.mem.eql(u8, std.mem.span(raw), "0")) return;
+    refresh_log_active = true;
     _ = dvui.debug.logRefresh(true);
-    std.log.info("refresh logging on (FIZZY_LOG_REFRESH)", .{});
+    std.log.info("refresh logging on (FIZZY_LOG_REFRESH); Output panel logging is off for this run", .{});
 }
+
+/// Set by `initRefreshLogFromEnv`; keeps refresh-log output out of the Output panel.
+var refresh_log_active = false;
 
 // Runs before the first frame, after backend and dvui.Window.init()
 pub fn AppInit(win: *dvui.Window) !void {

@@ -89,16 +89,12 @@ const detail_header_min_w: f32 = 480;
 /// column's real (expanded) width via `.expand = .horizontal`.
 const detail_header_text_no_floor: f32 = 1;
 
-/// Transient status line shown in the header (e.g. an action error). Module-owned buffer.
-var status_message: [256]u8 = undefined;
-var status_len: usize = 0;
-
-fn setStatus(comptime fmt: []const u8, args: anytype) void {
-    const s = std.fmt.bufPrint(&status_message, fmt, args) catch {
-        status_len = 0;
-        return;
-    };
-    status_len = s.len;
+/// Action failures (a plugin that won't load, a queue/download that couldn't start) go to the
+/// Output panel rather than into a header line in this pane: a long message there widened the
+/// whole tab into a horizontal bar, and the Output panel is already where every other failure
+/// in the app is reported.
+fn reportError(comptime fmt: []const u8, args: anytype) void {
+    std.log.err(fmt, args);
 }
 
 // ---- async install jobs ----------------------------------------------------
@@ -814,9 +810,9 @@ pub fn tick() void {
                     fizzy.editor.installAndLoadPlugin(job.id);
                 loaded catch |err| {
                     if (err == error.DirtyDocuments) {
-                        setStatus("'{s}' has unsaved changes — save or close them first", .{job.id});
+                        reportError("'{s}' has unsaved changes — save or close them first", .{job.id});
                     } else {
-                        setStatus("'{s}' failed to load: {s}", .{ job.id, @errorName(err) });
+                        reportError("'{s}' failed to load: {s}", .{ job.id, @errorName(err) });
                     }
                     const n = @min(@errorName(err).len, job.err_buf.len);
                     @memcpy(job.err_buf[0..n], @errorName(err)[0..n]);
@@ -1021,7 +1017,7 @@ fn startDownload(id: []const u8, release: store.ShardRelease, is_update: bool) v
     const dl = release.downloadFor(compat.hostKey()) orelse return;
 
     const job = buildJob(id, dl, is_update) catch {
-        setStatus("could not prepare download for '{s}'", .{id});
+        reportError("could not prepare download for '{s}'", .{id});
         return;
     };
     jobs.put(fizzy.app.allocator, job.id, job) catch {
@@ -1032,7 +1028,7 @@ fn startDownload(id: []const u8, release: store.ShardRelease, is_update: bool) v
     job.tasks.concurrent(dvui.io, worker, .{ job, dvui.io }) catch {
         _ = jobs.swapRemove(job.id);
         freeJob(job);
-        setStatus("could not start download for '{s}'", .{id});
+        reportError("could not start download for '{s}'", .{id});
         return;
     };
 }
@@ -2330,16 +2326,8 @@ fn drawHeader() !void {
         .{ .stroke_color = dvui.themeGet().color(.control, .text) },
         .{ .gravity_x = 1.0, .corners = .all(1000000) },
     )) {
-        status_len = 0;
         if (catalog) |*c| c.refresh();
         refreshLocalInfo();
-    }
-
-    if (status_len > 0) {
-        dvui.labelNoFmt(@src(), status_message[0..status_len], .{}, .{
-            .gravity_x = 1.0,
-            .color_text = dvui.themeGet().color(.err, .text),
-        });
     }
 }
 
@@ -2371,39 +2359,37 @@ fn removePendingForId(id: []const u8) void {
 pub fn queueSetEnabled(id: []const u8, enabled: bool) void {
     removePendingForId(id);
     const dup = fizzy.app.allocator.dupe(u8, id) catch {
-        setStatus("'{s}' could not be queued", .{id});
+        reportError("'{s}' could not be queued", .{id});
         return;
     };
     pending_actions.append(fizzy.app.allocator, .{ .set_enabled = .{ .id = dup, .enabled = enabled } }) catch {
         fizzy.app.allocator.free(dup);
-        setStatus("'{s}' could not be queued", .{id});
+        reportError("'{s}' could not be queued", .{id});
     };
 }
 
 fn queueUninstall(id: []const u8) void {
     removePendingForId(id);
     const dup = fizzy.app.allocator.dupe(u8, id) catch {
-        setStatus("'{s}' could not be queued", .{id});
+        reportError("'{s}' could not be queued", .{id});
         return;
     };
     pending_actions.append(fizzy.app.allocator, .{ .uninstall = .{ .id = dup } }) catch {
         fizzy.app.allocator.free(dup);
-        setStatus("'{s}' could not be queued", .{id});
+        reportError("'{s}' could not be queued", .{id});
     };
 }
 
 fn applySetEnabled(id: []const u8, enabled: bool) void {
-    status_len = 0;
     fizzy.editor.setPluginEnabled(id, enabled, false) catch |err| switch (err) {
-        error.DirtyDocuments => setStatus("'{s}' has unsaved changes — save or close them first", .{id}),
-        else => setStatus("'{s}' could not be {s}: {s}", .{ id, if (enabled) "enabled" else "disabled", @errorName(err) }),
+        error.DirtyDocuments => reportError("'{s}' has unsaved changes — save or close them first", .{id}),
+        else => reportError("'{s}' could not be {s}: {s}", .{ id, if (enabled) "enabled" else "disabled", @errorName(err) }),
     };
 }
 
 fn applyUninstall(id: []const u8) void {
-    status_len = 0;
     fizzy.editor.uninstallPlugin(id, false) catch |err| switch (err) {
-        error.DirtyDocuments => setStatus("'{s}' has unsaved changes — save or close them first", .{id}),
-        else => setStatus("'{s}' could not be uninstalled: {s}", .{ id, @errorName(err) }),
+        error.DirtyDocuments => reportError("'{s}' has unsaved changes — save or close them first", .{id}),
+        else => reportError("'{s}' could not be uninstalled: {s}", .{ id, @errorName(err) }),
     };
 }

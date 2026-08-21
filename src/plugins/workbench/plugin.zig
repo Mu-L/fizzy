@@ -95,8 +95,14 @@ fn folderPathsChanged(_: *anyopaque, changes: sdk.Plugin.PathChanges) void {
         // A file's *contents* changing leaves every listing exactly as it was, and this is by
         // far the most common event there is — every save of every open document. Re-reading a
         // directory for it would put the full cost of a quarter-million-entry listing back on
-        // the frame after each keystroke-triggered autosave.
-        if (event.kind == .modified and event.object == .file) continue;
+        // the frame after each keystroke-triggered autosave. It can't be dropped outright
+        // though: macOS reports a newly created file as `.modified` as well (see
+        // `files.noteFileModified`), so the listing is re-read when the name is one it has
+        // never seen.
+        if (event.kind == .modified and event.object == .file) {
+            files.noteFileModified(event.path);
+            continue;
+        }
 
         if (std.fs.path.dirname(event.path)) |parent| files.invalidateDirCacheFor(parent);
         // A rename's two halves can sit in different directories.

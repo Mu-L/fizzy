@@ -46,7 +46,7 @@ pub fn draw(doc: *Document, id_extra: u64, gpa: std.mem.Allocator) !bool {
     const preview = sdk.host().previewProviderFor(ext);
 
     if (preview == null) {
-        return drawEditor(doc, ext, id_extra, gpa);
+        return drawEditor(doc, ext, id_extra, gpa, false);
     }
 
     var outer = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -97,7 +97,9 @@ pub fn draw(doc: *Document, id_extra: u64, gpa: std.mem.Allocator) !bool {
 
     var changed = false;
     if (paned.showFirst()) {
-        changed = try drawEditor(doc, ext, id_extra, gpa);
+        // Any ratio below 1 means the preview has some of the pane — including mid-animation,
+        // where the edge matters most — so the raw side keeps a right edge against it.
+        changed = try drawEditor(doc, ext, id_extra, gpa, paned.split_ratio.* < 1.0);
     }
     if (paned.showSecond()) {
         try drawPreviewPane(doc, preview.?, ext, id_extra + 0x2000, gpa);
@@ -170,7 +172,8 @@ fn drawPreviewPillButton(doc: *Document, label: []const u8, mode: Document.Previ
     }
 }
 
-fn drawEditor(doc: *Document, ext: []const u8, id_extra: u64, gpa: std.mem.Allocator) !bool {
+/// `split_edge` draws the raw pane's right edge — see the `drawEdgeShadow` call below.
+fn drawEditor(doc: *Document, ext: []const u8, id_extra: u64, gpa: std.mem.Allocator, split_edge: bool) !bool {
     const font = dvui.Font.theme(.mono);
     const line_height = font.lineHeight();
     const line_num_col = lineNumberColumnWidth(doc.line_count, font);
@@ -315,7 +318,15 @@ fn drawEditor(doc: *Document, ext: []const u8, id_extra: u64, gpa: std.mem.Alloc
 
     const editor_rs = row.data().borderRectScale();
     const scroll_rs = te.scroll.data().contentRectScale();
-    core.dvui.drawScrollEdgeShadows(editor_rs, scroll_rs, te.scroll.si, .{});
+    // Horizontal scroll hints are dropped while the preview shares the pane: the right-edge one
+    // lands in exactly the same pixels as the constant split edge below, and two shadows stacked
+    // there read as a heavier, darker band than either edge anywhere else in the app.
+    core.dvui.drawScrollEdgeShadows(editor_rs, if (split_edge) null else scroll_rs, te.scroll.si, .{});
+
+    // Unconditional right edge while the preview shares the pane, unlike the scroll hints above:
+    // this one isn't saying "there is more text this way", it's the boundary between the raw
+    // editor and the preview, which otherwise run into each other as one flat surface.
+    if (split_edge) core.dvui.drawEdgeShadow(editor_rs, .right, .{});
 
     if (te.text_changed) doc.refreshLineCount();
 
