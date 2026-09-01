@@ -524,7 +524,7 @@ pub fn init(
         strawberry.window = .{
             .fill = .{ .r = 96, .g = 12, .b = 32, .a = 255 },
             .border = .{ .r = 131, .g = 46, .b = 59, .a = 255 },
-            .text = .{ .r = 205, .g = 25, .b = 48, .a = 255 },
+            .text = .{ .r = 247, .g = 210, .b = 184, .a = 255 },
         };
 
         strawberry.control = .{
@@ -532,24 +532,25 @@ pub fn init(
             .fill_hover = .{ .r = 178, .g = 44, .b = 66, .a = 255 },
             .fill_press = .{ .r = 150, .g = 34, .b = 56, .a = 255 },
             .border = .{ .r = 102, .g = 19, .b = 42, .a = 255 },
-            .text = .{ .r = 251, .g = 188, .b = 193, .a = 255 },
-            .text_hover = .{ .r = 249, .g = 222, .b = 226, .a = 255 },
+            .text = .{ .r = 252, .g = 223, .b = 205, .a = 255 },
+            .text_hover = .{ .r = 255, .g = 240, .b = 228, .a = 255 },
         };
         strawberry.highlight = .{
-            .fill = .{ .r = 205, .g = 25, .b = 48, .a = 255 },
-            .text = .{ .r = 249, .g = 242, .b = 243, .a = 255 },
+            .fill = .{ .r = 47, .g = 179, .b = 135, .a = 255 },
+            .border = .{ .r = 47, .g = 179, .b = 135, .a = 255 },
+            .text = .{ .r = 58, .g = 10, .b = 26, .a = 255 },
         };
-
         strawberry.err = .{
             .fill = .{ .r = 199, .g = 17, .b = 20, .a = 255 },
-            .text = .{ .r = 249, .g = 242, .b = 243, .a = 255 },
+            .text = .{ .r = 255, .g = 238, .b = 228, .a = 255 },
         };
 
+        // theme.content
         strawberry.fill = .{ .r = 165, .g = 24, .b = 64, .a = 255 };
         strawberry.fill_hover = .{ .r = 148, .g = 30, .b = 63, .a = 255 };
         strawberry.fill_press = .{ .r = 104, .g = 18, .b = 42, .a = 255 };
-        strawberry.text = .{ .r = 250, .g = 181, .b = 188, .a = 255 };
-        strawberry.text_hover = .{ .r = 249, .g = 222, .b = 226, .a = 255 };
+        strawberry.text = strawberry.window.text.?;
+        strawberry.text_hover = .{ .r = 255, .g = 238, .b = 224, .a = 255 };
         strawberry.border = .{ .r = 131, .g = 46, .b = 59, .a = 255 };
         strawberry.focus = strawberry.highlight.fill.?;
 
