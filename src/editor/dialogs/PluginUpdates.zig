@@ -15,6 +15,16 @@ const PluginStore = @import("../PluginStore.zig");
 /// a scrollbar rather than a window clipped by the dialog's own `max_size`.
 const max_list_h: f32 = 260;
 
+/// Latched once this window has asked to close, so the request is made exactly once.
+///
+/// `closeFloatingDialogAnchored` computes the close animation's target from the subwindow's
+/// *current* rect. Once the animation is running that rect is mid-flight and `inBack`-eased — it
+/// overshoots outward before collapsing — so asking again on the next frame retargets the
+/// animation at the overshot rect, and the window chases a runaway target off screen instead of
+/// shrinking onto itself. Every other dialog calls it once from a click handler; this one closes
+/// itself when the last row lands, which is per-frame unless it latches.
+var closing = false;
+
 pub fn active(win: *dvui.Window) bool {
     var it = win.dialogs.iterator(null);
     while (it.next()) |d| {
@@ -26,6 +36,7 @@ pub fn active(win: *dvui.Window) bool {
 
 pub fn request() void {
     if (active(dvui.currentWindow())) return;
+    closing = false;
     var mutex = fizzy.dvui.dialog(@src(), .{
         .displayFn = dialog,
         .callafterFn = callAfter,
@@ -68,9 +79,13 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
     const body = dvui.Font.theme(.body);
 
     const count = PluginStore.pendingUpdates().len;
-    // Everything applied (or the list was cleared out from under us): nothing left to decide.
+    // Every offer landed (rows drop themselves as their builds install) or the list was cleared
+    // out from under us: nothing left to decide, so the window shows itself out.
     if (count == 0) {
-        fizzy.dvui.closeFloatingDialogAnchored();
+        if (!closing) {
+            closing = true;
+            fizzy.dvui.closeFloatingDialogAnchored();
+        }
         return true;
     }
 
@@ -109,7 +124,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
         tl.addText(
             "Plugins run as native code inside Fizzy, with the same access to your files as Fizzy " ++
                 "itself. Only update plugins from authors you trust.",
-            .{ .font = body.larger(-1.0), .color_text = theme.color(.err, .text) },
+            .{ .font = body.larger(-1.0), .color_text = theme.color(.err, .fill) },
         );
     }
 
@@ -125,7 +140,8 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
 
     // Not "Cancel": the offer goes away for this session, nothing is undone, and anything already
     // downloading finishes.
-    if (dialogButton(@src(), "Not now", .control, 1, 0)) {
+    if (dialogButton(@src(), "Not now", .control, 1, 0) and !closing) {
+        closing = true;
         fizzy.dvui.closeFloatingDialogAnchored();
     }
     if (PluginStore.anyPendingUpdateUnstarted()) {

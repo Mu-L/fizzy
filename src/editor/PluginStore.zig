@@ -807,6 +807,9 @@ pub const PendingUpdate = struct {
     repair: bool,
     /// An Update was clicked (or Update all) — the row shows progress instead of a button.
     started: bool = false,
+    /// The last attempt failed (the download, not the load — see `tick`). The row stays on the
+    /// offer with its button back, labelled Retry.
+    failed: bool = false,
 };
 
 var pending_updates: std.ArrayListUnmanaged(PendingUpdate) = .empty;
@@ -845,6 +848,33 @@ pub fn dismissPendingUpdates() void {
     clearPendingUpdates();
 }
 
+/// Take `id` off the offer — its newer build is now on disk, so there is nothing left to offer.
+/// The window shows exactly the plugins that are still out of date, and closes itself once the
+/// last row goes (see `PluginUpdates.dialog`).
+fn dropPendingUpdate(id: []const u8) void {
+    const a = fizzy.app.allocator;
+    for (pending_updates.items, 0..) |u, i| {
+        if (!std.mem.eql(u8, u.id, id)) continue;
+        // Ordered, so the rows the user is still looking at don't reshuffle underneath them as
+        // earlier ones complete.
+        const row = pending_updates.orderedRemove(i);
+        a.free(row.id);
+        a.free(row.title);
+        a.free(row.to);
+        a.free(row.url);
+        a.free(row.sha256);
+        return;
+    }
+}
+
+/// Hand `id`'s row its button back after a failed attempt, so the offer can be retried by hand
+/// rather than sitting on a permanent "Updating…".
+fn markPendingUpdateFailed(id: []const u8) void {
+    const row = pendingRowFor(id) orelse return;
+    row.started = false;
+    row.failed = true;
+}
+
 /// Start the download for one offered update. Safe to call for a row already started (the job is
 /// simply replaced) and from inside the card list's own draw, since it touches no catalog state.
 pub fn applyPendingUpdate(id: []const u8) void {
@@ -857,6 +887,7 @@ pub fn applyPendingUpdate(id: []const u8) void {
         .quiet = true,
     });
     row.started = true;
+    row.failed = false;
 }
 
 /// One-line progress for `id` as the update window shows it, or null while the row still has an
@@ -868,10 +899,8 @@ pub fn updateStatus(id: []const u8) ?[]const u8 {
         .downloaded => "Installing\u{2026}",
         .failed => "Failed",
     };
-    for (pending_updates.items) |u| {
-        // Started, and no job left to describe it: `tick` applied and dropped it.
-        if (std.mem.eql(u8, u.id, id) and u.started) return "Updated";
-    }
+    // A row that finished is gone from the list entirely (`dropPendingUpdate`), so anything still
+    // here with no job either hasn't started or failed — both want their button back.
     return null;
 }
 
@@ -908,7 +937,8 @@ fn drawUpdateCardControls(entry: StoreEntry) void {
         });
         return;
     }
-    if (dvui.button(@src(), "Update", .{}, .{ .gravity_y = 0.5, .font = body.larger(-1.0) }))
+    const failed = if (pendingRowFor(entry.id)) |row| row.failed else false;
+    if (dvui.button(@src(), if (failed) "Retry" else "Update", .{}, .{ .gravity_y = 0.5, .font = body.larger(-1.0) }))
         applyPendingUpdate(entry.id);
 }
 
@@ -1149,7 +1179,19 @@ pub fn tick() void {
     while (i < jobs.count()) {
         const job = jobs.values()[i];
         switch (@as(JobStatus, @enumFromInt(job.status.load(.acquire)))) {
-            .downloading, .failed => i += 1,
+            .downloading => i += 1,
+            .failed => {
+                // Nobody asked for a quiet job, so it leaves no failed card to retry from. Log it,
+                // drop the job, and put the Update button back on its row as Retry.
+                if (job.quiet) {
+                    dvui.log.warn("plugin updates: '{s}' could not be downloaded ({s})", .{ job.id, job.err_buf[0..job.err_len] });
+                    markPendingUpdateFailed(job.id);
+                    jobs.swapRemoveAt(i);
+                    freeJob(job);
+                    continue; // do not advance i — swapRemove moved a new entry into slot i
+                }
+                i += 1;
+            },
             .downloaded => {
                 // A freshly downloaded file is already sitting in the plugins directory.
                 disk_scan_dirty = true;
@@ -1170,6 +1212,9 @@ pub fn tick() void {
                     // sooner, when `Editor.reconcileChangedPluginBinaries` sees the new file).
                     if (job.quiet) {
                         dvui.log.info("plugin updates: '{s}' not applied live ({s}); it will load at next launch", .{ job.id, @errorName(err) });
+                        // Still off the offer: the newer build *is* installed, which is what the
+                        // row was offering. Only bringing it live was deferred.
+                        dropPendingUpdate(job.id);
                         jobs.swapRemoveAt(i);
                         freeJob(job);
                         continue;
@@ -1186,7 +1231,9 @@ pub fn tick() void {
                     i += 1;
                     continue;
                 };
-                // Installed + loaded: drop the job so the card shows normal installed state.
+                // Installed + loaded: drop the job so the card shows normal installed state, and
+                // take the plugin off the update offer — it is no longer out of date.
+                dropPendingUpdate(job.id);
                 jobs.swapRemoveAt(i);
                 freeJob(job);
                 // do not advance i — swapRemove moved a new entry into slot i
