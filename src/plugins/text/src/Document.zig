@@ -223,6 +223,23 @@ pub fn byteOffsetForLineCharacter(self: *const Document, line: u32, character: u
     return line_start + @min(character, line_end - line_start);
 }
 
+/// Inverse of `byteOffsetForLineCharacter`: 0-based `{line, character}` for a byte offset
+/// (clamped to the document). Used for the infobar caret chip.
+pub fn lineCharacterForByteOffset(self: *const Document, offset: usize) struct { line: u32, character: u32 } {
+    const text = self.text.items;
+    const end = @min(offset, text.len);
+    var line: u32 = 0;
+    var line_start: usize = 0;
+    var i: usize = 0;
+    while (i < end) : (i += 1) {
+        if (text[i] == '\n') {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    return .{ .line = line, .character = @intCast(end - line_start) };
+}
+
 /// Where `revealPosition` should scroll to for a goto-definition landing on `target_line`:
 /// the nearest blank (whitespace-only) line at or above it, so a leading doc-comment/
 /// attribute block sitting directly above the definition (no blank line separating them from

@@ -10,8 +10,15 @@ const cozette_bold_ttf = assets.files.fonts.@"CozetteVectorBold.ttf";
 const comfortaa_ttf = assets.files.fonts.@"Comfortaa-Regular.ttf";
 const comfortaa_bold_ttf = assets.files.fonts.@"Comfortaa-Bold.ttf";
 
+const nunito_ttf = assets.files.fonts.@"Nunito-Regular.ttf";
+const nunito_bold_ttf = assets.files.fonts.@"Nunito-Bold.ttf";
+const nunito_italic_ttf = assets.files.fonts.@"Nunito-Italic.ttf";
+const nunito_bold_italic_ttf = assets.files.fonts.@"Nunito-BoldItalic.ttf";
+
 const plus_jakarta_sans_ttf = assets.files.fonts.@"PlusJakartaSans-Regular.ttf";
 const plus_jakarta_sans_bold_ttf = assets.files.fonts.@"PlusJakartaSans-Bold.ttf";
+const plus_jakarta_sans_italic_ttf = assets.files.fonts.@"PlusJakartaSans-Italic.ttf";
+const plus_jakarta_sans_bold_italic_ttf = assets.files.fonts.@"PlusJakartaSans-BoldItalic.ttf";
 
 const build_opts = @import("build_opts");
 
@@ -291,6 +298,21 @@ center_prev_id: ?[]const u8 = null,
 /// Host-owned cross-fade between center providers. See `drawActiveCenter`.
 center_transition: core.dvui.Transition = .{},
 
+/// dvui resolves a `Font` to a source by exact `(family, weight, style)`; it never synthesizes
+/// an oblique or an embolden. A style with no source here silently falls back to the nearest
+/// same-family face, so *emphasis renders as plain text*.
+///
+/// The rule that follows: any family a theme points `font_body` or `font_heading` at must ship
+/// all four faces, because those are the fonts document content (markdown `*em*`/`**strong**`,
+/// and anything else a plugin styles per-span) is rendered in.
+///
+/// Two families here deliberately ship fewer, and both are safe only because no theme uses them
+/// for body or heading text:
+///   - CozetteVector (`font_mono`) is a pixel face with no italic cut; slanting one would smear
+///     the pixel grid, so mono italics fall back to upright by design.
+///   - Comfortaa (`font_title`) has no italic cut in the family at all. Titles are chrome, never
+///     document content, so nothing asks it for a style it can't serve — don't repoint
+///     `font_body` at it.
 const embedded_fonts: []const dvui.Font.Source = &.{
     .{
         .family = dvui.Font.array("CozetteVector"),
@@ -311,6 +333,28 @@ const embedded_fonts: []const dvui.Font.Source = &.{
         .bytes = comfortaa_bold_ttf,
         .weight = .bold,
     },
+
+    .{
+        .family = dvui.Font.array("Nunito"),
+        .bytes = nunito_ttf,
+    },
+    .{
+        .family = dvui.Font.array("Nunito"),
+        .bytes = nunito_bold_ttf,
+        .weight = .bold,
+    },
+    .{
+        .family = dvui.Font.array("Nunito"),
+        .bytes = nunito_italic_ttf,
+        .style = .italic,
+    },
+    .{
+        .family = dvui.Font.array("Nunito"),
+        .bytes = nunito_bold_italic_ttf,
+        .weight = .bold,
+        .style = .italic,
+    },
+
     .{
         .family = dvui.Font.array("PlusJakartaSans"),
         .bytes = plus_jakarta_sans_ttf,
@@ -319,6 +363,17 @@ const embedded_fonts: []const dvui.Font.Source = &.{
         .family = dvui.Font.array("PlusJakartaSans"),
         .bytes = plus_jakarta_sans_bold_ttf,
         .weight = .bold,
+    },
+    .{
+        .family = dvui.Font.array("PlusJakartaSans"),
+        .bytes = plus_jakarta_sans_italic_ttf,
+        .style = .italic,
+    },
+    .{
+        .family = dvui.Font.array("PlusJakartaSans"),
+        .bytes = plus_jakarta_sans_bold_italic_ttf,
+        .weight = .bold,
+        .style = .italic,
     },
 };
 
@@ -440,7 +495,7 @@ pub fn init(
 
         fizzy_dark.dark = true;
         fizzy_dark.name = "Fizzy Dark";
-        fizzy_dark.font_body = .find(.{ .family = "Comfortaa", .size = editor.settings.font_body_size });
+        fizzy_dark.font_body = .find(.{ .family = "Nunito", .size = editor.settings.font_body_size });
         fizzy_dark.font_title = .find(.{ .family = "Comfortaa", .size = editor.settings.font_title_size, .weight = .bold });
         fizzy_dark.font_heading = .find(.{ .family = "PlusJakartaSans", .size = editor.settings.font_heading_size, .weight = .bold });
         fizzy_dark.font_mono = .find(.{ .family = "CozetteVector", .size = editor.settings.font_mono_size });

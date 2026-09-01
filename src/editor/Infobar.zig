@@ -5,8 +5,8 @@ const icons = @import("icons");
 const assets = @import("assets");
 const update_notify = @import("../backend/update_notify.zig");
 const Dialogs = fizzy.Editor.Dialogs;
-/// Font, height, icon side and spacing for everything in the bar — shared with the plugin that
-/// draws the right-hand slot so both halves scale with the font setting together.
+/// Font, height, icon side and spacing — fizzy draws every item with these, including
+/// plugin `Entry` chips, so the bar stays uniform as the font setting changes.
 const infobar = fizzy.sdk.infobar;
 
 pub const Infobar = @This();
@@ -29,30 +29,22 @@ pub fn draw(_: Infobar) !void {
     const font = infobar.font();
     const bar_h = infobar.height();
 
-    // Fizzy owns height: pin min+max so plugin (or icon) content cannot grow the bar.
-    // Horizontal scroll covers overflow width; vertical overflow is clipped.
-    var scrollarea = dvui.scrollArea(@src(), .{ .vertical = .none, .horizontal = .auto }, .{
+    // Fizzy owns height: pin min+max so content cannot grow the bar. Dedicated items
+    // (logo, folder) stay put; plugin chips live in a horizontal scroll to their right.
+    // No fill of its own — the explorer (and the rest of the chrome) is the window's
+    // `.content.fill` showing through; painting `.control.fill` here left a darker strip.
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
         .background = false,
-        .color_fill = dvui.themeGet().color(.control, .fill),
         .gravity_y = 1.0,
         .padding = .all(0),
         .margin = .all(0),
         .min_size_content = .{ .h = bar_h },
         .max_size_content = .height(bar_h),
     });
-    defer scrollarea.deinit();
+    defer bar.deinit();
 
-    last_top_y_physical = scrollarea.data().rectScale().r.y;
-    var infobox = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .both,
-        .background = false,
-        .padding = .all(0),
-        .margin = .all(0),
-        .min_size_content = .{ .h = bar_h },
-        .max_size_content = .height(bar_h),
-    });
-    defer infobox.deinit();
+    last_top_y_physical = bar.data().rectScale().r.y;
 
     {
         var button: dvui.ButtonWidget = undefined;
@@ -144,28 +136,92 @@ pub fn draw(_: Infobar) !void {
         dvui.label(@src(), "{s}", .{std.fs.path.basename(folder)}, .{ .font = font, .gravity_y = 0.5 });
     }
 
+    drawPluginEntries(bar_h);
+}
+
+/// Collect every plugin's `infobarEntries` and draw them after the app's items, in a
+/// horizontal scroll so overflow never grows or clips the dedicated chips.
+fn drawPluginEntries(bar_h: f32) void {
+    const entries = collectedEntries();
+    if (entries.len == 0) return;
+
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = infobar.item_spacing } });
 
-    // Remaining width is the plugin slot: fizzy-sized, clipped, rect handed to the owner.
-    {
-        var plugin_slot = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .both,
-            .background = false,
-            .padding = .all(0),
-            .margin = .all(0),
-            .min_size_content = .{ .h = bar_h },
-            .max_size_content = .height(bar_h),
-        });
-        defer plugin_slot.deinit();
+    var scrollarea = dvui.scrollArea(@src(), .{ .vertical = .none, .horizontal = .auto }, .{
+        .expand = .horizontal,
+        .background = false,
+        .padding = .all(0),
+        .margin = .all(0),
+        .min_size_content = .{ .h = bar_h },
+        .max_size_content = .height(bar_h),
+    });
+    defer scrollarea.deinit();
 
-        const rect = plugin_slot.data().contentRect();
-        const prev_clip = dvui.clip(plugin_slot.data().contentRectScale().r);
-        defer dvui.clipSet(prev_clip);
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .none,
+        .background = false,
+        .padding = .all(0),
+        .margin = .all(0),
+        .min_size_content = .{ .h = bar_h },
+        .max_size_content = .height(bar_h),
+    });
+    defer row.deinit();
 
-        if (fizzy.editor.activeDoc()) |doc| {
-            doc.owner.drawDocumentInfobar(doc, rect) catch {
-                dvui.log.err("Failed to draw document infobar", .{});
-            };
+    for (entries, 0..) |entry, i| {
+        if (i > 0) {
+            _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = infobar.item_spacing }, .id_extra = i });
         }
+        drawEntry(i, entry);
+    }
+}
+
+fn collectedEntries() []const infobar.Entry {
+    const arena = fizzy.editor.host.arena();
+    var list: std.ArrayList(infobar.Entry) = .empty;
+    const active = fizzy.editor.activeDoc();
+    const owner: ?*fizzy.sdk.Plugin = if (active) |doc| doc.owner else null;
+    if (owner) |o| appendFrom(&list, arena, o, active);
+    for (fizzy.editor.host.plugins.items) |p| {
+        if (p == owner) continue;
+        appendFrom(&list, arena, p, active);
+    }
+    return list.items;
+}
+
+fn appendFrom(
+    list: *std.ArrayList(infobar.Entry),
+    arena: std.mem.Allocator,
+    plugin: *fizzy.sdk.Plugin,
+    active: ?fizzy.sdk.DocHandle,
+) void {
+    for (plugin.infobarEntries(active)) |entry| {
+        if (entry.icon.len == 0 and entry.text.len == 0) continue;
+        list.append(arena, entry) catch return;
+    }
+}
+
+fn drawEntry(id_extra: usize, entry: infobar.Entry) void {
+    const color = dvui.themeGet().color(.window, .text);
+    const side = infobar.iconSide();
+    if (entry.icon.len > 0) {
+        dvui.icon(
+            @src(),
+            "plugin_infobar_icon",
+            entry.icon,
+            .{ .stroke_color = color, .fill_color = color },
+            .{
+                .id_extra = id_extra,
+                .gravity_y = 0.5,
+                .min_size_content = .{ .w = side, .h = side },
+                .max_size_content = .size(.{ .w = side, .h = side }),
+            },
+        );
+    }
+    if (entry.text.len > 0) {
+        dvui.label(@src(), "{s}", .{entry.text}, .{
+            .id_extra = id_extra,
+            .font = infobar.font(),
+            .gravity_y = 0.5,
+        });
     }
 }

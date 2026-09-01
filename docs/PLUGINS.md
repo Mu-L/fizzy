@@ -475,7 +475,8 @@ plugin gets an Enabled-toggle-only row instead of its fields.
   `documentPath`, `setDocumentPath`, dirty/save indicators. These keep `DocHandle` opaque so the
   file-management plugin never sees a plugin-specific type.
 - **Rendering** — `drawDocument(doc)` (the document's content in a tab/pane),
-  `drawDocumentInfobar(doc, rect)` (active-doc status in the infobar slot Fizzy provides).
+  `infobarEntries(active_doc)` (icon + text chips Fizzy draws in the infobar; plugins
+  do not draw into the bar).
 - **Per-frame phases** — `beginFrame`, `prepareFrame`, `tickKeybinds`, `tickOpenDocuments`,
   `tickActiveDocument`, `drawOverlay`, `endFrame`, `needsContinuousRepaint`. A plugin does its own
   domain work *inside* these generic phases (see the lifecycle table below for exactly when each
@@ -875,8 +876,9 @@ workbench (center provider) draws a tab for it, and to render the body calls
 pixi draws its canvas inside the workbench tab/split
 ```
 
-Every later action follows the same rule — save, dirty-dot, undo/redo, grouping, path, and the
-infobar status all route to `doc.owner`; workbench never knows it's a pixel-art file. A new editor
+Every later action follows the same rule — save, dirty-dot, undo/redo, grouping, path, and
+infobar chips (`infobarEntries`) all route to the owning plugin; workbench never knows it's a
+pixel-art file. A new editor
 plugin drops in with **no fizzy or workbench changes**: register its file types, implement the
 document + `drawDocument` hooks, and its documents coexist in the same tabs/splits.
 

@@ -11,6 +11,7 @@ const std = @import("std");
 const dvui = @import("dvui");
 const DocHandle = @import("DocHandle.zig");
 const EditorAPI = @import("EditorAPI.zig");
+const infobar = @import("infobar.zig");
 
 pub const Plugin = @This();
 
@@ -164,10 +165,12 @@ pub const VTable = struct {
     // one is registered. Only per-document rendering routes through the vtable below.
     /// Draw an open document (center/workspace region), dispatched via `DocHandle.owner`.
     drawDocument: ?*const fn (state: *anyopaque, doc: DocHandle) anyerror!void = null,
-    /// Draw active-document status into fizzy-owned infobar slot. `rect` is the
-    /// natural-space content rect fizzy has already sized/clipped — keep drawing
-    /// inside it; do not grow the bar.
-    drawDocumentInfobar: ?*const fn (state: *anyopaque, doc: DocHandle, rect: dvui.Rect) anyerror!void = null,
+    /// Infobar chips for this frame. Fizzy draws each as icon + text after its own items
+    /// (logo, project folder) — do not draw into the bar. Return a slice that stays valid
+    /// until the next call (plugin scratch or `host.arena()`). Empty / absent = nothing
+    /// this frame. `active_doc` is the focused document (possibly owned by another plugin);
+    /// inspect `ptr` only when `active_doc.owner` is you.
+    infobarEntries: ?*const fn (state: *anyopaque, active_doc: ?DocHandle) []const infobar.Entry = null,
 
     // ---- fizzy contributions ----
     contributeMenu: ?*const fn (state: *anyopaque) anyerror!void = null,
@@ -506,8 +509,8 @@ pub fn drawDocument(self: Plugin, doc: DocHandle) !bool {
     return false;
 }
 
-pub fn drawDocumentInfobar(self: Plugin, doc: DocHandle, rect: dvui.Rect) !void {
-    if (self.vtable.drawDocumentInfobar) |f| try f(self.state, doc, rect);
+pub fn infobarEntries(self: Plugin, active_doc: ?DocHandle) []const infobar.Entry {
+    return if (self.vtable.infobarEntries) |f| f(self.state, active_doc) else &.{};
 }
 
 pub fn deinit(self: Plugin) void {

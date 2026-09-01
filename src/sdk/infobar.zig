@@ -1,15 +1,22 @@
-//! The infobar's shared metrics — **the one definition of them.**
+//! Infobar metrics and the plugin contribution type.
 //!
-//! Fizzy draws its own items (the logo/about button, the project folder) with these and sizes
-//! the bar itself from them; the plugin owning the active document is handed a rect of exactly
-//! `height()` (`Plugin.VTable.drawDocumentInfobar`) and should draw its items with `font()` and
-//! `iconSide()` so every contribution across the bar matches and scales together.
+//! Fizzy draws the bar: its own items (logo/about, project folder) first, then each plugin
+//! `Entry` as icon + text, in a horizontal strip that scrolls if the row overflows. Plugins
+//! never draw into the bar — they return `Entry` values from `Plugin.VTable.infobarEntries`.
 //!
-//! All of it derives from the current theme's body font, which fizzy's font-size setting drives
+//! Metrics derive from the current theme's body font, which fizzy's font-size setting drives
 //! (`Settings.font_body_size`, clamped 6–20pt). The bar used to be a fixed 22pt, which fit the
 //! default 9pt body font and clipped every larger setting — nothing in the bar may hard-code a
-//! size, on either side of the SDK boundary.
+//! size.
 const dvui = @import("dvui");
+
+/// One plugin contribution. Fizzy draws it; `icon` is TVG bytes (entypo/lucide), empty = text
+/// only. `text` and `icon` must remain valid until the next `infobarEntries` call (static or
+/// `host.arena()`).
+pub const Entry = struct {
+    icon: []const u8 = &.{},
+    text: []const u8 = &.{},
+};
 
 /// Breathing room above and below the tallest item, in natural units.
 pub const vertical_padding: f32 = 4;

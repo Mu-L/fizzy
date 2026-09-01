@@ -46,6 +46,7 @@ const vtable: sdk.Plugin.VTable = .{
     .documentHasNativeExtension = documentHasNativeExtension,
     .documentHasRecognizedSaveExtension = documentHasRecognizedSaveExtension,
     .drawDocument = drawDocument,
+    .infobarEntries = infobarEntries,
     .closeDocument = closeDocument,
     .reloadDocument = reloadDocument,
     .isDirty = isDirty,
@@ -173,6 +174,19 @@ fn documentHasRecognizedSaveExtension(_: *anyopaque, _: DocHandle) bool {
 fn drawDocument(_: *anyopaque, handle: DocHandle) anyerror!void {
     const doc = docFrom(handle) orelse return;
     try ImageView.draw(doc);
+}
+
+fn infobarEntries(_: *anyopaque, active_doc: ?DocHandle) []const sdk.infobar.Entry {
+    const handle = active_doc orelse return &.{};
+    if (handle.owner != &plugin) return &.{};
+    const doc = docFrom(handle) orelse return &.{};
+    const arena = sdk.host().arena();
+    const dim = std.fmt.allocPrint(arena, "{d}×{d} px", .{ doc.width, doc.height }) catch return &.{};
+    const name = std.fs.path.basename(doc.path);
+    const entries = arena.alloc(sdk.infobar.Entry, 2) catch return &.{};
+    entries[0] = .{ .icon = dvui.entypo.image, .text = if (name.len > 0) name else "Untitled" };
+    entries[1] = .{ .text = dim };
+    return entries;
 }
 
 fn closeDocument(_: *anyopaque, handle: DocHandle) void {

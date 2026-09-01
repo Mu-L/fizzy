@@ -6,9 +6,9 @@
 /// Height of the titlebar, in pixels.
 pub const titlebar_height: f32 = 26.0;
 
-// The infobar's height is not a constant: it scales with the body font, and its one
-// definition — shared with plugins, which draw into a rect of that height — is
-// `sdk.infobar` (`src/sdk/infobar.zig`).
+// The infobar's height is not a constant: it scales with the body font. The one
+// definition is `sdk.infobar` (`src/sdk/infobar.zig`). Plugins contribute `Entry`
+// values (icon + text); fizzy draws them.
 
 /// Empty strip below the top window edge (non-macOS), above the main title row (in-window menu, etc.).
 pub const titlebar_top_buffer: f32 = 10.0;

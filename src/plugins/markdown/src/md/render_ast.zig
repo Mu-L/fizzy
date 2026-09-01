@@ -816,8 +816,13 @@ fn openMarkdownUrl(url: []const u8, open_side: bool, ctx: RenderContext) void {
 
 /// Resolve a scheme-less link against the document's directory and open it in the editor.
 /// Returns false for URLs with a scheme (`http:`, `mailto:`, …), when there's no local base,
-/// or when resolution fails. Fragments (`#heading`) are stripped for the path lookup; line
-/// stays 0 for now (heading→line needs the brain index and can land later).
+/// or when resolution fails.
+///
+/// A `#fragment` names a *place inside* the target, never the target itself, so the path lookup
+/// drops it — and then `headingLineFor` asks the wikilink resolver to turn it back into a line.
+/// That split is deliberate: the filesystem stays the authority on *which file* opens (two notes
+/// can share a stem, and only the path in the document says which one this link meant), while
+/// the vault index is the only thing that knows where a heading sits.
 fn tryRevealRelativePath(url: []const u8, open_side: bool, ctx: RenderContext) bool {
     const trimmed = std.mem.trim(u8, url, " \t\r\n");
     if (trimmed.len == 0) return false;
@@ -832,7 +837,11 @@ fn tryRevealRelativePath(url: []const u8, open_side: bool, ctx: RenderContext) b
     }
 
     var path_part = trimmed;
-    if (std.mem.indexOfScalar(u8, path_part, '#')) |hash| path_part = path_part[0..hash];
+    var fragment: []const u8 = "";
+    if (std.mem.indexOfScalar(u8, path_part, '#')) |hash| {
+        fragment = path_part[hash + 1 ..];
+        path_part = path_part[0..hash];
+    }
     if (path_part.len == 0) return false;
 
     // Percent-decode `%20` etc. so brain's encoded inserts round-trip.
@@ -848,7 +857,51 @@ fn tryRevealRelativePath(url: []const u8, open_side: bool, ctx: RenderContext) b
         break :blk std.fs.path.resolve(arena, &.{ base, decoded }) catch return false;
     };
 
-    return revealPath(abs, 0, 0, open_side);
+    return revealPath(abs, headingLineFor(ctx, arena, path_part, fragment, abs), 0, open_side);
+}
+
+/// 0-based line of the `#fragment` inside the note at `abs`, or 0 when there is no fragment, no
+/// resolver, or nothing that answers to it.
+///
+/// The resolver is asked for the *whole* link (target + anchor) rather than just the anchor,
+/// because that is the only entry point it has — and its answer is then used only if it landed
+/// on the same file the path arithmetic above did. Without that guard a vault holding two notes
+/// with the same stem could scroll this one to a line that exists in the other.
+///
+/// Click-time only: one lookup per click, no memo, nothing on the frame path.
+fn headingLineFor(
+    ctx: RenderContext,
+    arena: std.mem.Allocator,
+    path_part: []const u8,
+    fragment: []const u8,
+    abs: []const u8,
+) u32 {
+    if (fragment.len == 0) return 0;
+    const api = ctx.wikilink orelse return 0;
+    // `#Habitat%20and%20Range` is the same anchor as `#Habitat and Range`; the resolver matches
+    // heading text, so it has to see the decoded form.
+    const heading = percentDecode(arena, fragment) catch fragment;
+
+    const res = api.resolve(path_part, heading, ctx.document_path, ctx.gpa) catch return 0;
+    defer {
+        ctx.gpa.free(res.path);
+        ctx.gpa.free(res.title);
+    }
+    if (res.status != .resolved and res.status != .ambiguous) return 0;
+    // Normalized the same way `abs` was before comparing: the two sides build the path
+    // differently (the resolver joins its vault root to a vault-relative path, this file resolves
+    // against the document's directory), and an unnormalized difference would silently cost the
+    // jump rather than announce itself.
+    const res_abs = std.fs.path.resolve(arena, &.{res.path}) catch return 0;
+    if (!samePath(res_abs, abs)) return 0;
+    return res.line;
+}
+
+/// Whether two absolute native paths name the same file, as far as this is willing to claim.
+/// Case-insensitive on Windows, where the filesystem is; a plain compare everywhere else.
+fn samePath(a: []const u8, b: []const u8) bool {
+    if (is_windows) return std.ascii.eqlIgnoreCase(a, b);
+    return std.mem.eql(u8, a, b);
 }
 
 fn dirnameOf(path: []const u8) ?[]const u8 {
@@ -1256,7 +1309,7 @@ fn renderImageCaption(alt: []const u8, ctx: RenderContext, ids: *IdGen) void {
 /// GFM task-list marker (`- [ ]` / `- [x]`), drawn rather than written.
 ///
 /// This used to be a `"✓"` / `"•"` label, which showed up as a missing-glyph box: neither body
-/// font fizzy ships (PlusJakartaSans, Comfortaa) has U+2713 — only the mono face does. Drawing
+/// font fizzy ships (PlusJakartaSans, Nunito) has U+2713 — only the mono face does. Drawing
 /// the box and using the bundled `entypo.check` vector keeps the marker correct under any font
 /// the user picks, and gives unchecked items a real empty box instead of a plain bullet.
 /// Where a list marker has to sit so it reads as being on the same line as the item's text.

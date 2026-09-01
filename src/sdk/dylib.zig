@@ -24,6 +24,7 @@ const DocHandle = @import("DocHandle.zig");
 const EditorAPI = @import("EditorAPI.zig");
 const regions = @import("regions.zig");
 const language_mod = @import("language.zig");
+const infobar_mod = @import("infobar.zig");
 const workbench_service = @import("services/workbench.zig");
 const markdown_service = @import("services/markdown.zig");
 const wikilink_service = @import("services/wikilink.zig");
@@ -84,6 +85,11 @@ const sdk_boundary_types = .{
     Host,
     Plugin,
     Plugin.VTable,
+    // Reached only through `VTable.infobarEntries`' slice return — a *data* pointer
+    // `hashType` never follows (see `HoverResult` below). Without this entry, adding a
+    // field to `Entry` would change the real cross-plugin layout without moving the
+    // fingerprint.
+    infobar_mod.Entry,
     DocHandle,
     EditorAPI,
     EditorAPI.VTable,
