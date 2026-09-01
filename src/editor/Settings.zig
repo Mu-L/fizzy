@@ -11,6 +11,19 @@ pub const default_theme = "Fizzy Dark";
 /// Duration after the last edit before autosave runs (during normal operation).
 pub const autosave_timeout_ns: i128 = 500 * 1_000_000;
 
+/// What fizzy does when the plugin store has newer compatible builds of installed plugins.
+/// Per-plugin participation is `.plugins.<id>.auto_update` (default true); this is the one
+/// app-wide choice of *how* those updates land, so opting a single plugin out stays a rare,
+/// deliberate act rather than the only available control.
+pub const PluginUpdateMode = enum {
+    /// Collect them into the "Plugin updates" window shortly after launch and let the user
+    /// apply them (individually, or all at once). The default: an update swaps out code the
+    /// user is about to run, so the quiet path is opt-in, not assumed.
+    prompt,
+    /// Download and apply them with no interaction.
+    silent,
+};
+
 pub const FlipbookView = enum { sequential, grid };
 pub const Compatibility = enum { none, ldtk };
 
@@ -45,6 +58,10 @@ content_opacity: f32 = 0.7,
 /// Canvas zoom/pan control scheme shared by the image viewer, pixi, and any other
 /// `CanvasWidget` consumer. `auto` picks mouse vs trackpad from `dvui.mouseType()`.
 input_scheme: InputScheme = .auto,
+
+/// How updates found by `PluginStore`'s post-launch pass are applied — prompted, or silent.
+/// Only covers plugins that haven't individually opted out via `.plugins.<id>.auto_update`.
+plugin_update_mode: PluginUpdateMode = .prompt,
 
 fn default(allocator: std.mem.Allocator) !Settings {
     return .{

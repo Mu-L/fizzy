@@ -32,6 +32,15 @@ const Editor = @This();
 
 pub const Recents = @import("Recents.zig");
 pub const Settings = @import("Settings.zig");
+
+/// One id's pending fizzy-reserved `.plugins.<id>` field writes. A null field means "not
+/// touched this cycle" — `writeMergedSettings` reads that half back off disk instead, so
+/// toggling auto-update can never clobber a concurrent enable/disable or vice versa.
+pub const PendingPluginFlags = struct {
+    enabled: ?bool = null,
+    auto_update: ?bool = null,
+};
+
 pub const Dialogs = @import("dialogs/Dialogs.zig");
 
 pub const Keybinds = @import("Keybinds.zig");
@@ -101,10 +110,19 @@ loaded_plugin_libs: std.ArrayListUnmanaged(PluginLoader.LoadedLib) = .empty,
 /// list is only the UI/skip-load set for the current session. Freed in `deinit`.
 disabled_plugin_ids: std.ArrayListUnmanaged([]const u8) = .empty,
 
-/// Fizzy-only pending `.plugins.<id>.enabled` writes (id → new bool), drained by
+/// Runtime bookkeeping of user-plugin ids the user opted **out** of store updates for
+/// (`.plugins.<id>.auto_update = false` in `settings.zon`). Stored as the opt-out set rather than
+/// the opt-in one because auto-update defaults to *on* — an absent entry is the overwhelmingly
+/// common case and must not need a list membership to be right. Whether an update the pass finds
+/// is applied silently or offered in the update window is `Settings.plugin_update_mode`, one
+/// app-wide choice. Seeded by `seedPluginFlags`; freed in `deinit`.
+auto_update_off_ids: std.ArrayListUnmanaged([]const u8) = .empty,
+
+/// Fizzy-only pending `.plugins.<id>` reserved-field writes (id → changed fields), drained by
 /// `writeMergedSettings` alongside `host.plugin_settings_pending`. Never touched by a
-/// plugin itself — only by `setPluginEnabled` / store install. Keys are app-allocator-owned.
-plugin_enabled_pending: std.StringArrayHashMapUnmanaged(bool) = .empty,
+/// plugin itself — only by `setPluginEnabled` / `setPluginAutoUpdate` / store install. Keys are
+/// app-allocator-owned.
+plugin_flags_pending: std.StringArrayHashMapUnmanaged(PendingPluginFlags) = .empty,
 
 /// Snapshot of dvui's *built-in* keybinds (`char_left`, `copy`, `next_widget`, …), taken in
 /// `init` before fizzy adds its own. `Window.init` installs these once and never again,
@@ -1153,10 +1171,13 @@ fn unloadPluginLibs(editor: *Editor) void {
     for (editor.disabled_plugin_ids.items) |id| fizzy.app.allocator.free(id);
     editor.disabled_plugin_ids.deinit(fizzy.app.allocator);
 
+    for (editor.auto_update_off_ids.items) |id| fizzy.app.allocator.free(id);
+    editor.auto_update_off_ids.deinit(fizzy.app.allocator);
+
     {
-        var it = editor.plugin_enabled_pending.iterator();
+        var it = editor.plugin_flags_pending.iterator();
         while (it.next()) |e| fizzy.app.allocator.free(e.key_ptr.*);
-        editor.plugin_enabled_pending.deinit(fizzy.app.allocator);
+        editor.plugin_flags_pending.deinit(fizzy.app.allocator);
     }
 
     editor.dvui_default_keybinds.deinit(fizzy.app.allocator);
@@ -1223,10 +1244,12 @@ fn isValidPluginId(id: []const u8) bool {
     return true;
 }
 
-/// Seed the runtime disabled set from on-disk plugin directories whose `.plugins.<id>.enabled`
-/// is not `true` (absent entry / omitted field / explicit false all mean disabled — R12).
+/// Seed the runtime per-plugin flag sets from on-disk plugin directories: `disabled_plugin_ids`
+/// from every `.plugins.<id>.enabled` that is not `true` (absent entry / omitted field / explicit
+/// false all mean disabled — R12), and `auto_update_off_ids` from every `.plugins.<id>.auto_update`
+/// that is explicitly `false`. One directory walk and one settings read for both.
 /// Call once after settings load, before `loadUserPlugins`.
-fn seedDisabledPlugins(editor: *Editor) void {
+fn seedPluginFlags(editor: *Editor) void {
     if (comptime builtin.target.cpu.arch == .wasm32) return;
     const gpa = fizzy.app.allocator;
     const plugins_dir = std.fs.path.join(gpa, &.{ editor.config_folder, "plugins" }) catch return;
@@ -1246,9 +1269,54 @@ fn seedDisabledPlugins(editor: *Editor) void {
         if (id.len == 0 or id[0] == '.') continue;
         if (!isValidPluginId(id)) continue;
         if (isBundledPluginId(id)) continue;
+        // The two flags are independent: a disabled plugin can still be opted out of updates
+        // (which takes effect the moment it is enabled again), so neither read short-circuits
+        // the other.
+        editor.trackAutoUpdate(id, readPluginAutoUpdate(gpa, data, id)) catch {};
         if (readPluginEnabled(gpa, data, id)) continue;
         editor.trackDisabledPlugin(id) catch {};
     }
+}
+
+/// Mirror `id`'s auto-update flag into the runtime opt-out list. Runtime bookkeeping only —
+/// persistence goes through `setPluginAutoUpdate`.
+fn trackAutoUpdate(editor: *Editor, id: []const u8, on: bool) !void {
+    if (on) {
+        for (editor.auto_update_off_ids.items, 0..) |d, i| {
+            if (std.mem.eql(u8, d, id)) {
+                fizzy.app.allocator.free(editor.auto_update_off_ids.orderedRemove(i));
+                return;
+            }
+        }
+        return;
+    }
+    if (!editor.isPluginAutoUpdate(id)) return; // already opted out
+    if (!isValidPluginId(id)) return error.InvalidPluginId;
+    const dup = try fizzy.app.allocator.dupe(u8, id);
+    errdefer fizzy.app.allocator.free(dup);
+    try editor.auto_update_off_ids.append(fizzy.app.allocator, dup);
+}
+
+/// True when `id` takes store updates — the default for every plugin, so this answers "not on the
+/// opt-out list". Says nothing about *how* an update is applied: that is
+/// `Settings.plugin_update_mode`, which `PluginStore`'s pass reads once for all plugins.
+pub fn isPluginAutoUpdate(editor: *const Editor, id: []const u8) bool {
+    for (editor.auto_update_off_ids.items) |d| {
+        if (std.mem.eql(u8, d, id)) return false;
+    }
+    return true;
+}
+
+/// Opt `id` in or out of store updates, persisting the choice immediately (same reasoning as
+/// `setPluginEnabled`: a discrete deliberate toggle should not ride the debounced autosave).
+/// Nothing is downloaded or unloaded here — the next `PluginStore` pass simply starts or stops
+/// considering this plugin.
+pub fn setPluginAutoUpdate(editor: *Editor, id: []const u8, on: bool) !void {
+    if (isBundledPluginId(id)) return error.NotUnloadable; // shipped with the exe; the store never updates it
+    if (editor.isPluginAutoUpdate(id) == on) return;
+    try editor.trackAutoUpdate(id, on);
+    errdefer editor.trackAutoUpdate(id, !on) catch {};
+    try editor.setPluginFlagsPersisted(id, .{ .auto_update = on });
 }
 
 /// Add `id` to the runtime disabled bookkeeping list if not already present. Does **not**
@@ -1271,22 +1339,39 @@ fn untrackDisabledPlugin(editor: *Editor, id: []const u8) void {
     }
 }
 
+/// Reads one fizzy-reserved `.plugins.<id>.<field>` value as verbatim text (caller-owned), or
+/// null when any level of the nest is absent. Shared by the `.enabled` / `.auto_update` readers,
+/// which differ only in how they interpret a missing value.
+fn readPluginReservedField(gpa: std.mem.Allocator, settings_data: ?[:0]const u8, id: []const u8, field: []const u8) ?[]u8 {
+    const data = settings_data orelse return null;
+    const plugins = SettingsPluginsZon.extractField(gpa, data, "plugins") orelse return null;
+    defer gpa.free(plugins);
+    const plugins_z = gpa.dupeZ(u8, plugins) catch return null;
+    defer gpa.free(plugins_z);
+    const id_block = SettingsPluginsZon.extractField(gpa, plugins_z, id) orelse return null;
+    defer gpa.free(id_block);
+    const id_z = gpa.dupeZ(u8, id_block) catch return null;
+    defer gpa.free(id_z);
+    return SettingsPluginsZon.extractField(gpa, id_z, field);
+}
+
 /// Reads `.plugins.<id>.enabled` from already-loaded `settings_data` (null source → false).
 /// Missing `.plugins` / missing id / missing or non-`true` `.enabled` all mean disabled.
 fn readPluginEnabled(gpa: std.mem.Allocator, settings_data: ?[:0]const u8, id: []const u8) bool {
-    const data = settings_data orelse return false;
-    const plugins = SettingsPluginsZon.extractField(gpa, data, "plugins") orelse return false;
-    defer gpa.free(plugins);
-    const plugins_z = gpa.dupeZ(u8, plugins) catch return false;
-    defer gpa.free(plugins_z);
-    const id_block = SettingsPluginsZon.extractField(gpa, plugins_z, id) orelse return false;
-    defer gpa.free(id_block);
-    const id_z = gpa.dupeZ(u8, id_block) catch return false;
-    defer gpa.free(id_z);
-    const enabled_text = SettingsPluginsZon.extractField(gpa, id_z, "enabled") orelse return false;
-    defer gpa.free(enabled_text);
-    const trimmed = std.mem.trim(u8, enabled_text, " \t\r\n");
-    return std.mem.eql(u8, trimmed, "true");
+    const text = readPluginReservedField(gpa, settings_data, id, "enabled") orelse return false;
+    defer gpa.free(text);
+    return std.mem.eql(u8, std.mem.trim(u8, text, " \t\r\n"), "true");
+}
+
+/// Reads `.plugins.<id>.auto_update` from already-loaded `settings_data`. **Defaults to true** —
+/// a missing `.plugins`, a missing id, or an omitted field all mean "keep this plugin current";
+/// only an explicit `false` opts out. Deliberately the inverse of `readPluginEnabled`'s default:
+/// a plugin has to be turned on by hand, but once it is on it tracks the store unless told
+/// otherwise.
+fn readPluginAutoUpdate(gpa: std.mem.Allocator, settings_data: ?[:0]const u8, id: []const u8) bool {
+    const text = readPluginReservedField(gpa, settings_data, id, "auto_update") orelse return true;
+    defer gpa.free(text);
+    return !std.mem.eql(u8, std.mem.trim(u8, text, " \t\r\n"), "false");
 }
 
 /// Reads `.plugins.<id>.settings` from already-loaded `settings_data`. Null if absent.
@@ -1303,28 +1388,40 @@ fn readPluginSettingsText(gpa: std.mem.Allocator, settings_data: ?[:0]const u8, 
     return SettingsPluginsZon.extractField(gpa, id_z, "settings");
 }
 
-/// Buffer a per-plugin `.enabled` write and flush `settings.zon` **immediately**.
-/// Enable/disable is a discrete, infrequent, important action, so it is flushed synchronously
-/// rather than through the debounced autosave (same reasoning the old `setDisabledPersisted`
-/// had: losing an explicit toggle to a skipped autosave window is worse than one extra write).
-fn setPluginEnabledPersisted(editor: *Editor, id: []const u8, enabled: bool) !void {
-    if (!enabled and !isValidPluginId(id)) return error.InvalidPluginId;
+/// Buffer per-plugin fizzy-reserved field writes (`.enabled` / `.auto_update`) and flush
+/// `settings.zon` **immediately**. Each of these is a discrete, infrequent, important action, so
+/// it is flushed synchronously rather than through the debounced autosave (same reasoning the old
+/// `setDisabledPersisted` had: losing an explicit toggle to a skipped autosave window is worse
+/// than one extra write). Null fields in `flags` are left untouched — a buffered write from
+/// earlier this cycle survives, and anything neither call set is read back off disk by
+/// `writeMergedSettings`.
+fn setPluginFlagsPersisted(editor: *Editor, id: []const u8, flags: PendingPluginFlags) !void {
+    if (!isValidPluginId(id)) {
+        // A `true` enable is the one case allowed through for an id fizzy already loaded from a
+        // path it validated itself; every other write to a bogus id is refused.
+        if (flags.enabled != true or flags.auto_update != null) return error.InvalidPluginId;
+    }
     const gpa = fizzy.app.allocator;
-    if (editor.plugin_enabled_pending.getPtr(id)) |slot| {
-        slot.* = enabled;
+    if (editor.plugin_flags_pending.getPtr(id)) |slot| {
+        if (flags.enabled) |e| slot.enabled = e;
+        if (flags.auto_update) |a| slot.auto_update = a;
     } else {
         const key = try gpa.dupe(u8, id);
         errdefer gpa.free(key);
-        try editor.plugin_enabled_pending.put(gpa, key, enabled);
+        try editor.plugin_flags_pending.put(gpa, key, flags);
     }
     if (comptime builtin.target.cpu.arch == .wasm32) {
         editor.host.markSettingsDirty();
     } else {
         editor.saveSettingsRaw() catch |err| {
-            dvui.log.err("Failed to persist plugin enabled state immediately ({s}); deferring to autosave", .{@errorName(err)});
+            dvui.log.err("Failed to persist plugin flags immediately ({s}); deferring to autosave", .{@errorName(err)});
             editor.host.markSettingsDirty();
         };
     }
+}
+
+fn setPluginEnabledPersisted(editor: *Editor, id: []const u8, enabled: bool) !void {
+    return editor.setPluginFlagsPersisted(id, .{ .enabled = enabled });
 }
 
 /// Rebuild the whole window keybind map from scratch: fizzy binds + every *currently
@@ -1622,9 +1719,10 @@ pub fn postInit(editor: *Editor) !void {
         }
     }
 
-    // Seed the runtime disabled set from settings (and re-point the persisted slice at
-    // it) before scanning, so disabled plugins are skipped at startup.
-    editor.seedDisabledPlugins();
+    // Seed the runtime disabled / auto-update-off sets from settings before scanning, so
+    // disabled plugins are skipped at startup and the store's auto-update pass already knows
+    // which plugins opted out.
+    editor.seedPluginFlags();
 
     // User-installed plugins from `<config>/plugins/{id}.{dylib,so,dll}`.
     editor.loadUserPlugins(editor.config_folder);
@@ -2457,12 +2555,12 @@ fn writeMergedSettings(editor: *Editor, settings_path: []const u8) !void {
         pending_settings.deinit(gpa);
     }
 
-    var pending_enabled = editor.plugin_enabled_pending;
-    editor.plugin_enabled_pending = .empty;
+    var pending_flags = editor.plugin_flags_pending;
+    editor.plugin_flags_pending = .empty;
     defer {
-        var it = pending_enabled.iterator();
+        var it = pending_flags.iterator();
         while (it.next()) |e| gpa.free(e.key_ptr.*);
-        pending_enabled.deinit(gpa);
+        pending_flags.deinit(gpa);
     }
 
     // Union of ids touched by either buffer this cycle.
@@ -2473,7 +2571,7 @@ fn writeMergedSettings(editor: *Editor, settings_path: []const u8) !void {
         while (it.next()) |e| try touched.put(gpa, e.key_ptr.*, {});
     }
     {
-        var it = pending_enabled.iterator();
+        var it = pending_flags.iterator();
         while (it.next()) |e| try touched.put(gpa, e.key_ptr.*, {});
     }
 
@@ -2493,12 +2591,18 @@ fn writeMergedSettings(editor: *Editor, settings_path: []const u8) !void {
         const id = te.key_ptr.*;
 
         // Base from disk, then overlay whichever of the two buffers changed this cycle.
-        var enabled = readPluginEnabled(gpa, existing, id);
+        var reserved: SettingsPluginsZon.Reserved = .{
+            .enabled = readPluginEnabled(gpa, existing, id),
+            .auto_update = readPluginAutoUpdate(gpa, existing, id),
+        };
         var settings_owned = readPluginSettingsText(gpa, existing, id);
         defer if (settings_owned) |s| gpa.free(s);
         var settings_text: ?[]const u8 = settings_owned;
 
-        if (pending_enabled.get(id)) |e| enabled = e;
+        if (pending_flags.get(id)) |f| {
+            if (f.enabled) |e| reserved.enabled = e;
+            if (f.auto_update) |a| reserved.auto_update = a;
+        }
         if (pending_settings.get(id)) |maybe| {
             // Pending owns this blob (freed with `pending_settings`); borrow for composition.
             if (settings_owned) |s| {
@@ -2508,10 +2612,12 @@ fn writeMergedSettings(editor: *Editor, settings_path: []const u8) !void {
             settings_text = maybe;
         }
 
-        if (!enabled and settings_text == null) {
+        // Every reserved field back at its default *and* no author settings means the block
+        // would compose to a bare `.{}` — drop the id from the file instead (R12).
+        if (!reserved.enabled and reserved.auto_update and settings_text == null) {
             try overlay.append(gpa, .{ .id = id, .text = null });
         } else {
-            const block = try SettingsPluginsZon.composePluginIdBlock(gpa, enabled, settings_text);
+            const block = try SettingsPluginsZon.composePluginIdBlock(gpa, reserved, settings_text);
             try overlay.append(gpa, .{ .id = id, .text = block });
         }
     }
@@ -2580,6 +2686,7 @@ pub fn reconcileExternalSettingsChange(editor: *Editor) void {
     editor.settings.window_opacity_light = parsed.window_opacity_light;
     editor.settings.content_opacity = parsed.content_opacity;
     editor.settings.input_scheme = parsed.input_scheme;
+    editor.settings.plugin_update_mode = parsed.plugin_update_mode;
 
     // Re-apply the existing idempotent appliers unconditionally — cheap, and each already
     // no-ops when nothing relevant changed.
@@ -2616,6 +2723,10 @@ fn reconcilePluginEnabled(editor: *Editor, settings_data: [:0]const u8) void {
         const id = entry.name;
         if (id.len == 0 or id[0] == '.') continue;
         if (!isValidPluginId(id) or isBundledPluginId(id)) continue;
+
+        // Auto-update is pure bookkeeping — nothing to load or unload — so the on-disk value
+        // simply becomes the runtime one. No write back: the file is already what it says.
+        editor.trackAutoUpdate(id, readPluginAutoUpdate(gpa, settings_data, id)) catch {};
 
         const want_enabled = readPluginEnabled(gpa, settings_data, id);
         const is_disabled = editor.isPluginDisabled(id);

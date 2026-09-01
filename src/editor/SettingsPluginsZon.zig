@@ -8,6 +8,7 @@
 //! .plugins = .{
 //!     .text = .{ .enabled = true, .settings = .{ .tab_size = 8 } },
 //!     .pixi = .{ .settings = .{ .grid_size = 16 } }, // enabled omitted (= false)
+//!     .ghostty = .{ .enabled = true, .auto_update = false }, // auto_update omitted = true
 //! }
 //! ```
 //!
@@ -306,15 +307,31 @@ pub fn upsertOne(gpa: Allocator, existing_full_source: ?[:0]const u8, entry: Ent
     return aw.toOwnedSlice();
 }
 
+/// The fizzy-reserved half of a plugin's block — everything beside the author's own `.settings`.
+/// Each field is written only when it differs from its default, so a plugin sitting at defaults
+/// still composes to `.{}` (and, with no settings either, is dropped from the file entirely).
+pub const Reserved = struct {
+    /// Load this plugin at startup. Absent means false: a dylib dropped into `plugins/` stays
+    /// dormant until the user (or a store install) turns it on.
+    enabled: bool = false,
+    /// Whether this plugin takes store updates at all. Absent means **true** — the inverse of
+    /// `enabled`'s default, so only a deliberate opt-out is ever written. *How* an update is
+    /// applied (silently, or through the update window) is one app-wide choice, not a per-plugin
+    /// one — see `Settings.plugin_update_mode`.
+    auto_update: bool = true,
+};
+
 /// Composes one plugin id's on-disk block: `.{ .enabled = true, .settings = <text> }` with each
-/// half omitted when not applicable (`.enabled` only when `true`; `.settings` only when present).
+/// half omitted when not applicable (`.enabled` only when `true`, `.auto_update` only when
+/// `false`; `.settings` only when present).
 /// Multi-line `settings_text` (as produced by `Schema(T).diffSerialize`) is re-indented under
 /// `.settings =` so the result is standard Zig-style 4-space nesting. Caller-owned.
-pub fn composePluginIdBlock(gpa: Allocator, enabled: bool, settings_text: ?[]const u8) ![]u8 {
+pub fn composePluginIdBlock(gpa: Allocator, reserved: Reserved, settings_text: ?[]const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     errdefer aw.deinit();
     try aw.writer.writeAll(".{\n");
-    if (enabled) try aw.writer.writeAll("    .enabled = true,\n");
+    if (reserved.enabled) try aw.writer.writeAll("    .enabled = true,\n");
+    if (!reserved.auto_update) try aw.writer.writeAll("    .auto_update = false,\n");
     if (settings_text) |s| {
         try aw.writer.writeAll("    .settings = ");
         try writeNested(&aw.writer, s, 4);
@@ -491,17 +508,33 @@ test "upsertOne handles a missing settings.zon (null source)" {
 }
 
 test "composePluginIdBlock omits enabled when false and settings when absent" {
-    const empty = try composePluginIdBlock(testing.allocator, false, null);
+    const empty = try composePluginIdBlock(testing.allocator, .{}, null);
     defer testing.allocator.free(empty);
     try testing.expectEqualStrings(".{\n}", empty);
 
-    const enabled_only = try composePluginIdBlock(testing.allocator, true, null);
+    const enabled_only = try composePluginIdBlock(testing.allocator, .{ .enabled = true }, null);
     defer testing.allocator.free(enabled_only);
     try testing.expectEqualStrings(".{\n    .enabled = true,\n}", enabled_only);
 
-    const settings_only = try composePluginIdBlock(testing.allocator, false, ".{ .tab_size = 8 }");
+    const settings_only = try composePluginIdBlock(testing.allocator, .{}, ".{ .tab_size = 8 }");
     defer testing.allocator.free(settings_only);
     try testing.expectEqualStrings(".{\n    .settings = .{ .tab_size = 8 },\n}", settings_only);
+}
+
+test "composePluginIdBlock writes auto_update only when opted out" {
+    // True is the absent state — a plugin that takes updates adds no bytes to the file.
+    const default_on = try composePluginIdBlock(testing.allocator, .{ .enabled = true }, null);
+    defer testing.allocator.free(default_on);
+    try testing.expectEqualStrings(".{\n    .enabled = true,\n}", default_on);
+
+    const opted_out = try composePluginIdBlock(testing.allocator, .{ .enabled = true, .auto_update = false }, null);
+    defer testing.allocator.free(opted_out);
+    try testing.expectEqualStrings(".{\n    .enabled = true,\n    .auto_update = false,\n}", opted_out);
+
+    // Opting out is itself worth persisting for a plugin that is otherwise all-default.
+    const disabled_no_auto = try composePluginIdBlock(testing.allocator, .{ .auto_update = false }, null);
+    defer testing.allocator.free(disabled_no_auto);
+    try testing.expectEqualStrings(".{\n    .auto_update = false,\n}", disabled_no_auto);
 }
 
 test "composePluginIdBlock re-indents a multi-line settings blob" {
@@ -511,7 +544,7 @@ test "composePluginIdBlock re-indents a multi-line settings blob" {
         \\    .tab_size = 8,
         \\}
     ;
-    const block = try composePluginIdBlock(testing.allocator, true, settings);
+    const block = try composePluginIdBlock(testing.allocator, .{ .enabled = true }, settings);
     defer testing.allocator.free(block);
     try testing.expectEqualStrings(
         \\.{

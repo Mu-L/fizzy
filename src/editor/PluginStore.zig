@@ -12,7 +12,9 @@ const sdk = @import("fizzy_sdk");
 const icons = @import("icons");
 const fizzy = @import("../fizzy.zig");
 const store = @import("../backend/plugin_store/store.zig");
+const Dialogs = @import("dialogs/Dialogs.zig");
 const PluginLoader = @import("PluginLoader.zig");
+const Constants = @import("Constants.zig");
 const core = @import("core");
 const fuzzy = core.fuzzy;
 
@@ -108,6 +110,14 @@ const Job = struct {
     sha256: []u8,
     dest: []u8,
     is_update: bool,
+    /// Started by the automatic update pass rather than by a click, so a failure is logged and
+    /// dropped instead of leaving a Retry card the user never asked for (see `tick`).
+    quiet: bool = false,
+    /// The window to wake when the download finishes. Captured on the UI thread at
+    /// `startDownload` because the worker has no `currentWindow` of its own: without this a
+    /// download that completes while the app sleeps sits at `.downloaded` until the next input
+    /// event, which for the automatic pass is "until the user happens to touch fizzy again".
+    win: *dvui.Window,
     err_buf: [64]u8 = undefined,
     err_len: usize = 0,
     /// This job's download worker, as a cancelable `Io` task group rather than a detached
@@ -132,6 +142,7 @@ var jobs: std.StringArrayHashMapUnmanaged(*Job) = .empty;
 /// `host.plugins` (or dlcloses an image) while the store view is still iterating it.
 const PendingAction = union(enum) {
     set_enabled: struct { id: []u8, enabled: bool },
+    set_auto_update: struct { id: []u8, on: bool },
     uninstall: struct { id: []u8 },
 };
 
@@ -488,12 +499,12 @@ fn drawDetailHeader(entry: StoreEntry) void {
         }
     }
 
-    // 2. Install/update/uninstall controls. `drawCardControls` already right-justifies itself
+    // 2. Toggles + install/update/uninstall controls. `drawDetailControls` right-justifies itself
     // (its own `gravity_x = 1.0` box) — laid out before the expanding info column for the same
     // reason `drawCard` does: an expand-horizontal sibling's reported min width is its full
     // unwrapped text, which would otherwise eat all the remaining space and starve these controls
     // to zero width (see `drawCard`'s comment on this exact ordering).
-    drawCardControls(entry);
+    drawDetailControls(entry);
 
     // 3. Stacked info: name (large), id (small mono), author, description. Expands into whatever
     // the row has left after logo + controls; text min-widths are capped so they can't push the
@@ -730,6 +741,7 @@ pub fn deinit() void {
     jobs.deinit(fizzy.app.allocator);
     for (pending_actions.items) |action| switch (action) {
         .set_enabled => |a| fizzy.app.allocator.free(a.id),
+        .set_auto_update => |a| fizzy.app.allocator.free(a.id),
         .uninstall => |a| fizzy.app.allocator.free(a.id),
     };
     pending_actions.deinit(fizzy.app.allocator);
@@ -738,6 +750,9 @@ pub fn deinit() void {
     name_cache.deinit(fizzy.app.allocator);
     for (version_cache.keys()) |k| fizzy.app.allocator.free(k);
     version_cache.deinit(fizzy.app.allocator);
+
+    clearPendingUpdates();
+    pending_updates.deinit(fizzy.app.allocator);
     clearManifestCache();
     manifest_cache.deinit(fizzy.app.allocator);
     freeDiskIds();
@@ -764,6 +779,340 @@ fn freeJob(job: *Job) void {
     fizzy.app.allocator.destroy(job);
 }
 
+// ---- automatic updates -----------------------------------------------------
+
+/// One installed plugin the store has a better build for, as offered in the "Plugin updates"
+/// window. Every string is app-allocator-owned: the registry strings these are built from are
+/// only valid while the catalog lock is held, and this list outlives that by many frames.
+pub const PendingUpdate = struct {
+    id: []u8,
+    /// Display name, or the id when nothing better is known yet.
+    title: []u8,
+    /// The store build's version.
+    to: []u8,
+    /// This host's download for that build, copied out of the registry at collect time.
+    ///
+    /// Owned here rather than re-resolved from the catalog on click, for two reasons: registry
+    /// strings are only valid while the catalog lock is held (the refresh worker frees the arena),
+    /// and the update window draws its cards *inside* that lock — so a click that reached back for
+    /// the catalog would re-enter a non-reentrant mutex on the UI thread and hang the app.
+    url: []u8,
+    sha256: []u8,
+    /// The installed version, when we know it. Null for a build that never loaded and could not
+    /// be probed.
+    from: ?std.SemanticVersion,
+    /// The plugin isn't running: its installed build was rejected (an SDK/ABI mismatch after a
+    /// fizzy upgrade, most often) and the store build for *this* host replaces it. Presented as a
+    /// repair rather than an upgrade, since the version number often doesn't move.
+    repair: bool,
+    /// An Update was clicked (or Update all) — the row shows progress instead of a button.
+    started: bool = false,
+};
+
+var pending_updates: std.ArrayListUnmanaged(PendingUpdate) = .empty;
+
+/// Where the once-per-session update check has got to.
+const AutoPhase = enum {
+    /// Nothing kicked off yet.
+    idle,
+    /// A catalog refresh is in flight purely for the update check.
+    fetching,
+    /// The check ran (or was skipped, or the fetch failed). One attempt per session — the store
+    /// tab's own Refresh button is the manual retry.
+    done,
+};
+var auto_phase: AutoPhase = .idle;
+
+pub fn pendingUpdates() []PendingUpdate {
+    return pending_updates.items;
+}
+
+fn clearPendingUpdates() void {
+    const a = fizzy.app.allocator;
+    for (pending_updates.items) |u| {
+        a.free(u.id);
+        a.free(u.title);
+        a.free(u.to);
+        a.free(u.url);
+        a.free(u.sha256);
+    }
+    pending_updates.clearRetainingCapacity();
+}
+
+/// Called when the update window closes: the list is UI state for that window only, and the
+/// downloads it started (if any) run to completion on their own.
+pub fn dismissPendingUpdates() void {
+    clearPendingUpdates();
+}
+
+/// Start the download for one offered update. Safe to call for a row already started (the job is
+/// simply replaced) and from inside the card list's own draw, since it touches no catalog state.
+pub fn applyPendingUpdate(id: []const u8) void {
+    const row = pendingRowFor(id) orelse return;
+    // Whether this is an unload-and-reload or a fresh install is decided by what is *running*
+    // now, not by what the row said when it was built — the plugin may have been enabled or
+    // disabled while the window sat open.
+    startDownloadUrl(row.id, row.url, row.sha256, .{
+        .is_update = fizzy.editor.host.pluginById(id) != null,
+        .quiet = true,
+    });
+    row.started = true;
+}
+
+/// One-line progress for `id` as the update window shows it, or null while the row still has an
+/// Update button to press. Reads live job state, so a download started from the store tab shows
+/// here too.
+pub fn updateStatus(id: []const u8) ?[]const u8 {
+    if (jobs.get(id)) |job| return switch (@as(JobStatus, @enumFromInt(job.status.load(.acquire)))) {
+        .downloading => "Updating\u{2026}",
+        .downloaded => "Installing\u{2026}",
+        .failed => "Failed",
+    };
+    for (pending_updates.items) |u| {
+        // Started, and no job left to describe it: `tick` applied and dropped it.
+        if (std.mem.eql(u8, u.id, id) and u.started) return "Updated";
+    }
+    return null;
+}
+
+pub fn applyAllPendingUpdates() void {
+    // Index rather than pointer iteration: `applyPendingUpdate` writes back into the list.
+    var i: usize = 0;
+    while (i < pending_updates.items.len) : (i += 1) {
+        const id = pending_updates.items[i].id;
+        if (!pending_updates.items[i].started) applyPendingUpdate(id);
+    }
+}
+
+/// The pending-update row for `id`, if it is one.
+fn pendingRowFor(id: []const u8) ?*PendingUpdate {
+    for (pending_updates.items) |*u| {
+        if (std.mem.eql(u8, u.id, id)) return u;
+    }
+    return null;
+}
+
+/// The update window's per-card control: one small Update button, or the job's progress.
+fn drawUpdateCardControls(entry: StoreEntry) void {
+    const theme = dvui.themeGet();
+    const body = dvui.Font.theme(.body);
+
+    var ctl = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1.0, .gravity_y = 0.5 });
+    defer ctl.deinit();
+
+    if (updateStatus(entry.id)) |status| {
+        dvui.labelNoFmt(@src(), status, .{}, .{
+            .gravity_y = 0.5,
+            .color_text = theme.color(.window, .text).opacity(0.7),
+            .font = dvui.Font.theme(.mono).larger(-1.0),
+        });
+        return;
+    }
+    if (dvui.button(@src(), "Update", .{}, .{ .gravity_y = 0.5, .font = body.larger(-1.0) }))
+        applyPendingUpdate(entry.id);
+}
+
+/// "v0.3.9 → v0.4.1", or what a repair actually is — the update window's equivalent of a store
+/// card's `installed vX / store vY` line, in the same slot.
+fn updateInfoLine(buf: []u8, row: PendingUpdate) []const u8 {
+    if (row.repair) {
+        return std.fmt.bufPrint(buf, "rebuild for this version of Fizzy — v{s}", .{row.to}) catch row.to;
+    }
+    const from = row.from orelse return std.fmt.bufPrint(buf, "v{s}", .{row.to}) catch row.to;
+    return std.fmt.bufPrint(buf, "v{d}.{d}.{d} → v{s}", .{ from.major, from.minor, from.patch, row.to }) catch row.to;
+}
+
+/// The offered updates as store cards — the same shell the Plugins tab draws, so the two never
+/// drift apart. Cards here are inert apart from their Update button: clicking one must not swap
+/// the README center out from under a modal dialog, and the hover toggles belong to the store.
+pub fn drawPendingUpdateCards() void {
+    const c = if (catalog) |*ci| ci else null;
+    const snapshot = if (c) |cc| cc.acquire() else null;
+    defer if (c) |cc| cc.release();
+
+    for (pending_updates.items) |row| {
+        const entry = entryFor(row.id, snapshot) orelse StoreEntry{
+            .id = row.id,
+            .title = row.title,
+            .kind = .registry,
+            .registry = if (snapshot) |snap| snap.summary.pluginById(row.id) else null,
+            .release = if (snapshot) |snap| snap.shard.releaseFor(row.id) else null,
+        };
+        var buf: [96]u8 = undefined;
+        drawCardShell(entry, drawUpdateCardControls, updateInfoLine(&buf, row), .{ .clickable = false, .compact = true });
+    }
+}
+
+/// True while any offered update still has an Update button to press — the window's "Update all"
+/// hides itself once there is nothing left to start.
+pub fn anyPendingUpdateUnstarted() bool {
+    for (pending_updates.items) |u| {
+        if (!u.started) return true;
+    }
+    return false;
+}
+
+/// Drives the once-per-session update check from `tick`: kick one catalog refresh, then act on
+/// it when it lands. Deliberately *not* run before `Editor.loadUserPlugins` — that is a
+/// synchronous startup path and the fetch has no timeout, so gating startup on it would hang
+/// launch behind a captive portal or a dead registry host. Everything loads first; a plugin whose
+/// build this fizzy can't load is then repaired live, no restart needed.
+fn autoUpdateTick() void {
+    switch (auto_phase) {
+        .idle => {
+            const c = if (catalog) |*ci| ci else return;
+            if (Constants.debug_simulate_plugin_updates) {
+                clearPendingUpdates();
+                // A URL that resolves to nothing: clicking Update exercises the whole job path
+                // and lands on a normal download failure, which is the point of a simulation.
+                const fake_dl: store.registry.Download = .{ .url = "https://127.0.0.1:9/simulated", .sha256 = "" };
+                appendPendingUpdate("pixi", "Pixi", "0.4.1", fake_dl, .{ .major = 0, .minor = 3, .patch = 9 }, false);
+                appendPendingUpdate("ghostty", "Terminal", "1.2.0", fake_dl, .{ .major = 1, .minor = 2, .patch = 0 }, true);
+                dvui.log.info("plugin updates: simulated {d} rows, mode {s}", .{ pending_updates.items.len, @tagName(fizzy.editor.settings.plugin_update_mode) });
+                offerPendingUpdates();
+                auto_phase = .done;
+                return;
+            }
+            // Nothing installed to update: don't touch the network at all.
+            if (disk_scan_dirty) refreshDiskScan();
+            if (!anyUpdatableInstalled()) {
+                auto_phase = .done;
+                return;
+            }
+            c.refresh();
+            auto_phase = .fetching;
+        },
+        .fetching => {
+            const c = if (catalog) |*ci| ci else return;
+            switch (c.status()) {
+                .idle, .fetching => {},
+                // Offline, or a registry that isn't answering. Silence is the right response to
+                // a check the user never asked for; the store tab still says what it knows.
+                .failed => auto_phase = .done,
+                .ready => {
+                    collectPendingUpdates();
+                    offerPendingUpdates();
+                    auto_phase = .done;
+                },
+            }
+        },
+        .done => {},
+    }
+}
+
+/// True if any plugin on disk is a candidate for the update check at all — installed, not
+/// bundled, not disabled, and not opted out.
+fn anyUpdatableInstalled() bool {
+    const editor = fizzy.editor;
+    for (disk_ids.items) |id| {
+        if (isBundled(id)) continue;
+        if (editor.isPluginDisabled(id)) continue;
+        if (!editor.isPluginAutoUpdate(id)) continue;
+        return true;
+    }
+    return false;
+}
+
+/// Build `pending_updates` from the fetched catalog: every enabled, opted-in plugin the store has
+/// a better build of for *this* host.
+fn collectPendingUpdates() void {
+    const editor = fizzy.editor;
+    clearPendingUpdates();
+    if (disk_scan_dirty) refreshDiskScan();
+
+    const c = if (catalog) |*ci| ci else return;
+    const snapshot = c.acquire();
+    defer c.release();
+    const snap = snapshot orelse return;
+
+    for (disk_ids.items) |id| {
+        if (isBundled(id)) continue;
+        if (editor.isPluginDisabled(id)) continue; // "off" is a decision, not something to fix
+        if (!editor.isPluginAutoUpdate(id)) continue;
+        if (jobs.get(id) != null) continue; // already installing/updating from the store tab
+
+        const rel = snap.shard.releaseFor(id) orelse continue;
+        // The shard is this host's ABI fingerprint, so anything in it is by construction loadable
+        // here — but it still needs a build for this OS/arch.
+        const dl = rel.downloadFor(compat.hostKey()) orelse continue;
+        const rel_ver = std.SemanticVersion.parse(rel.version) catch continue;
+
+        const installed = currentVersion(id);
+        const repair = editor.host.pluginById(id) == null;
+        if (repair) {
+            // Enabled on record but not running: the build on disk was rejected. The store build
+            // is the way back in even at the same version number (different fingerprint), but
+            // never *older* than what is already there — that would downgrade an author's own
+            // newer local build the moment it failed to load once.
+            if (installed) |known| {
+                if (rel_ver.order(known) == .lt) continue;
+            }
+        } else {
+            // Running: only a strictly newer version is an update.
+            const running = installed orelse continue;
+            if (rel_ver.order(running) != .gt) continue;
+        }
+
+        appendPendingUpdate(id, resolveTitle(id, id), rel.version, dl, installed, repair);
+    }
+}
+
+/// Own copies of one row's strings and append it. Any allocation failure unwinds the ones already
+/// taken and drops the row — a plugin missing from the window is a far better outcome than a leak
+/// or a half-built entry.
+fn appendPendingUpdate(
+    id: []const u8,
+    title: []const u8,
+    to: []const u8,
+    dl: store.registry.Download,
+    from: ?std.SemanticVersion,
+    repair: bool,
+) void {
+    const a = fizzy.app.allocator;
+    var owned: [4][]u8 = undefined;
+    var taken: usize = 0;
+    // One unwind path for all four strings: a partial row must free exactly what it took.
+    defer if (taken < owned.len) {
+        for (owned[0..taken]) |o| a.free(o);
+    };
+    for ([_][]const u8{ id, title, to, dl.url }, 0..) |src, i| {
+        owned[i] = a.dupe(u8, src) catch return;
+        taken = i + 1;
+    }
+    const sha_dup = a.dupe(u8, dl.sha256) catch return;
+    errdefer a.free(sha_dup);
+
+    pending_updates.append(a, .{
+        .id = owned[0],
+        .title = owned[1],
+        .to = owned[2],
+        .url = owned[3],
+        .sha256 = sha_dup,
+        .from = from,
+        .repair = repair,
+    }) catch {
+        a.free(sha_dup);
+        return;
+    };
+    taken = owned.len + 1; // handed off: the list owns them now
+}
+
+/// Apply whatever `collectPendingUpdates` found, the way the user asked for in settings:
+/// silently, or through the "Plugin updates" window.
+fn offerPendingUpdates() void {
+    if (pending_updates.items.len == 0) return;
+    switch (fizzy.editor.settings.plugin_update_mode) {
+        .silent => {
+            for (pending_updates.items) |u| {
+                dvui.log.info("plugin updates: installing {s} {s}", .{ u.title, u.to });
+            }
+            applyAllPendingUpdates();
+            clearPendingUpdates();
+        },
+        .prompt => Dialogs.PluginUpdates.request(),
+    }
+}
+
 // ---- per-frame completion (main thread) ------------------------------------
 
 /// Complete any finished downloads by loading them live, and apply plugin enable/disable /
@@ -774,6 +1123,7 @@ pub fn tick() void {
     if (comptime builtin.target.cpu.arch == .wasm32) return;
 
     syncReadmeCenter();
+    autoUpdateTick();
 
     // Anything applied below can add to, remove from, or change the load state of the plugins
     // directory, so the next draw rescans it (see `disk_scan_dirty`).
@@ -781,6 +1131,11 @@ pub fn tick() void {
     for (pending_actions.items) |action| switch (action) {
         .set_enabled => |a| {
             applySetEnabled(a.id, a.enabled);
+            fizzy.app.allocator.free(a.id);
+        },
+        .set_auto_update => |a| {
+            fizzy.editor.setPluginAutoUpdate(a.id, a.on) catch |err|
+                reportError("could not change auto-update for '{s}': {s}", .{ a.id, @errorName(err) });
             fizzy.app.allocator.free(a.id);
         },
         .uninstall => |a| {
@@ -809,6 +1164,16 @@ pub fn tick() void {
                 else
                     fizzy.editor.installAndLoadPlugin(job.id);
                 loaded catch |err| {
+                    // An automatic update the user never asked for reports nothing and leaves no
+                    // Retry card: the new build is already sitting at `job.dest`, so a plugin held
+                    // back by unsaved documents simply comes up updated at the next launch (or
+                    // sooner, when `Editor.reconcileChangedPluginBinaries` sees the new file).
+                    if (job.quiet) {
+                        dvui.log.info("plugin updates: '{s}' not applied live ({s}); it will load at next launch", .{ job.id, @errorName(err) });
+                        jobs.swapRemoveAt(i);
+                        freeJob(job);
+                        continue;
+                    }
                     if (err == error.DirtyDocuments) {
                         reportError("'{s}' has unsaved changes — save or close them first", .{job.id});
                     } else {
@@ -867,7 +1232,14 @@ fn toggleSelect(entry: StoreEntry) void {
 /// caller's already-acquired catalog snapshot (or null when the catalog has never loaded); this
 /// makes no locking decisions of its own.
 fn selectedEntry(snapshot: ?store.Catalog.Snapshot) ?StoreEntry {
-    const id = Readme.selectedId() orelse return null;
+    return entryFor(Readme.selectedId() orelse return null, snapshot);
+}
+
+/// The `StoreEntry` for one id, in the same priority order the store list builds its entries in
+/// (see `draw`'s entry-building pass) — just for one id instead of the whole list. `snapshot` is
+/// the caller's already-acquired catalog snapshot (or null when the catalog has never loaded);
+/// this makes no locking decisions of its own.
+fn entryFor(id: []const u8, snapshot: ?store.Catalog.Snapshot) ?StoreEntry {
     const editor = fizzy.editor;
     const registry = if (snapshot) |snap| snap.summary.pluginById(id) else null;
     const release = if (snapshot) |snap| snap.shard.releaseFor(id) else null;
@@ -996,6 +1368,9 @@ const fizzy_publisher = "fizzyedit";
 /// its task mains). A shutdown mid-download lands on `.failed` via `error.Canceled`, which nothing
 /// outlives — `freeJob` is what awaited us.
 fn worker(job: *Job, io: std.Io) void {
+    // Whatever happens below, the result is only ever *applied* by `tick` on the UI thread, so
+    // every exit path has to wake a sleeping app — see `Job.win`.
+    defer dvui.refresh(job.win, @src(), null);
     store.download.download(fizzy.app.allocator, io, job.url, job.sha256, job.dest) catch |err| {
         const n = @min(@errorName(err).len, job.err_buf.len);
         @memcpy(job.err_buf[0..n], @errorName(err)[0..n]);
@@ -1012,11 +1387,17 @@ fn removeJob(id: []const u8) void {
 
 /// Kick off a download for `id`'s selected release on a worker task. UI-thread only (`draw`), like
 /// every other `Job.tasks` operation.
-fn startDownload(id: []const u8, release: store.ShardRelease, is_update: bool) void {
-    removeJob(id); // replace any prior failed job
+fn startDownload(id: []const u8, release: store.ShardRelease, opts: DownloadOptions) void {
     const dl = release.downloadFor(compat.hostKey()) orelse return;
+    startDownloadUrl(id, dl.url, dl.sha256, opts);
+}
 
-    const job = buildJob(id, dl, is_update) catch {
+/// The half of `startDownload` that no longer needs the registry: everything after a release has
+/// been resolved to one download for this host.
+fn startDownloadUrl(id: []const u8, url: []const u8, sha256: []const u8, opts: DownloadOptions) void {
+    removeJob(id); // replace any prior failed job
+
+    const job = buildJob(id, url, sha256, opts) catch {
         reportError("could not prepare download for '{s}'", .{id});
         return;
     };
@@ -1035,7 +1416,14 @@ fn startDownload(id: []const u8, release: store.ShardRelease, is_update: bool) v
 
 /// Allocate a `Job` with all strings owned; `errdefer` unwinds every partial allocation so a
 /// mid-build OOM never leaks.
-fn buildJob(id: []const u8, dl: store.registry.Download, is_update: bool) !*Job {
+pub const DownloadOptions = struct {
+    /// Replace a *running* plugin (unload + reload) rather than installing a fresh one.
+    is_update: bool,
+    /// Suppress the error reporting and Retry card a user-initiated job leaves behind.
+    quiet: bool = false,
+};
+
+fn buildJob(id: []const u8, url: []const u8, sha256: []const u8, opts: DownloadOptions) !*Job {
     const a = fizzy.app.allocator;
 
     const plugins_dir = try std.fs.path.join(a, &.{ fizzy.editor.config_folder, "plugins" });
@@ -1051,9 +1439,9 @@ fn buildJob(id: []const u8, dl: store.registry.Download, is_update: bool) !*Job 
     errdefer a.destroy(job);
     const id_dup = try a.dupe(u8, id);
     errdefer a.free(id_dup);
-    const url_dup = try a.dupe(u8, dl.url);
+    const url_dup = try a.dupe(u8, url);
     errdefer a.free(url_dup);
-    const sha_dup = try a.dupe(u8, dl.sha256);
+    const sha_dup = try a.dupe(u8, sha256);
     errdefer a.free(sha_dup);
     const dest = try std.fs.path.join(a, &.{ plugin_dir, file_name });
     errdefer a.free(dest);
@@ -1064,7 +1452,9 @@ fn buildJob(id: []const u8, dl: store.registry.Download, is_update: bool) !*Job 
         .url = url_dup,
         .sha256 = sha_dup,
         .dest = dest,
-        .is_update = is_update,
+        .is_update = opts.is_update,
+        .quiet = opts.quiet,
+        .win = dvui.currentWindow(),
     };
     return job;
 }
@@ -1633,7 +2023,7 @@ fn isBuiltIn(id: []const u8) bool {
 /// via `drawCardControls`/`infoLine` (which still shows "installed vX"). See `drawCardShell`.
 fn drawCard(entry: StoreEntry) void {
     var buf: [192]u8 = undefined;
-    drawCardShell(entry, drawCardControls, infoLine(&buf, entry), true);
+    drawCardShell(entry, drawNoCardControls, infoLine(&buf, entry), .{ .show_failure = true, .hover_toggles = true, .compact = true });
 }
 
 /// STORE-tab card: browse-only — just an install button or a "no compatible build" message via
@@ -1641,7 +2031,7 @@ fn drawCard(entry: StoreEntry) void {
 /// even for a store plugin the user happens to already have installed). See `drawCardShell`.
 fn drawStoreCard(entry: StoreEntry) void {
     var buf: [192]u8 = undefined;
-    drawCardShell(entry, drawStoreCardControls, storeInfoLine(&buf, entry), false);
+    drawCardShell(entry, drawStoreCardControls, storeInfoLine(&buf, entry), .{});
 }
 
 /// Static floor under a card's (and so the whole explorer tab's) width: below this, the
@@ -1685,13 +2075,42 @@ const card_text_padding: dvui.Rect = .{ .x = 0, .y = 1, .w = 0, .h = 1 };
 /// `drawStoreCardControls`/`drawCardControls`); `row2_text` is the already-formatted dim
 /// monospace id/version line (differs likewise, see `storeInfoLine`/`infoLine`); `show_failure`
 /// gates the failed-to-load detail block, which only makes sense on an installed-pane card.
-fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_text: []const u8, show_failure: bool) void {
+/// The per-card switches. A struct rather than four positional bools — the list cards, the store
+/// cards and the update window each want a different combination, and `(…, true, false, true)`
+/// says nothing at the call site.
+const CardOptions = struct {
+    /// Surface a rejected build's load-failure detail under the info line.
+    show_failure: bool = false,
+    /// Reveal the Enabled / Auto-update panel while the card is hovered.
+    hover_toggles: bool = false,
+    /// Clicking the card body selects it (and shows its README in the center).
+    clickable: bool = true,
+    /// Drop the empty-line reservation for description / author.
+    ///
+    /// The *store* pane keeps it: every card there is a registry row that has both, so reserving
+    /// the lines costs nothing and keeps a long browse list on an even rhythm. Installed and
+    /// update cards don't — a sideloaded or locally built plugin often has neither — and there the
+    /// reservation is just a hole between the title and the rest of the card.
+    compact: bool = false,
+};
+
+/// A card whose every control lives in its hover flyout instead (`drawHoverToggles`).
+fn drawNoCardControls(_: StoreEntry) void {}
+
+fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_text: []const u8, opts: CardOptions) void {
     const theme = dvui.themeGet();
     const selected = if (Readme.selectedId()) |sid| std.mem.eql(u8, sid, entry.id) else false;
     // Disabled plugins read as a faded card: half the surface fill opacity and half the shadow.
     //const disabled = fizzy.editor.isPluginDisabled(entry.id);
 
-    const fill = if (selected)
+    // The card stays lit while the pointer is inside its own flyout. The panel overhangs the
+    // card's right edge, so `ButtonWidget`'s hover goes false the instant the mouse crosses into
+    // it — without this the row would go dark while the menu it opened is still up and being used.
+    // `flyout_rect` is last frame's, which is exactly when the pointer was over it.
+    const flyout_pinned = opts.hover_toggles and flyoutIsFor(entry.id) and
+        flyout_rect.contains(dvui.currentWindow().mouse_pt);
+
+    const fill = if (selected or flyout_pinned)
         theme.color(.control, .fill).opacity(0.5)
     else
         theme.color(.content, .fill).opacity(0.0);
@@ -1752,7 +2171,12 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
         // down to a zero-width row (the Uninstall trash button silently disappearing). This runs
         // its own processEvents and consumes its clicks before the card does.
         {
-            var ctl_anchor = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1.0, .gravity_y = 1.0 });
+            var ctl_anchor = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .gravity_x = 1.0,
+                // Bottom-anchored on a full card (it reads as sitting under the text stack);
+                // centred on a compact one, where there is no four-line stack to sit under.
+                .gravity_y = if (opts.compact) 0.5 else 1.0,
+            });
             defer ctl_anchor.deinit();
             controls(entry);
         }
@@ -1801,9 +2225,10 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
 
             // Single line, ellipsized (LabelWidget's default) rather than wrapped — a tooltip
             // picks up the full text only when it was actually truncated.
-            {
+            const description: []const u8 = descriptionFor(entry) orelse "";
+            if (!opts.compact or description.len > 0) {
                 var desc_label: dvui.LabelWidget = undefined;
-                desc_label.initNoFmt(@src(), descriptionFor(entry) orelse "", .{}, .{
+                desc_label.initNoFmt(@src(), description, .{}, .{
                     .font = dvui.Font.theme(.body),
                     .color_text = theme.color(.window, .text).opacity(0.75),
                     .expand = .horizontal,
@@ -1835,13 +2260,16 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
                 desc_label.deinit();
             }
 
-            dvui.labelNoFmt(@src(), if (entry.registry) |r| r.author else "", .{}, .{
-                .font = dvui.Font.theme(.body),
-                .color_text = theme.color(.control, .text),
-                .expand = .horizontal,
-                .padding = card_text_padding,
-                .max_size_content = .{ .w = card_text_no_floor, .h = std.math.floatMax(f32) },
-            });
+            const author: []const u8 = if (entry.registry) |r| r.author else "";
+            if (!opts.compact or author.len > 0) {
+                dvui.labelNoFmt(@src(), author, .{}, .{
+                    .font = dvui.Font.theme(.body),
+                    .color_text = theme.color(.control, .text),
+                    .expand = .horizontal,
+                    .padding = card_text_padding,
+                    .max_size_content = .{ .w = card_text_no_floor, .h = std.math.floatMax(f32) },
+                });
+            }
 
             dvui.labelNoFmt(@src(), row2_text, .{}, .{
                 .font = dvui.Font.theme(.mono),
@@ -1853,14 +2281,15 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
 
             // A local build that is on disk but rejected at load time (ABI/SDK mismatch, id
             // collision, etc.) — this is the *only* place that surfaces it (there is no more
-            // startup dialog), so it must carry every diagnostic detail we have. This genuinely
-            // should wrap rather than ellipsize, so it gets a fixed-width column (both min and
-            // max) instead of the zero-floor treatment above. Store (upper-pane) cards never show
-            // this — see `show_failure`.
-            if (show_failure) if (failedInfo(entry.id)) |f| {
+            // startup dialog), so it must carry every diagnostic detail we have. It wraps across
+            // the card's full width: nothing shares this row any more, since every control moved
+            // into the hover flyout. The zero-floor max (as on the labels above) keeps the wrapped
+            // text from reporting its unwrapped width as the card's min size. Store (upper-pane)
+            // cards never show this — see `show_failure`.
+            if (opts.show_failure) if (failedInfo(entry.id)) |f| {
                 var fail_wrap = dvui.box(@src(), .{ .dir = .vertical }, .{
-                    .min_size_content = .{ .w = min_failure_wrap_w },
-                    .max_size_content = .{ .w = min_failure_wrap_w, .h = std.math.floatMax(f32) },
+                    .expand = .horizontal,
+                    .max_size_content = .{ .w = card_text_no_floor, .h = std.math.floatMax(f32) },
                 });
                 defer fail_wrap.deinit();
 
@@ -1896,7 +2325,189 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
     // plain card cursor now that it's had its turn this frame ("last cursorSet call wins" for
     // the frame).
     if (bw.hover) dvui.cursorSet(.arrow);
-    if (bw.clicked()) toggleSelect(entry);
+    if (bw.clicked() and opts.clickable) toggleSelect(entry);
+
+    // Drawn last so the flyout paints over the card and gets first refusal on the mouse. Its
+    // anchor is this card's own rect, so it has to be inside the card widget's scope.
+    if (opts.hover_toggles) drawHoverToggles(entry, bw.data().borderRectScale().r, bw.hover);
+}
+
+// ---- per-card hover flyout -------------------------------------------------
+
+/// Which card's toggle flyout is showing, by id. A fixed buffer rather than an allocation: this
+/// changes on every mouse move across the list, and plugin ids are short by construction
+/// (`Editor.isValidPluginId`). An over-long id simply never gets a flyout.
+var flyout_id_buf: [96]u8 = undefined;
+var flyout_id_len: usize = 0;
+/// Last drawn flyout rect, so the mouse can leave the card *into* the flyout without it closing.
+var flyout_rect: dvui.Rect.Physical = .{};
+
+/// How far the flyout overlaps the card's right edge (natural px). Non-zero deliberately: a gap
+/// here is a dead strip the pointer crosses on the way over, and the flyout would close in it.
+const flyout_overlap: f32 = 6;
+
+fn flyoutIsFor(id: []const u8) bool {
+    return flyout_id_len == id.len and std.mem.eql(u8, flyout_id_buf[0..flyout_id_len], id);
+}
+
+fn flyoutSet(id: []const u8) void {
+    if (id.len > flyout_id_buf.len) {
+        flyout_id_len = 0;
+        return;
+    }
+    @memcpy(flyout_id_buf[0..id.len], id);
+    flyout_id_len = id.len;
+    flyout_rect = .{};
+}
+
+fn flyoutClear() void {
+    flyout_id_len = 0;
+    flyout_rect = .{};
+}
+
+/// The installed card's Enabled / Auto-update controls, as a small rounded panel butted against
+/// the card's right edge while the card (or the panel itself) is hovered.
+///
+/// These two are settings rather than actions, and a sidebar-width card has no room for four
+/// controls in a row without squeezing the title and description into nothing. Hover-revealing
+/// them keeps the resting card readable and still puts them one mouse-move away.
+fn drawHoverToggles(entry: StoreEntry, card_r: dvui.Rect.Physical, card_hovered: bool) void {
+    // Bundled built-ins are neither disablable nor store-updatable, and a plugin with no build on
+    // disk has nothing to toggle.
+    if (isBundled(entry.id) or !isInstalled(entry)) return;
+
+    const mouse = dvui.currentWindow().mouse_pt;
+    const showing = flyoutIsFor(entry.id);
+    // `card_hovered` is false the moment the pointer crosses onto the flyout (which overhangs the
+    // card), so the panel's own rect has to keep it alive.
+    const keep_open = card_hovered or (showing and flyout_rect.contains(mouse));
+    if (!keep_open) {
+        if (showing) flyoutClear();
+        return;
+    }
+    if (!showing) flyoutSet(entry.id);
+    if (!flyoutIsFor(entry.id)) return; // id too long to track
+
+    const theme = dvui.themeGet();
+    const scale = dvui.windowNaturalScale();
+    // Anchor to the card's right edge *or* the visible edge of the list, whichever comes first.
+    // A card is wider than a narrow sidebar (`card_min_w` + horizontal scroll), so its own right
+    // edge is often somewhere out under the center pane — anchoring there would leave the panel
+    // floating in the middle of the editor, detached from the row it belongs to. Clipping is also
+    // what the pointer sees: the user can only hover the part of the card that is actually drawn.
+    const clip = dvui.clipGet();
+    const right = @min(card_r.x + card_r.w, clip.x + clip.w);
+    const anchor: dvui.Point.Physical = .{
+        .x = right - flyout_overlap * scale,
+        // Clamped for the same reason: a card scrolled half out of view still gets its panel
+        // beside the visible half.
+        .y = std.math.clamp(card_r.y + card_r.h / 2, clip.y, clip.y + clip.h),
+    };
+
+    var fw: dvui.FloatingWidget = undefined;
+    fw.init(@src(), .{
+        .from = anchor,
+        // The anchor is the panel's left edge, vertically centred on the card.
+        .from_gravity_x = 1.0,
+        .from_gravity_y = 0.5,
+    }, .{ .id_extra = hashId(entry.id) });
+    defer fw.deinit();
+
+    // Surfaced exactly like a dialog window (see `core/dvui.zig`'s `dialogWindow`): the same
+    // translucent content fill, the same 10px corners, the same centred black shadow, and no
+    // border. This *is* a small floating window over the app, so it should read as one rather
+    // than as a bordered popover of its own invention.
+    var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .background = true,
+        .color_fill = theme.color(.content, .fill).opacity(0.85),
+        .border = .all(0),
+        .corners = dvui.CornerRect.all(10),
+        .padding = .all(6),
+        .box_shadow = .{
+            .color = .black,
+            .alpha = 0.35,
+            .fade = 10,
+            .corners = dvui.CornerRect.all(10),
+        },
+    });
+    defer panel.deinit();
+
+    drawToggleControls(entry, .compact);
+    // The card's actions live here as well, so the card body itself is pure content — that is what
+    // lets a rejected build's failure message wrap across the full card width instead of squeezing
+    // into a fixed column beside a row of buttons.
+    //
+    // Wrapped in a normally-packed row of its own: `drawCardControls`'s box sets `gravity_y = 0.5`
+    // (right for the detail header, where it centres against the header), and a gravity-in-(0,1)
+    // *direct* child of a vertical box is treated as positioned/overlay by `BoxWidget.rectFor` —
+    // it would be drawn on top of the toggles above instead of under them.
+    {
+        var actions = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 2 } });
+        defer actions.deinit();
+        drawCardControls(entry);
+    }
+
+    // Recorded *after* the contents so the rect matches what was actually laid out this frame.
+    flyout_rect = panel.data().borderRectScale().r;
+}
+
+/// The two per-plugin settings shared by the hover flyout and the detail page header: whether the
+/// plugin loads at all, and whether the store's update pass considers it.
+/// `.compact` shrinks the labels a step for the hover flyout, which sits over the content rather
+/// than in a header and should read as a small menu, not a second row of primary controls.
+const ToggleSize = enum { normal, compact };
+
+fn drawToggleControls(entry: StoreEntry, size: ToggleSize) void {
+    const editor = fizzy.editor;
+    if (isBundled(entry.id)) return;
+    const body = dvui.Font.theme(.body);
+    const opts: dvui.Options = .{
+        .gravity_y = 0.5,
+        .font = switch (size) {
+            .normal => body,
+            .compact => body.larger(-1.0),
+        },
+    };
+
+    const loaded = editor.host.pluginById(entry.id) != null;
+    const disabled = editor.isPluginDisabled(entry.id);
+    const failed = entry.kind == .failed or editor.isFailedUserPlugin(entry.id);
+    const untracked = !loaded and !disabled and !failed and (entry.kind == .on_disk or isOnDisk(entry.id));
+
+    // A *failed* build is the one case with nothing to toggle — it already tried and lost, and
+    // gets the Retry/Reinstall buttons on the card instead.
+    // Each control gets its own normally-packed row: these are drawn into *vertical* parents (the
+    // hover flyout, the detail header's toggle column), where a `gravity_y = 0.5` direct child is
+    // treated as positioned/overlay and would stack on top of its sibling rather than under it.
+    if (loaded or disabled or untracked) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        var enabled = loaded;
+        if (dvui.checkbox(@src(), &enabled, "Enabled", opts)) queueSetEnabled(entry.id, enabled);
+    }
+    // Per-plugin half of the update setting: whether this plugin is considered at all. *How* an
+    // update lands once found (silently, or in the update window) is one app-wide choice, in
+    // fizzy's own settings (`Settings.plugin_update_mode`).
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        var auto_update = editor.isPluginAutoUpdate(entry.id);
+        if (dvui.checkbox(@src(), &auto_update, "Auto-update", opts))
+            queueSetAutoUpdate(entry.id, auto_update);
+    }
+}
+
+/// Detail-page header controls: the same actions a card carries, plus the two toggles inline —
+/// the header has the width for them, and there is no card to hover there.
+fn drawDetailControls(entry: StoreEntry) void {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1.0, .gravity_y = 0.5 });
+    defer row.deinit();
+    {
+        var toggles = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5, .margin = .{ .w = 8 } });
+        defer toggles.deinit();
+        drawToggleControls(entry, .normal);
+    }
+    drawCardControls(entry);
 }
 
 /// True when `entry` is genuinely present on disk in some form — loaded, disabled-on-disk,
@@ -1982,10 +2593,6 @@ fn storeInfoLine(buf: []u8, entry: StoreEntry) []const u8 {
 }
 
 const part_separator = " · ";
-
-/// Fixed wrap width of a card's failure message (see `drawCardShell`) — wide enough for a few
-/// words per line without going all the way out to the card's actual (fluid) width.
-const min_failure_wrap_w: f32 = 220;
 
 /// The optimize class every published store build is produced in: the plugin release CI
 /// (`fizzyedit/plugin-build-action`) always builds `-Doptimize=ReleaseFast`. A property of the
@@ -2131,7 +2738,7 @@ fn drawCardControls(entry: StoreEntry) void {
         .failed => {
             if (selectedRelease(entry)) |rel| {
                 if (dvui.buttonIcon(@src(), "Retry", icons.tvg.lucide.@"rotate-ccw", .{}, .{ .stroke_color = theme.color(.err, .text) }, .{ .gravity_y = 0.5 }))
-                    startDownload(entry.id, rel, job.is_update);
+                    startDownload(entry.id, rel, .{ .is_update = job.is_update });
             }
             return;
         },
@@ -2161,13 +2768,10 @@ fn drawCardControls(entry: StoreEntry) void {
 
     // Present on disk in some form: loaded, disabled-on-disk, sideloaded local, or a broken build.
     if (loaded or disabled or entry.kind == .local or entry.kind == .disabled or broken) {
-        // Enable/disable for anything that has a build to load: running, disabled, or an
-        // unclassified directory. A *failed* build is the one case with nothing to toggle — it
-        // already tried and lost — so it gets the Retry button below instead.
-        if (loaded or disabled or untracked) {
-            var enabled = loaded;
-            if (dvui.checkbox(@src(), &enabled, "Enabled", .{ .gravity_y = 0.5 })) queueSetEnabled(entry.id, enabled);
-        }
+        // Enabled / Auto-update are not here: on a list card they live in the hover flyout at the
+        // card's right edge (`drawHoverToggles`), and on the detail page they sit beside these
+        // buttons (`drawDetailControls`). Only actions — update, repair, uninstall — are inline
+        // on a card, so a row of four controls can't crowd the text out of a narrow sidebar.
         // Replace with a host-compatible registry build, just before uninstall:
         //   * loaded & strictly newer → in-place Update (unload + reload);
         //   * broken/not loaded       → Reinstall: download this host's build fresh over the one
@@ -2180,7 +2784,7 @@ fn drawCardControls(entry: StoreEntry) void {
         if (loaded) {
             if (updateRelease(entry)) |rel| {
                 if (dvui.button(@src(), "Update", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
-                    startDownload(entry.id, rel, true);
+                    startDownload(entry.id, rel, .{ .is_update = true });
             }
         } else if (broken) {
             // A locally built plugin that lost its load has no registry release to reinstall
@@ -2192,7 +2796,7 @@ fn drawCardControls(entry: StoreEntry) void {
             }
             if (selectedRelease(entry)) |rel| {
                 if (dvui.button(@src(), "Reinstall", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
-                    startDownload(entry.id, rel, false);
+                    startDownload(entry.id, rel, .{ .is_update = false });
             } else if (!have_snapshot or untracked) {
                 // No catalog yet (offline, or the first fetch is still running), so we genuinely
                 // don't know whether a build exists — say nothing rather than claim there is none.
@@ -2215,7 +2819,7 @@ fn drawCardControls(entry: StoreEntry) void {
     // Available in the store but not installed.
     if (selectedRelease(entry)) |rel| {
         if (dvui.buttonIcon(@src(), "Install", icons.tvg.lucide.@"arrow-down-to-line", .{}, .{ .stroke_color = theme.color(.control, .text) }, .{ .gravity_y = 0.5 }))
-            startDownload(entry.id, rel, false);
+            startDownload(entry.id, rel, .{ .is_update = false });
         return;
     }
 
@@ -2250,7 +2854,7 @@ fn drawStoreCardControls(entry: StoreEntry) void {
         .failed => {
             if (selectedRelease(entry)) |rel| {
                 if (dvui.buttonIcon(@src(), "Retry", icons.tvg.lucide.@"rotate-ccw", .{}, .{ .stroke_color = theme.color(.err, .text) }, .{ .gravity_y = 0.5 }))
-                    startDownload(entry.id, rel, job.is_update);
+                    startDownload(entry.id, rel, .{ .is_update = job.is_update });
             }
             return;
         },
@@ -2259,7 +2863,7 @@ fn drawStoreCardControls(entry: StoreEntry) void {
 
     if (selectedRelease(entry)) |rel| {
         if (dvui.buttonIcon(@src(), "Install", icons.tvg.lucide.@"arrow-down-to-line", .{}, .{ .stroke_color = theme.color(.control, .text) }, .{ .gravity_y = 0.5 }))
-            startDownload(entry.id, rel, false);
+            startDownload(entry.id, rel, .{ .is_update = false });
         return;
     }
 
@@ -2338,11 +2942,15 @@ fn removePendingForId(id: []const u8) void {
         const matches = switch (action) {
             .set_enabled => |a| std.mem.eql(u8, a.id, id),
             .uninstall => |a| std.mem.eql(u8, a.id, id),
+            // A different axis entirely: enabling or uninstalling a plugin must not silently
+            // swallow a queued auto-update toggle for the same id.
+            .set_auto_update => false,
         };
         if (matches) {
             switch (action) {
                 .set_enabled => |a| fizzy.app.allocator.free(a.id),
                 .uninstall => |a| fizzy.app.allocator.free(a.id),
+                .set_auto_update => unreachable,
             }
             _ = pending_actions.orderedRemove(i);
         } else {
@@ -2363,6 +2971,19 @@ pub fn queueSetEnabled(id: []const u8, enabled: bool) void {
         return;
     };
     pending_actions.append(fizzy.app.allocator, .{ .set_enabled = .{ .id = dup, .enabled = enabled } }) catch {
+        fizzy.app.allocator.free(dup);
+        reportError("'{s}' could not be queued", .{id});
+    };
+}
+
+/// Queue an auto-update opt in/out for `id`. Deliberately does **not** clear other queued actions
+/// for the same id (see `removePendingForId`) — it changes nothing about the plugin's load state.
+fn queueSetAutoUpdate(id: []const u8, on: bool) void {
+    const dup = fizzy.app.allocator.dupe(u8, id) catch {
+        reportError("'{s}' could not be queued", .{id});
+        return;
+    };
+    pending_actions.append(fizzy.app.allocator, .{ .set_auto_update = .{ .id = dup, .on = on } }) catch {
         fizzy.app.allocator.free(dup);
         reportError("'{s}' could not be queued", .{id});
     };

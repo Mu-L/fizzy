@@ -110,7 +110,7 @@ pub fn migrateToPerPluginEnabled(allocator: std.mem.Allocator, settings_zon_path
         needs_write = true;
         const enabled = !containsId(legacy.disabled_plugins, e.id);
         const settings_text: ?[]const u8 = if (isEmptyStructLiteral(text)) null else text;
-        const new_block = SettingsPluginsZon.composePluginIdBlock(allocator, enabled, settings_text) catch |err| {
+        const new_block = SettingsPluginsZon.composePluginIdBlock(allocator, .{ .enabled = enabled }, settings_text) catch |err| {
             dvui.log.warn("settings: failed to compose R12 block for '{s}': {s}", .{ e.id, @errorName(err) });
             continue;
         };
@@ -136,7 +136,7 @@ pub fn migrateToPerPluginEnabled(allocator: std.mem.Allocator, settings_zon_path
                 // Already covered by an overlay entry? (shouldn't be — no prior block)
                 if (overlayHas(overlay.items, id)) continue;
                 needs_write = true;
-                const new_block = SettingsPluginsZon.composePluginIdBlock(allocator, true, null) catch continue;
+                const new_block = SettingsPluginsZon.composePluginIdBlock(allocator, .{ .enabled = true }, null) catch continue;
                 const id_dup = allocator.dupe(u8, id) catch {
                     allocator.free(new_block);
                     continue;

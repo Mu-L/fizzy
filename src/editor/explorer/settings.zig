@@ -149,6 +149,22 @@ pub const groups = [_]Group{
         },
     },
     .{
+        .title = "Plugins",
+        .icon = icons.tvg.lucide.package,
+        .items = &.{
+            .{
+                .label = "Plugin updates",
+                .key = "plugin_update_mode",
+                .description = "What happens when the store has newer builds of your plugins. " ++
+                    "Prompt collects them into a window shortly after launch; Silent installs " ++
+                    "them for you. Either way, a plugin can opt out on its own card in the " ++
+                    "Plugins tab.",
+                .keywords = "plugin store update upgrade automatic silent prompt background",
+                .draw = drawPluginUpdateMode,
+            },
+        },
+    },
+    .{
         .title = "Keyboard Shortcuts",
         .icon = icons.tvg.lucide.keyboard,
         .items = &.{
@@ -324,6 +340,47 @@ fn drawInputScheme() void {
         }) |choice| {
             if (dropdown.addChoiceLabel(choice[0])) {
                 fizzy.editor.settings.input_scheme = choice[1];
+                fizzy.editor.markSettingsDirty();
+                dvui.refresh(null, @src(), null);
+            }
+        }
+    }
+}
+
+// ---- Plugins ----------------------------------------------------------------------------
+
+/// The one app-wide choice of how store updates land. Per-plugin participation is a checkbox on
+/// the plugin's own card in the Plugins tab (`PluginStore`), not a row here — there is one of
+/// those per installed plugin, and the tree is fizzy's own settings.
+fn drawPluginUpdateMode() void {
+    var dropdown: dvui.DropdownWidget = undefined;
+    dropdown.init(@src(), .{}, .{
+        .expand = .horizontal,
+        .corners = dvui.CornerRect.all(1000),
+    });
+    defer dropdown.deinit();
+
+    var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .vertical,
+        .gravity_x = 1.0,
+    });
+
+    const label_text: []const u8 = switch (fizzy.editor.settings.plugin_update_mode) {
+        .prompt => "Prompt",
+        .silent => "Silent",
+    };
+    dvui.label(@src(), "{s}", .{label_text}, .{ .margin = .all(0), .padding = .all(0) });
+    dvui.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_y = 0.5 });
+
+    hbox.deinit();
+
+    if (dropdown.dropped()) {
+        inline for (.{
+            .{ "Prompt", Editor.Settings.PluginUpdateMode.prompt },
+            .{ "Silent", Editor.Settings.PluginUpdateMode.silent },
+        }) |choice| {
+            if (dropdown.addChoiceLabel(choice[0])) {
+                fizzy.editor.settings.plugin_update_mode = choice[1];
                 fizzy.editor.markSettingsDirty();
                 dvui.refresh(null, @src(), null);
             }
