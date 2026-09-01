@@ -6,10 +6,9 @@
 /// Height of the titlebar, in pixels.
 pub const titlebar_height: f32 = 26.0;
 
-/// Fixed height of the bottom infobar. Plugins draw into a fizzy-owned rect of this
-/// height (see `Infobar.draw` / `Plugin.VTable.drawDocumentInfobar`) — their content
-/// must not grow the bar.
-pub const infobar_height: f32 = 22.0;
+// The infobar's height is not a constant: it scales with the body font, and its one
+// definition — shared with plugins, which draw into a rect of that height — is
+// `sdk.infobar` (`src/sdk/infobar.zig`).
 
 /// Empty strip below the top window edge (non-macOS), above the main title row (in-window menu, etc.).
 pub const titlebar_top_buffer: f32 = 10.0;

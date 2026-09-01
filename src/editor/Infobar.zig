@@ -5,7 +5,9 @@ const icons = @import("icons");
 const assets = @import("assets");
 const update_notify = @import("../backend/update_notify.zig");
 const Dialogs = fizzy.Editor.Dialogs;
-const Constants = @import("Constants.zig");
+/// Font, height, icon side and spacing for everything in the bar — shared with the plugin that
+/// draws the right-hand slot so both halves scale with the font setting together.
+const infobar = fizzy.sdk.infobar;
 
 pub const Infobar = @This();
 
@@ -24,8 +26,8 @@ pub fn deinit() void {
 }
 
 pub fn draw(_: Infobar) !void {
-    const font = dvui.Font.theme(.body).larger(-1.0);
-    const bar_h = Constants.infobar_height;
+    const font = infobar.font();
+    const bar_h = infobar.height();
 
     // Fizzy owns height: pin min+max so plugin (or icon) content cannot grow the bar.
     // Horizontal scroll covers overflow width; vertical overflow is clipped.
@@ -71,8 +73,9 @@ pub fn draw(_: Infobar) !void {
 
         // The pixel-art F (`icon.png`, not `fox.png`), same logo the settings tree and file
         // explorer use. `.imageFile` so dvui caches the texture — `fromImageFileBytes`
-        // re-decodes every frame. Sized off the bar height so it never grows the infobar.
-        const logo_side = bar_h - 8;
+        // re-decodes every frame. Sized off the shared glyph side so it tracks the label beside
+        // it and never grows the bar.
+        const logo_side = infobar.iconSide();
         const logo: dvui.ImageSource = .{ .imageFile = .{
             .bytes = assets.files.@"icon.png",
             .name = "icon.png",
@@ -80,7 +83,7 @@ pub fn draw(_: Infobar) !void {
         } };
         {
             // Fixed slot (min == max) so the artwork fits the bar instead of dictating its
-            // height, same shape as `treeRowGlyph` but sized off `infobar_height`.
+            // height, same shape as `treeRowGlyph` but sized off `infobar.iconSide`.
             var logo_slot = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .gravity_y = 0.5,
                 .expand = .none,
@@ -122,7 +125,7 @@ pub fn draw(_: Infobar) !void {
         }
     }
 
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12 } });
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = infobar.item_spacing } });
 
     if (fizzy.editor.folder) |folder| {
         dvui.icon(
@@ -130,12 +133,18 @@ pub fn draw(_: Infobar) !void {
             "project_icon",
             icons.tvg.entypo.folder,
             .{ .stroke_color = dvui.themeGet().color(.window, .text), .fill_color = dvui.themeGet().color(.window, .text) },
-            .{ .gravity_y = 0.5 },
+            // Same square every other glyph in the bar gets, rather than the icon's own natural
+            // size — that is what keeps it aligned with the label at any font size.
+            .{
+                .gravity_y = 0.5,
+                .min_size_content = .{ .w = infobar.iconSide(), .h = infobar.iconSide() },
+                .max_size_content = .size(.{ .w = infobar.iconSide(), .h = infobar.iconSide() }),
+            },
         );
         dvui.label(@src(), "{s}", .{std.fs.path.basename(folder)}, .{ .font = font, .gravity_y = 0.5 });
     }
 
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12 } });
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = infobar.item_spacing } });
 
     // Remaining width is the plugin slot: fizzy-sized, clipped, rect handed to the owner.
     {

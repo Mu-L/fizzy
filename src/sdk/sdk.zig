@@ -41,6 +41,7 @@ pub const SaveDialogCallback = EditorAPI.SaveDialogCallback;
 pub const WorkbenchPane = @import("WorkbenchPane.zig");
 pub const WorkbenchPaneView = WorkbenchPane.WorkbenchPaneView;
 pub const pane_layout = @import("pane_layout.zig");
+pub const infobar = @import("infobar.zig");
 
 /// Host-injected runtime: `sdk.allocator()` (the persistent host allocator) and
 /// `sdk.host()` (fizzy `*Host`). The dylib entry injects these before `register`;
