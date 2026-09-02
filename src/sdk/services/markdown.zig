@@ -2,10 +2,9 @@
 //!
 //! The markdown plugin registers an instance via `host.registerService` in its own
 //! `register()`. Plugin code uses `host.getServiceTyped(markdown.Api)` to render a
-//! markdown-shaped byte slice (CommonMark+GFM via `cmark-gfm`) into the current dvui parent
-//! without importing the markdown plugin directly. Native-only — absent on web builds (see
-//! `markdown.zig`'s own doc comment: it links libc + a C library), so callers must treat a
-//! missing service as a normal, expected case and fall back to their own rendering.
+//! markdown-shaped byte slice (CommonMark+GFM via md4c) into the current dvui parent
+//! without importing the markdown plugin directly. The service is missing when the
+//! plugin is disabled, so callers treat that as a normal case and fall back.
 const std = @import("std");
 
 pub const Api = struct {

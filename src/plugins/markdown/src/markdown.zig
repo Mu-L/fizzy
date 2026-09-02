@@ -1,4 +1,4 @@
-//! cmark-gfm markdown preview (native-only — links libc + C library).
+//! Markdown preview (CommonMark+GFM via md4c / md4zig). Native and web.
 const std = @import("std");
 const dvui = @import("dvui");
 const core_dvui = @import("core").dvui;
@@ -234,7 +234,7 @@ pub const Preview = struct {
     }
 
     fn parseSync(self: *Preview, content: []const u8, gpa: std.mem.Allocator, hash: u64) void {
-        // `scanNode` needs the original source, not just the AST: cmark's text nodes have had
+        // `scanNode` needs the original source, not just the AST: text nodes have had
         // backslash escapes applied and adjacent runs merged, so `\[\[A]]` is indistinguishable
         // from `[[A]]` by then. See `md/wikilink_scan.zig`.
         if (render_ast.diag) {
@@ -275,8 +275,8 @@ pub const Preview = struct {
             .win = dvui.currentWindow(),
         };
         self.parse_job = job;
-        // `Io.concurrent` matches the editor's file-load workers. Wasm never reaches here —
-        // this plugin is native-only (cmark + libc).
+        // `Io.concurrent` matches the editor's file-load workers. Wasm has no thread
+        // pool, so this fails and we parse inline below.
         job.future = dvui.io.concurrent(ParseJob.workerMain, .{job}) catch {
             // Thread pool unavailable: parse inline rather than leave the preview empty.
             const owned = job.bytes;
