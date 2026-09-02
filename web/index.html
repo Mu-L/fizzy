@@ -136,6 +136,140 @@
         });
       }
 
+      // Markdown remote images (and SVG badges) load through the browser: Zig calls
+      // `fizzy_web_image_request`. If CORS lets us read pixels, we write RGBA back
+      // through `FizzyWebImageAlloc` / `FizzyWebImageReady` and dvui draws them. If
+      // it does not — GitHub Actions badges — we keep the `<img>` and Zig parks it
+      // over the canvas via `fizzy_web_image_place`. dvui's `web.js` only passes a
+      // `dvui` import object into `instantiateStreaming`, so we add a `fizzy`
+      // namespace on the way through — same trick as the trackpad export, inverted.
+      const utf8 = new TextDecoder();
+      let wasmInstance = null;
+      const overlayUrls = new Map();
+      const overlays = new Map();
+      const overlayRoot = document.createElement("div");
+      overlayRoot.setAttribute("aria-hidden", "true");
+      overlayRoot.style.cssText = "position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:1;";
+      document.getElementById("app-root").appendChild(overlayRoot);
+
+      const origInstantiateStreaming = WebAssembly.instantiateStreaming.bind(WebAssembly);
+      WebAssembly.instantiateStreaming = (source, imports) => {
+        imports.fizzy = {
+          fizzy_web_image_request(id, urlPtr, urlLen) {
+            const inst = wasmInstance;
+            if (!inst) return;
+            const url = utf8.decode(new Uint8Array(inst.exports.memory.buffer, urlPtr, urlLen));
+            overlayUrls.set(id, url);
+            loadImagePixels(url).then((imageData) => {
+              const bytes = new Uint8Array(
+                imageData.data.buffer,
+                imageData.data.byteOffset,
+                imageData.data.byteLength,
+              );
+              const ptr = inst.exports.FizzyWebImageAlloc(bytes.length);
+              if (!ptr) {
+                inst.exports.FizzyWebImageFailed(id);
+              } else {
+                new Uint8Array(inst.exports.memory.buffer, ptr, bytes.length).set(bytes);
+                inst.exports.FizzyWebImageReady(id, ptr, bytes.length, imageData.width, imageData.height);
+              }
+              if (dvuiApp) dvuiApp.requestRender();
+            }).catch(() => {
+              loadImageSize(url).then(({ w, h }) => {
+                inst.exports.FizzyWebImageOverlay(id, w, h);
+                if (dvuiApp) dvuiApp.requestRender();
+              }).catch(() => {
+                inst.exports.FizzyWebImageFailed(id);
+                if (dvuiApp) dvuiApp.requestRender();
+              });
+            });
+          },
+          fizzy_web_image_place(id, x, y, w, h, cx, cy, cw, ch) {
+            const url = overlayUrls.get(id);
+            if (!url) return;
+            let entry = overlays.get(id);
+            if (!entry) {
+              const img = document.createElement("img");
+              img.alt = "";
+              img.draggable = false;
+              img.src = url;
+              img.style.cssText = "position:absolute;pointer-events:none;";
+              overlayRoot.appendChild(img);
+              entry = { img };
+              overlays.set(id, entry);
+            }
+            entry.lastSeen = performance.now();
+            const img = entry.img;
+            img.style.display = "block";
+            img.style.left = x + "px";
+            img.style.top = y + "px";
+            img.style.width = w + "px";
+            img.style.height = h + "px";
+            const top = Math.max(0, cy - y);
+            const left = Math.max(0, cx - x);
+            const bottom = Math.max(0, (y + h) - (cy + ch));
+            const right = Math.max(0, (x + w) - (cx + cw));
+            img.style.clipPath = `inset(${top}px ${right}px ${bottom}px ${left}px)`;
+          },
+          fizzy_web_image_dismiss(id) {
+            overlayUrls.delete(id);
+            const entry = overlays.get(id);
+            if (!entry) return;
+            entry.img.remove();
+            overlays.delete(id);
+          },
+        };
+        return origInstantiateStreaming(source, imports).then((result) => {
+          wasmInstance = result.instance;
+          return result;
+        });
+      };
+
+      setInterval(() => {
+        const now = performance.now();
+        for (const entry of overlays.values()) {
+          if (entry.lastSeen && now - entry.lastSeen > 250) entry.img.style.display = "none";
+        }
+      }, 250);
+
+      /** Rasterize `url` the way an `<img>` would — PNG/JPEG and CORS-friendly SVG. */
+      function loadImagePixels(url) {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => {
+            const w = img.naturalWidth;
+            const h = img.naturalHeight;
+            if (!(w > 0) || !(h > 0) || w * h > 4 * 1024 * 1024) {
+              reject(new Error("empty or oversized image"));
+              return;
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0);
+            try {
+              resolve(ctx.getImageData(0, 0, w, h));
+            } catch (err) {
+              reject(err);
+            }
+          };
+          img.onerror = () => reject(new Error("image load failed"));
+          img.src = url;
+        });
+      }
+
+      /** Load without CORS so we still get intrinsic size for an overlay. */
+      function loadImageSize(url) {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+          img.onerror = () => reject(new Error("image load failed"));
+          img.src = url;
+        });
+      }
+
       // Trackpad pinch arrives as a `wheel` event with `ctrlKey=true` and `deltaMode=0`
       // (every modern browser synthesizes this). Two things to do here in the capture phase,
       // before dvui's bubble-phase listener on the canvas:

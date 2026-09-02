@@ -2,6 +2,16 @@
 //! it is pure byte inspection, so it is unit-tested from the app build rather than needing dvui.
 const std = @import("std");
 
+/// True when the URL's path ends in `.svg` (query and fragment ignored). Badge hosts
+/// usually say so — `…/badge.svg`, `…/githubbutton_sm.svg` — so the preview can skip
+/// them without fetching on platforms that cannot rasterize SVG. Extension-less URLs
+/// still go through `isSvg` once the bytes arrive.
+pub fn urlLooksLikeSvg(url: []const u8) bool {
+    const no_hash = if (std.mem.indexOfScalar(u8, url, '#')) |i| url[0..i] else url;
+    const path = if (std.mem.indexOfScalar(u8, no_hash, '?')) |i| no_hash[0..i] else no_hash;
+    return std.ascii.endsWithIgnoreCase(path, ".svg");
+}
+
 /// True for SVG, which stb_image will never decode and which READMEs are full of — every
 /// shields.io / GitHub Actions badge is one. Those are skipped entirely (see `renderImageUrl`),
 /// so this is checked *before* handing bytes to stbi and the common case costs no failed decode
@@ -33,6 +43,15 @@ test "isSvg: leading whitespace and BOM" {
 test "isSvg: after xml declaration or doctype" {
     try std.testing.expect(isSvg("<?xml version=\"1.0\"?>\n<svg width=\"10\"/>"));
     try std.testing.expect(isSvg("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\">\n<svg/>"));
+}
+
+test "urlLooksLikeSvg" {
+    try std.testing.expect(urlLooksLikeSvg("https://example.com/badge.svg"));
+    try std.testing.expect(urlLooksLikeSvg("https://example.com/badge.SVG?logo=github"));
+    try std.testing.expect(urlLooksLikeSvg("/assets/logo.svg#gh-dark"));
+    try std.testing.expect(!urlLooksLikeSvg("https://example.com/shot.png"));
+    try std.testing.expect(!urlLooksLikeSvg("https://example.com/badge.svg.png"));
+    try std.testing.expect(!urlLooksLikeSvg(""));
 }
 
 test "isSvg: not svg" {

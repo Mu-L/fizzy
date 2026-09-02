@@ -52,9 +52,15 @@ pub fn addSteps(
     // linker only emits symbols listed here, so `export fn` in Zig isn't enough on its
     // own — without this line our trackpad pinch entry point would compile cleanly but
     // be missing from `instance.exports`, and the JS bootstrap in `web/index.html`
-    // would never be able to forward pinch deltas into the canvas widget.
+    // would never be able to forward pinch deltas into the canvas widget. The image
+    // trio is the other half of that seam: JS rasterizes a remote URL and writes the
+    // pixels back through these.
     web_exe.root_module.export_symbol_names = &[_][]const u8{
         "FizzyWebTrackpadMagnification",
+        "FizzyWebImageAlloc",
+        "FizzyWebImageReady",
+        "FizzyWebImageFailed",
+        "FizzyWebImageOverlay",
     };
 
     // `icons` (pure-Zig icon data) is referenced at file scope in

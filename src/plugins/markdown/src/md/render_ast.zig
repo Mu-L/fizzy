@@ -639,32 +639,45 @@ fn preloadImageSubtree(node: ast.Node, ctx: RenderContext, arena: std.mem.Alloca
 }
 
 fn preloadSingleImage(raw_url: []const u8, ctx: RenderContext, arena: std.mem.Allocator) void {
-    const resolved = resolveImageBytes(ctx, arena, raw_url);
-    const bytes = switch (resolved) {
-        .bytes => |b| b,
+    const url = std.mem.trim(u8, raw_url, " \t\r\n");
+    if (skipImage(url, null)) return;
+    const resolved = resolveImageBytes(ctx, arena, url);
+    if (skipImage(url, resolved)) return;
+
+    const source: dvui.ImageSource = switch (resolved) {
+        .pixels => |p| .{ .pixels = .{
+            .rgba = p.rgba,
+            .width = p.width,
+            .height = p.height,
+            .invalidation = .ptr,
+        } },
+        .bytes => |b| blk: {
+            if (rasterDecodeFailed(ctx, b)) return;
+            break :blk .{ .imageFile = .{
+                .bytes = b,
+                .name = url,
+                .invalidation = .ptr,
+            } };
+        },
+        else => return,
+    };
+    const key_ptr = switch (resolved) {
+        .pixels => |p| p.rgba.ptr,
+        .bytes => |b| b.ptr,
         else => return,
     };
 
-    // Skipped at render time (see `renderImageUrl`), so there is nothing to warm.
-    if (image_format.isSvg(bytes)) return;
-    if (rasterDecodeFailed(ctx, bytes)) return;
-
-    const dvui_key = textureCacheKey(bytes);
+    const dvui_key = textureCacheKey(key_ptr);
 
     // Cache hit: texture already warm this frame, nothing to do.
     if (dvui.textureGetCached(dvui_key) != null) return;
 
     // Cache miss: decode + GPU upload now so the animation first frame is free.
-    const source: dvui.ImageSource = .{ .imageFile = .{
-        .bytes = bytes,
-        .name = raw_url,
-        .invalidation = .ptr,
-    } };
     const tex = dvui.Texture.fromImageSource(source) catch {
-        markUndecodable(ctx, bytes);
+        if (resolved == .bytes) markUndecodable(ctx, resolved.bytes);
         return;
     };
-    ctx.rs.image_sizes.put(ctx.gpa, @intFromPtr(bytes.ptr), .{
+    ctx.rs.image_sizes.put(ctx.gpa, @intFromPtr(key_ptr), .{
         .w = @floatFromInt(tex.width),
         .h = @floatFromInt(tex.height),
     }) catch {};
@@ -682,15 +695,30 @@ fn markUndecodable(ctx: RenderContext, bytes: []const u8) void {
     ctx.rs.image_decode_failed.put(ctx.gpa, @intFromPtr(bytes.ptr), {}) catch {};
 }
 
-/// The cache key dvui uses for an `imageFile` source with `.ptr` invalidation. dvui's own
-/// `hash()` calls stbi_info and then ignores the result for `.ptr`, so it's skipped entirely.
-fn textureCacheKey(bytes: []const u8) dvui.Texture.Cache.Key {
+/// The cache key dvui uses for an `imageFile` / `pixels` source with `.ptr` invalidation.
+/// dvui's own `hash()` calls stbi_info and then ignores the result for `.ptr`, so it's
+/// skipped entirely.
+fn textureCacheKey(ptr: [*]const u8) dvui.Texture.Cache.Key {
     var h = dvui.fnv.init();
-    const bp = bytes.ptr;
-    h.update(std.mem.asBytes(&bp));
+    h.update(std.mem.asBytes(&ptr));
     const it = @intFromEnum(dvui.enums.TextureInterpolation.linear);
     h.update(std.mem.asBytes(&it));
     return h.final();
+}
+
+/// Native cannot turn SVG into pixels, so a `.svg` URL is dropped before we fetch it.
+/// Web can (the browser rasterizes), so those URLs still go through `resolve`. A failed
+/// SVG — CORS, or bytes we sniffed after a native fetch of an extension-less URL — is
+/// also dropped: the alternative is the "open" fallback link, which is what a badge
+/// was drawing as in the web preview.
+fn skipImage(url: []const u8, resolved: ?ResolvedImage) bool {
+    if (image_format.urlLooksLikeSvg(url) and comptime !net_image.rasterizes_svg) return true;
+    const r = resolved orelse return false;
+    return switch (r) {
+        .bytes => |b| image_format.isSvg(b),
+        .message => image_format.urlLooksLikeSvg(url),
+        else => false,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -707,9 +735,14 @@ fn resolvedLocalImagePath(ctx: RenderContext, arena: std.mem.Allocator, src: []c
     return std.fs.path.resolve(arena, &.{ base, t }) catch null;
 }
 
-/// Encoded image bytes for one image URL, or why there aren't any (yet).
+/// Encoded image bytes or already-rasterized pixels for one image URL, or why
+/// there aren't any (yet).
 const ResolvedImage = union(enum) {
     bytes: []const u8,
+    /// Browser-decoded RGBA — web path, including SVG badges.
+    pixels: net_image.Pixels,
+    /// Browser has the image; we cannot copy pixels (CORS). Web path.
+    overlay: net_image.Overlay,
     /// Remote fetch still running — caller should draw a placeholder and come back next frame.
     pending,
     /// User-facing reason the image can't be shown.
@@ -736,6 +769,8 @@ fn resolveImageBytes(ctx: RenderContext, arena: std.mem.Allocator, raw_url: []co
             .pending => .pending,
             .failed => .{ .message = "could not fetch image" },
             .ready => |b| .{ .bytes = b },
+            .ready_pixels => |p| .{ .pixels = p },
+            .overlay => |o| .{ .overlay = o },
         };
     }
 
@@ -1133,21 +1168,12 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
     const arena = dvui.currentWindow().arena();
     const url_trim = std.mem.trim(u8, raw_url, " \t\r\n");
 
+    // Skip before the layout box exists so a dropped image leaves no vertical margin.
+    // See `skipImage` — native drops `.svg` URLs outright; web still fetches them because
+    // the browser can rasterize a badge.
+    if (skipImage(url_trim, null)) return;
     const resolved = resolveImageBytes(ctx, arena, url_trim);
-
-    // SVG is skipped outright — nothing drawn, no placeholder, no gap. dvui's `svgToTvg` covers
-    // only a small subset of SVG (no `defs`, `clipPath`, gradients, `text`/`tspan`), so anything
-    // beyond a hand-authored icon — every shields.io badge, every exported logo — converted into
-    // wrong-looking artwork plus a burst of "unrecognized element" warnings per frame. A document
-    // that silently omits them reads better than one full of mangled ones.
-    //
-    // Resolved *before* the layout box exists so a skipped image leaves no vertical margin
-    // behind. Format is sniffed from the bytes rather than the URL: badge URLs routinely have no
-    // extension at all.
-    switch (resolved) {
-        .bytes => |b| if (image_format.isSvg(b)) return,
-        else => {},
-    }
+    if (skipImage(url_trim, resolved)) return;
 
     var outer = box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
@@ -1181,15 +1207,60 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
         break :blk @min(rect_w, ctx.column_width);
     };
 
-    const bytes: []const u8 = switch (resolved) {
-        .bytes => |b| b,
+    var source: dvui.ImageSource = undefined;
+    var key_ptr: [*]const u8 = undefined;
+    var known_nat: ?dvui.Size = null;
+    switch (resolved) {
+        .pixels => |p| {
+            source = .{ .pixels = .{
+                .rgba = p.rgba,
+                .width = p.width,
+                .height = p.height,
+                .invalidation = .ptr,
+            } };
+            key_ptr = p.rgba.ptr;
+            known_nat = .{ .w = @floatFromInt(p.width), .h = @floatFromInt(p.height) };
+        },
+        .bytes => |b| {
+            if (rasterDecodeFailed(ctx, b)) {
+                renderUndecodableImage(alt, url_trim, ctx, ids);
+                return;
+            }
+            source = .{ .imageFile = .{
+                .bytes = b,
+                .name = url_trim,
+                .invalidation = .ptr,
+            } };
+            key_ptr = b.ptr;
+        },
+        .overlay => |o| {
+            const nat: dvui.Size = .{ .w = @floatFromInt(o.width), .h = @floatFromInt(o.height) };
+            const size = displaySize(nat, want, avail_w) orelse {
+                renderMarkdownImagePlaceholder("invalid image size", ids);
+                return;
+            };
+            var holder = box(@src(), .{ .dir = .horizontal }, .{
+                .min_size_content = .{ .w = size.w, .h = size.h },
+                .max_size_content = dvui.Options.MaxSize.size(.{ .w = size.w, .h = size.h }),
+                .expand = .none,
+                .gravity_x = alignGravityX(want),
+                .id_extra = ids.next(),
+            });
+            defer holder.deinit();
+            const rs = holder.data().rectScale();
+            net_image.placeOverlay(o.id, rs.r, dvui.clipGet(), rs.s);
+            renderImageCaption(alt, ctx, ids);
+            return;
+        },
         .pending => {
             renderMarkdownImagePlaceholder("loading image…", ids);
             return;
         },
         .message => |msg| {
             renderMarkdownImagePlaceholder(msg, ids);
-            // A remote image that failed to load is still worth reaching: offer the link.
+            // A remote raster that failed to load is still worth reaching. SVG never
+            // gets here — `skipImage` dropped it — so this is a PNG/JPEG the reader
+            // can open in a tab.
             if (net_image.isRemote(url_trim)) {
                 var tl = textLayout(@src(), .{}, .{
                     .expand = .horizontal,
@@ -1201,32 +1272,22 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
             }
             return;
         },
-    };
-
-    if (rasterDecodeFailed(ctx, bytes)) {
-        renderUndecodableImage(alt, url_trim, ctx, ids);
-        return;
     }
 
-    const dvui_key = textureCacheKey(bytes);
+    const dvui_key = textureCacheKey(key_ptr);
 
     // Fast path: texture already in dvui's cache from a prior visible frame.
     // Use .texture source to bypass hash()/stbi_info entirely on this frame.
-    // Slow path: texture not yet created. Use imageFile source so dvui creates it
+    // Slow path: texture not yet created. Use the original source so dvui creates it
     // lazily inside renderImage (only when the image is actually in the clip rect).
-    var source: dvui.ImageSource = .{ .imageFile = .{
-        .bytes = bytes,
-        .name = url_trim,
-        .invalidation = .ptr,
-    } };
     const nat: dvui.Size = if (dvui.textureGetCached(dvui_key)) |tex| nat: {
         source = .{ .texture = tex };
         break :nat .{ .w = @floatFromInt(tex.width), .h = @floatFromInt(tex.height) };
-    } else nat: {
-        const size_key = @intFromPtr(bytes.ptr);
+    } else if (known_nat) |n| n else nat: {
+        const size_key = @intFromPtr(key_ptr);
         break :nat ctx.rs.image_sizes.get(size_key) orelse sz: {
             const sz = dvui.imageSize(source) catch {
-                markUndecodable(ctx, bytes);
+                if (resolved == .bytes) markUndecodable(ctx, resolved.bytes);
                 renderUndecodableImage(alt, url_trim, ctx, ids);
                 return;
             };
