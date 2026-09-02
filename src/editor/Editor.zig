@@ -1710,14 +1710,12 @@ pub fn postInit(editor: *Editor) !void {
     } else {
         try image_mod.register(&editor.host);
     }
-    if (comptime builtin.target.cpu.arch != .wasm32) {
-        if (loadMarkdownFromDylibEnabled()) {
-            editor.loadMarkdownDylib(fizzy.app.root_path) catch {
-                try markdown_mod.register(&editor.host);
-            };
-        } else {
+    if (loadMarkdownFromDylibEnabled()) {
+        editor.loadMarkdownDylib(fizzy.app.root_path) catch {
             try markdown_mod.register(&editor.host);
-        }
+        };
+    } else {
+        try markdown_mod.register(&editor.host);
     }
 
     // Seed the runtime disabled / auto-update-off sets from settings before scanning, so

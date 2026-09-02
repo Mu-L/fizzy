@@ -6,6 +6,7 @@ const sdk = @import("sdk.zig");
 const workbench_plugin = plugins.workbench;
 const text_plugin = plugins.text;
 const image_plugin = plugins.image;
+const markdown_plugin = plugins.markdown;
 
 pub fn addSteps(
     b: *std.Build,
@@ -105,6 +106,11 @@ pub fn addSteps(
         .icons = icons_web,
     }, web_exe.root_module);
     _ = image_plugin.addStaticModule(b, web_target, optimize, .{
+        .dvui = dvui_web_dep.module("dvui_web"),
+        .core = core_module_web,
+        .sdk = sdk_module_web,
+    }, web_exe.root_module);
+    _ = markdown_plugin.addStaticModule(b, web_target, optimize, .{
         .dvui = dvui_web_dep.module("dvui_web"),
         .core = core_module_web,
         .sdk = sdk_module_web,
