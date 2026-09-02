@@ -16,6 +16,7 @@ const dvui = @import("dvui");
 const fizzy = @import("fizzy");
 const shim = @import("fizzy_shim.zig");
 const TextEntryWidget = @import("text").TextEntryWidget;
+const sdk = @import("fizzy_sdk");
 
 test "shim brings up a dvui.testing window with usable fizzy globals" {
     var ctx = try shim.init(std.testing.allocator);
@@ -1248,6 +1249,124 @@ test "markdown preview: scrolling up does not lay blocks out at the previous fra
             prev = cur;
         }
     }
+}
+
+// Syntax highlighting in a fenced code block, exercised for real rather than only compiled.
+//
+// The markdown plugin bundles no grammars: it maps the fence's language tag to an extension and
+// asks the host which plugin claims it. So the interesting behaviour only happens when a language
+// provider is registered, which is what this sets up — a real tree-sitter grammar (already linked
+// into this binary through the text module) and real queries, standing in for the external `zig`
+// language plugin the app would use.
+//
+// The height assertion is the load-bearing one. Highlighting is allowed to change *colour* and
+// nothing else: a block's height feeds the height table, the anchor and the scroll total, so a
+// highlighted fence that measured differently from a plain one would be able to move the reader.
+// Emitting the same text in the same font as several styled runs instead of one must be invisible
+// to the layout.
+extern fn tree_sitter_zig() callconv(.c) *dvui.c.TSLanguage;
+const ts_zig_queries = @embedFile("ts_zig_queries");
+
+const md_code_sample =
+    \\# Code
+    \\
+    \\Some prose before the fence so the block is not the first thing in the document.
+    \\
+    \\```zig
+    \\const std = @import("std");
+    \\
+    \\pub fn main() !void {
+    \\    var total: usize = 0;
+    \\    for (0..10) |i| total += i;
+    \\    std.debug.print("total {d}\\n", .{total});
+    \\}
+    \\```
+    \\
+    \\Some prose after it as well, so the fence has a neighbour on both sides.
+    \\
+;
+
+fn mdZigHighlight(_: *anyopaque, ext: []const u8) ?sdk.language.TreeSitterHighlight {
+    if (!std.mem.eql(u8, ext, ".zig")) return null;
+    return .{
+        .language = @ptrCast(tree_sitter_zig()),
+        .queries = ts_zig_queries,
+        .highlights = &md_zig_styles,
+    };
+}
+
+const md_zig_styles = [_]sdk.language.HighlightStyle{
+    .{ .name = "comment", .opts = .{ .color_text = .fromHex("6A9955") } },
+    .{ .name = "keyword", .opts = .{ .color_text = .fromHex("569CD6") } },
+    .{ .name = "function", .opts = .{ .color_text = .fromHex("DCDCAA") } },
+    .{ .name = "type", .opts = .{ .color_text = .fromHex("4EC9B0") } },
+    .{ .name = "string", .opts = .{ .color_text = .fromHex("CE9178") } },
+};
+
+const md_zig_ls_vtable: sdk.LanguageSupport.VTable = .{ .treeSitterHighlight = mdZigHighlight };
+
+// `Host.treeSitterHighlightFor` skips any provider with no owner (it needs somewhere to get the
+// `state` pointer every hook takes), so the stand-in language plugin needs a `Plugin` even though
+// this one holds no state of its own.
+var md_zig_plugin_state: u8 = 0;
+const md_zig_plugin_vtable: sdk.Plugin.VTable = .{};
+var md_zig_plugin: sdk.Plugin = .{
+    .state = @ptrCast(&md_zig_plugin_state),
+    .vtable = &md_zig_plugin_vtable,
+    .id = "test_zig_lang",
+    .display_name = "Zig (test)",
+};
+
+test "markdown preview: a code fence is highlighted without changing its height" {
+    const gpa = std.testing.allocator;
+    md_doc = md_code_sample;
+
+    // Plain first: no host, so `drawHighlightedCode` bails and the fence is plain monospace.
+    const plain_h, const plain_bytes = blk: {
+        var t = try dvui.testing.init(.{ .allocator = gpa, .window_size = .{ .w = 700, .h = 700 } });
+        defer t.deinit();
+        md_preview = .{};
+        defer md_preview.deinit();
+        md_render_ast.highlight_host = null;
+        try markdownSettle();
+        break :blk .{ md_preview.scroll.virtual_size.h, md_render_ast.stats.add_text_bytes };
+    };
+
+    // Now with a language provider registered, which is what makes the fence highlight.
+    var host: sdk.Host = .init(gpa);
+    defer host.deinit();
+    try host.registerLanguageSupport(.{
+        .id = "test-zig",
+        .vtable = &md_zig_ls_vtable,
+        .owner = &md_zig_plugin,
+    });
+
+    const lit_h, const lit_runs = blk: {
+        var t = try dvui.testing.init(.{ .allocator = gpa, .window_size = .{ .w = 700, .h = 700 } });
+        defer t.deinit();
+        md_preview = .{};
+        defer md_preview.deinit();
+        md_render_ast.highlight_host = &host;
+        defer md_render_ast.highlight_host = null;
+        try markdownSettle();
+        break :blk .{ md_preview.scroll.virtual_size.h, md_render_ast.stats.add_text_calls };
+    };
+
+    // Anti-vacuity: the highlighted pass must have split the fence into several styled runs. If
+    // the grammar or queries ever stop resolving, this fails instead of the test quietly
+    // asserting that plain text equals plain text.
+    if (lit_runs < 6) {
+        std.debug.print(
+            "\nonly {d} addText call(s) with a language provider registered — the fence was not " ++
+                "highlighted, so this test proves nothing\n",
+            .{lit_runs},
+        );
+        return error.CodeFenceNotHighlighted;
+    }
+    try std.testing.expect(plain_bytes > 0);
+
+    // ...and colouring it must not have moved anything.
+    try std.testing.expectApproxEqAbs(plain_h, lit_h, 0.5);
 }
 
 // The workflow this preview actually exists for: typing in the editor with the preview beside it.

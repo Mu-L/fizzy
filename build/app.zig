@@ -395,6 +395,10 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         // never-blank visible-range guarantee. std-only by design (see block_heights.zig) so
         // the rules the preview's scroll stability rests on are testable without a Window.
         .{ "fizzy-md-block-heights-tests", "src/plugins/markdown/src/md/block_heights.zig" },
+        // Fence language tag → file extension, which is the whole of what the markdown plugin
+        // knows about languages: the grammar itself comes from whichever plugin claims that
+        // extension. std-only, so the table is testable without a Window.
+        .{ "fizzy-md-code-language-tests", "src/plugins/markdown/src/md/code_language.zig" },
         // Content-swap reveal phase machine. std-only by design (see reveal.zig) — the dvui
         // half is the thin wrapper in core/dvui.zig.
         .{ "fizzy-reveal-tests", "src/core/reveal.zig" },
@@ -567,6 +571,15 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // laid out an image block — the one block kind whose height nothing in the source predicts
     // and which rescales with the pane right up until the pane is wider than the image.
     integration_module.addAnonymousImport("markdown_sample_images", .{ .root_source_file = b.path("tests/data/markdown_sample_images.md") });
+    // A real tree-sitter grammar + queries, so the markdown code-fence highlighting path can be
+    // executed rather than only compiled. The grammar itself is already linked into this binary
+    // through the text module; the queries come from dvui's examples rather than a vendored copy,
+    // exactly as `bench-text` takes them. In the app these arrive from the external `zig`
+    // language plugin — what is under test is markdown's use of whatever the host hands back.
+    integration_module.addAnonymousImport("ts_zig_queries", .{
+        .root_source_file = dvui_testing_dep.path("src/Examples/tree_sitter_zig_queries.scm"),
+    });
+    integration_module.addImport("fizzy_sdk", sdk_module_test);
 
     const integration_tests = b.addTest(.{
         .name = "fizzy-integration-tests",

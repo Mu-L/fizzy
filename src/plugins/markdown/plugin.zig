@@ -68,6 +68,10 @@ const markdown_service_vtable: sdk.services.markdown.Api.VTable = .{
 
 pub fn register(host: *sdk.Host) !void {
     render_ast.initDiagFromEnv();
+    // Code fences borrow their highlighting from whichever plugin claims the fence's language,
+    // looked up on this host. Handed over explicitly rather than read from `sdk.host()`, which is
+    // only valid once the plugin runtime has been injected — see `render_ast.highlight_host`.
+    render_ast.highlight_host = host;
     plugin.state = @ptrCast(&plugin_state);
     plugin_state.loadSettings(host);
     try host.registerPlugin(&plugin);

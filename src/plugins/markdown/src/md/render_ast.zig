@@ -12,6 +12,7 @@ const image_format = @import("image_format.zig");
 const url_join = @import("url_join.zig");
 const wikilink_scan = @import("wikilink_scan.zig");
 const bh = @import("block_heights.zig");
+const code_language = @import("code_language.zig");
 
 const WikilinkApi = sdk.services.wikilink.Api;
 
@@ -2024,6 +2025,118 @@ fn renderTopLevel(doc_node: md.Node, ids: *IdGen, ctx: RenderContext) void {
     flushSkip(&skip_run_h, skip_run_id, skip_run_n);
 }
 
+
+/// Draw `code` into `tl` with syntax highlighting, or return false to say "draw it yourself".
+///
+/// The markdown plugin bundles no grammars. It asks the host which plugin claims the fence's
+/// language and borrows that plugin's grammar, queries and styles — so ```zig highlights exactly
+/// when a plugin providing zig support is installed, and stops when it is uninstalled, with no
+/// special-casing here. This is the same registry the text editor and its hover tooltips read
+/// (`Host.treeSitterHighlightFor`), so a code fence and the editor agree on what a keyword looks
+/// like without either knowing about the other.
+///
+/// Only *colour* is decided here, never geometry: every run is emitted into the same TextLayout
+/// in the same mono font at the same size, so a highlighted block occupies exactly what an
+/// unhighlighted one would. That is deliberate — block heights feed the height table, the anchor
+/// and the scroll total, and highlighting must not be able to move the reader.
+///
+/// False on every failure (no tag, no plugin for it, tree-sitter unavailable, a query that will
+/// not compile), which the caller turns into plain monospace text.
+fn drawHighlightedCode(tl: *dvui.TextLayoutWidget, code: []const u8, info: []const u8, mono: dvui.Options) bool {
+    if (!dvui.useTreeSitter) return false;
+    if (code.len == 0) return false;
+    const ext = code_language.extensionForTag(info) orelse return false;
+    const h = highlight_host orelse return false;
+    const ts = h.treeSitterHighlightFor(ext) orelse return false;
+
+    const parser = dvui.c.ts_parser_new() orelse return false;
+    defer dvui.c.ts_parser_delete(parser);
+    if (!dvui.c.ts_parser_set_language(parser, @ptrCast(@alignCast(ts.language)))) return false;
+    const tree = dvui.c.ts_parser_parse_string(parser, null, code.ptr, @intCast(code.len)) orelse return false;
+    defer dvui.c.ts_tree_delete(tree);
+
+    const query = codeQueryFor(ts) orelse return false;
+    const cursor = dvui.c.ts_query_cursor_new() orelse return false;
+    defer dvui.c.ts_query_cursor_delete(cursor);
+    // Same unbounded-growth pathology the text editor caps for; a fence is short, but the
+    // cursor's default is no cap at all, so match every other call site.
+    dvui.c.ts_query_cursor_set_match_limit(cursor, code_match_limit);
+    dvui.c.ts_query_cursor_exec(cursor, query, dvui.c.ts_tree_root_node(tree));
+
+    var match: dvui.c.TSQueryMatch = undefined;
+    var capture_index: u32 = undefined;
+    var start: usize = 0;
+    while (dvui.c.ts_query_cursor_next_capture(cursor, &match, &capture_index)) {
+        if (capture_index >= match.capture_count) continue;
+        const capture = match.captures[capture_index];
+        const nstart: usize = @intCast(dvui.c.ts_node_start_byte(capture.node));
+        const nend: usize = @intCast(dvui.c.ts_node_end_byte(capture.node));
+        if (nend > code.len or nstart > nend) continue;
+        if (nstart < start) continue; // captures overlap; the outermost one already drew this
+        if (start < nstart) addText(tl, code[start..nstart], mono);
+
+        var name_len: u32 = 0;
+        const name_ptr = dvui.c.ts_query_capture_name_for_id(query, capture.index, &name_len);
+        var opts = mono;
+        if (name_ptr) |np| {
+            const capture_name = np[0..name_len];
+            // Last match wins: the styles are ordered general-to-specific, so walking backwards
+            // lets `@keyword.return` beat `@keyword` without the table needing to be sorted.
+            for (0..ts.highlights.len) |i| {
+                const sh = ts.highlights[ts.highlights.len - i - 1];
+                if (std.mem.startsWith(u8, capture_name, sh.name)) {
+                    opts = mono.override(sh.opts);
+                    break;
+                }
+            }
+        }
+        addText(tl, code[nstart..nend], opts);
+        start = nend;
+    }
+    if (start < code.len) addText(tl, code[start..], mono);
+    return true;
+}
+
+/// See `TextEntryWidget.tree_sitter_match_limit` in the text plugin — same reasoning.
+const code_match_limit: u32 = 64;
+
+/// The host to ask for code-fence highlighting, or null when there is nobody to ask.
+///
+/// Not `sdk.host()`: that returns a `*Host` which is `undefined` until the host injects the
+/// plugin runtime (`sdk.runtime.installRuntime`, called on the dylib/built-in load path), so
+/// reading it anywhere the renderer is used as a plain module — every test in
+/// `tests/integration.zig` — dereferences garbage. Set from `plugin.register`, which is exactly
+/// the moment a host exists; left null everywhere else, where highlighting simply falls back to
+/// plain monospace.
+///
+/// Public and settable so a test can supply a host with a language provider registered and
+/// exercise the highlighting path directly.
+pub var highlight_host: ?*sdk.Host = null;
+
+/// Compiled queries, cached on the grammar they were compiled for.
+///
+/// `ts_query_new` parses the whole query source (~290 lines for zig.scm), which is cheap once and
+/// ruinous per frame — and a markdown preview redraws its visible code blocks every frame it is
+/// on screen. The text plugin learned this the same way when hover tooltips started staying open.
+/// One entry is enough: a document's fences are overwhelmingly one language.
+var code_query_cache: struct { language: ?*anyopaque = null, query: ?*dvui.c.TSQuery = null } = .{};
+
+fn codeQueryFor(ts: sdk.TreeSitterHighlight) ?*dvui.c.TSQuery {
+    if (code_query_cache.language == ts.language) return code_query_cache.query;
+    if (code_query_cache.query) |q| dvui.c.ts_query_delete(q);
+    var error_offset: u32 = undefined;
+    var error_type: dvui.c.TSQueryError = undefined;
+    const query = dvui.c.ts_query_new(
+        @ptrCast(@alignCast(ts.language)),
+        ts.queries.ptr,
+        @intCast(ts.queries.len),
+        &error_offset,
+        &error_type,
+    );
+    code_query_cache = .{ .language = ts.language, .query = query };
+    return query;
+}
+
 /// Font metrics for `block_heights.zig`, which is deliberately dvui-free and so cannot read the
 /// theme itself.
 ///
@@ -2363,7 +2476,8 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 .id_extra = ids.next(),
             });
             defer tl_c.deinit();
-            addText(tl_c, code, .{ .font = dvui.Font.theme(.mono) });
+            const mono: dvui.Options = .{ .font = dvui.Font.theme(.mono) };
+            if (!drawHighlightedCode(tl_c, code, info, mono)) addText(tl_c, code, mono);
         },
         md.c.CMARK_NODE_HTML_BLOCK => {
             // `<p align="center"><img …></p>` is how most READMEs carry their hero image; render
