@@ -22,6 +22,12 @@ pub fn deinitShared() void {
     net_image.deinit();
 }
 
+/// Web only — see `net_image.beginOverlayFrame`. Called once per canvas frame from
+/// `Editor.tick` so leaving a README and sleeping the window stay distinct.
+pub fn beginWebOverlayFrame() void {
+    net_image.beginOverlayFrame();
+}
+
 /// Persistent preview state: caches parsed AST + precomputed render data keyed by content hash.
 pub const Preview = struct {
     scroll: dvui.ScrollInfo = .{},
@@ -444,7 +450,10 @@ pub fn drawPreview(
 
     var scroll = dvui.scrollArea(@src(), .{
         .scroll_info = &state.scroll,
-        .horizontal_bar = .auto,
+        // Overlay on both axes: a packed horizontal bar shrinks `viewport.h`, which changes
+        // `max_scroll` and makes the line-anchor fight the new total. Vertical was already
+        // overlay for the same reason.
+        .horizontal_bar = .auto_overlay,
         .vertical_bar = .auto_overlay,
         // Deliberately not `lock_visible`. dvui's own anchoring pins to a *widget id*, and if
         // that id is missing for one frame — which virtualized content cannot promise after a

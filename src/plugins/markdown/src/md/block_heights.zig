@@ -361,6 +361,18 @@ pub const Table = struct {
         return .estimated;
     }
 
+    /// True while any block has never been laid out. Used to refuse an `at_end` latch: a
+    /// still-estimated document's `max_scroll` is the scroll container's current (low) total,
+    /// not the end of the document, and treating "scrolled to that total" as "parked at the
+    /// end" is what snapped the preview back every other frame while lists/images settled.
+    pub fn hasEstimated(self: *const Table) bool {
+        if (self.heights.items.len < self.extents.items.len) return true;
+        for (self.heights.items) |e| {
+            if (e.state == .estimated) return true;
+        }
+        return false;
+    }
+
     /// Whether this block can be positioned at all — it has been laid out, or it has enough source
     /// to guess from. A block that is neither (cmark reported no span for it) has no height and no
     /// way to get one except being drawn, so the renderer must draw it unconditionally. That is
@@ -557,7 +569,7 @@ pub const Table = struct {
     ) ?Anchor {
         const n = self.len();
         if (n == 0) return null;
-        if (max_scroll > 0 and viewport_y >= max_scroll - end_epsilon) {
+        if (max_scroll > 0 and viewport_y >= max_scroll - end_epsilon and !self.hasEstimated()) {
             return .{ .line = 0, .offset_px = 0, .at_end = true };
         }
 
@@ -1332,6 +1344,19 @@ test "an anchor survives a reparse that shifts block indices" {
     // The same source line now lives at index 12 — and that is where the reader ends up.
     try testing.expectEqual(@as(?usize, 12), t2.blockForLine(100));
     try testing.expectApproxEqAbs(t2.yAt(12, tm, 600, 0), t2.resolveAnchor(a, tm, 600, 0, 10_000), 0.001);
+}
+
+test "a still-estimated document is not parked at the end" {
+    const gpa = testing.allocator;
+    var t = testTable(gpa, 20, 10);
+    defer t.deinit(gpa);
+
+    // `max_scroll` here is whatever the scroll area currently believes — on a warm-up
+    // frame that is the estimated total, which is well short of the real document.
+    // Latch-at-end against that number is what threw the reader to a previous offset
+    // (or to a later, larger total) on the next frame.
+    const a = t.captureAnchor(200, tm, 600, 0, 200).?;
+    try testing.expect(!a.at_end);
 }
 
 test "parked at the end stays at the end as the document grows" {

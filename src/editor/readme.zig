@@ -3,10 +3,14 @@
 //! Fetches a plugin's `README.md` from its repository over HTTPS on a worker thread, then
 //! renders it read-only via the bundled markdown plugin (`drawPreview`).
 const std = @import("std");
+const builtin = @import("builtin");
 const dvui = @import("dvui");
 const fizzy = @import("../fizzy.zig");
 const markdown = @import("markdown");
 const repo_asset = @import("plugin_repo_asset.zig");
+
+const is_wasm = builtin.target.cpu.arch == .wasm32;
+const web_fetch = if (is_wasm) @import("../backend/web_fetch.zig") else struct {};
 
 const readme_filename = "README.md";
 
@@ -34,7 +38,11 @@ const Readme = struct {
     /// images (`![shot](assets/shot.png)`) against it, which for the fetched case means pulling
     /// them from the same repo over HTTPS.
     image_base: ?[]u8 = null,
-    thread: ?std.Thread = null,
+    thread: if (is_wasm) void else ?std.Thread = if (is_wasm) {} else null,
+    /// Web: GitHub raw candidates we walk via `web_fetch`. Native uses the worker.
+    wasm_urls: [3][]u8 = .{ &.{}, &.{}, &.{} },
+    wasm_url_len: usize = 0,
+    wasm_url_i: usize = 0,
     preview: markdown.Preview = .{},
 
     fn statusValue(self: *Readme) Status {
@@ -73,6 +81,10 @@ pub fn select(id: []const u8, repo: []const u8, subpath: []const u8) void {
     };
     const self = &current.?;
     self.status.store(@intFromEnum(Status.fetching), .release);
+    if (comptime is_wasm) {
+        fillWasmCandidates(self);
+        return;
+    }
     self.thread = std.Thread.spawn(.{}, worker, .{self}) catch {
         self.status.store(@intFromEnum(Status.failed), .release);
         return;
@@ -100,13 +112,16 @@ pub fn clear() void {
 fn clearCurrent() void {
     const gpa = repo_asset.gpa();
     if (current) |*c| {
-        if (c.thread) |t| {
-            t.join();
-            c.thread = null;
+        if (comptime !is_wasm) {
+            if (c.thread) |t| {
+                t.join();
+                c.thread = null;
+            }
         }
         c.preview.deinit();
         if (c.bytes) |b| gpa.free(b);
         if (c.image_base) |b| gpa.free(b);
+        for (c.wasm_urls[0..c.wasm_url_len]) |u| gpa.free(u);
         gpa.free(c.id);
         gpa.free(c.repo);
         gpa.free(c.subpath);
@@ -114,9 +129,54 @@ fn clearCurrent() void {
     current = null;
 }
 
+/// Advance the in-flight README GET. Wasm only; native is a no-op (the worker does this).
+pub fn pump() void {
+    if (comptime !is_wasm) return;
+    const c = if (current) |*cur| cur else return;
+    if (c.statusValue() != .fetching) return;
+    if (c.wasm_url_i >= c.wasm_url_len) {
+        c.status.store(@intFromEnum(Status.not_found), .release);
+        return;
+    }
+    switch (web_fetch.request(repo_asset.gpa(), c.wasm_urls[c.wasm_url_i])) {
+        .pending => {},
+        .failed => {
+            c.wasm_url_i += 1;
+            if (c.wasm_url_i >= c.wasm_url_len)
+                c.status.store(@intFromEnum(Status.not_found), .release);
+        },
+        .ready => |body| {
+            const gpa = repo_asset.gpa();
+            c.bytes = gpa.dupe(u8, body) catch {
+                c.status.store(@intFromEnum(Status.failed), .release);
+                return;
+            };
+            c.image_base = gpa.dupe(u8, c.wasm_urls[c.wasm_url_i]) catch null;
+            c.status.store(@intFromEnum(Status.ready), .release);
+        },
+    }
+}
+
+fn fillWasmCandidates(self: *Readme) void {
+    var url_buf: [3][256]u8 = undefined;
+    const candidates = repo_asset.rawGithubUrls(&url_buf, self.repo, self.subpath, readme_filename) orelse {
+        self.status.store(@intFromEnum(Status.not_found), .release);
+        return;
+    };
+    const gpa = repo_asset.gpa();
+    var n: usize = 0;
+    for (candidates.slice()) |url| {
+        self.wasm_urls[n] = gpa.dupe(u8, url) catch break;
+        n += 1;
+    }
+    self.wasm_url_len = n;
+    if (n == 0) self.status.store(@intFromEnum(Status.not_found), .release);
+}
+
 /// Render the current selection's README into the current dvui parent. Shows placeholder text
 /// while fetching / on failure. Safe to call every frame.
 pub fn draw() void {
+    pump();
     const c = if (current) |*cur| cur else {
         dvui.labelNoFmt(@src(), "Select a plugin to read its README.", .{}, .{
             .expand = .both,
@@ -155,6 +215,7 @@ pub fn draw() void {
                 .io = c.io,
                 .background = false,
                 .image_base_dir = c.image_base orelse ".",
+                .id_extra = std.hash.Wyhash.hash(0, c.id),
             });
         },
     }

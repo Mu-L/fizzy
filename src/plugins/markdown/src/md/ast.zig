@@ -19,6 +19,9 @@
 //!   * **Text coalescing.** md4c splits a run at every escape and entity. They
 //!     are merged back into one `.text` node, so a paragraph of prose is one
 //!     node rather than a dozen.
+//!   * **Tight list items.** md4c puts a tight item's inlines directly under
+//!     the item (cmark wrapped them in a paragraph). The renderer only draws
+//!     blocks under an item, so those inlines are wrapped here.
 
 const std = @import("std");
 const md4zig = @import("md4zig");
@@ -400,8 +403,75 @@ const Builder = struct {
                 self.in_thead -= 1;
                 return;
             },
+            .li => {
+                try self.wrapTightItemInlines(self.current);
+                self.current = self.current.parent orelse self.current;
+            },
             else => self.current = self.current.parent orelse self.current,
         }
+    }
+
+    fn isInline(t: NodeType) bool {
+        return switch (t) {
+            .text, .softbreak, .linebreak, .code, .html_inline, .emph, .strong, .strikethrough, .link, .image, .footnote_reference => true,
+            else => false,
+        };
+    }
+
+    fn appendChild(parent: *Data, child: *Data) void {
+        child.parent = parent;
+        child.next = null;
+        if (parent.last_child) |last| {
+            last.next = child;
+        } else {
+            parent.first_child = child;
+        }
+        parent.last_child = child;
+    }
+
+    fn coverFromChildren(node: *Data) void {
+        var c = node.first_child;
+        while (c) |ch| : (c = ch.next) {
+            if (!ch.hasSpan()) continue;
+            if (!node.hasSpan()) {
+                node.start = ch.start;
+                node.end = ch.end;
+            } else {
+                node.start = @min(node.start, ch.start);
+                node.end = @max(node.end, ch.end);
+            }
+        }
+    }
+
+    /// md4c emits no `p` for a tight list item. Consecutive inlines become a
+    /// paragraph so the renderer (which only draws blocks under an item) sees
+    /// the same shape cmark used to give us. Nested lists and other blocks stay
+    /// siblings of that paragraph.
+    fn wrapTightItemInlines(self: *Builder, item: *Data) Error!void {
+        var child = item.first_child;
+        item.first_child = null;
+        item.last_child = null;
+
+        var para: ?*Data = null;
+        while (child) |c| {
+            const next = c.next;
+            c.next = null;
+            if (isInline(c.type)) {
+                if (para == null) {
+                    const p = try self.arena.create(Data);
+                    p.* = .{ .type = .paragraph, .parent = item };
+                    appendChild(item, p);
+                    para = p;
+                }
+                appendChild(para.?, c);
+            } else {
+                if (para) |p| coverFromChildren(p);
+                para = null;
+                appendChild(item, c);
+            }
+            child = next;
+        }
+        if (para) |p| coverFromChildren(p);
     }
 
     pub fn enterSpan(self: *Builder, span: md4zig.SpanInfo) Error!void {
@@ -560,6 +630,24 @@ test "the thead wrapper is flattened onto the header row" {
     );
 }
 
+test "tight list items wrap their inlines in a paragraph" {
+    // md4c does not emit a `p` for a tight item (cmark did). The renderer only
+    // draws blocks under an item, so the builder has to restore that shape.
+    try expectTree("- a\n- b\n", "document{list{item{paragraph{text[a]}}item{paragraph{text[b]}}}}");
+    try expectTree("- hello *world*", "document{list{item{paragraph{text[hello ]emph{text[world]}}}}}");
+}
+
+test "a loose list is already wrapped, so wrapping is a no-op" {
+    try expectTree("- a\n\n- b\n", "document{list{item{paragraph{text[a]}}item{paragraph{text[b]}}}}");
+}
+
+test "a nested tight list stays a sibling of the item's paragraph" {
+    try expectTree(
+        "- outer\n  - inner\n",
+        "document{list{item{paragraph{text[outer]}list{item{paragraph{text[inner]}}}}}}",
+    );
+}
+
 test "task list items carry their checkbox" {
     const gpa = testing.allocator;
     const tree = parse(gpa, "- [x] done\n- [ ] todo\n") orelse return error.ParseFailed;
@@ -569,6 +657,8 @@ test "task list items carry their checkbox" {
     const second = first.nextSibling().?;
     try testing.expect(first.isTaskListItem() and first.taskListItemChecked());
     try testing.expect(second.isTaskListItem() and !second.taskListItemChecked());
+    try testing.expectEqualStrings("done", first.firstChild().?.firstChild().?.literal().?);
+    try testing.expectEqualStrings("todo", second.firstChild().?.firstChild().?.literal().?);
 }
 
 test "source spans cover the bytes a node came from, escapes included" {

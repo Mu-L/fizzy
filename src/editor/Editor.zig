@@ -3030,6 +3030,11 @@ const handle_size = 10;
 const handle_dist = 60;
 
 pub fn tick(editor: *Editor) !dvui.App.Result {
+    // CORS-fail README images are `<img>` overlays, not canvas pixels. JS hides any
+    // overlay this frame doesn't place — but only after a real frame, so sleeping the
+    // window (mouse left) does not blank them. See `net_image.beginOverlayFrame`.
+    if (comptime builtin.target.cpu.arch == .wasm32) markdown_mod.beginWebOverlayFrame();
+
     // Folder lifetime, before anything draws: free the strings earlier frames retired, then
     // apply a close queued from last frame's draw. `EditorAPI.folder` hands out the pointer
     // itself, so both have to land where no draw can be holding it. See `folder_retired`.

@@ -5,6 +5,9 @@
 //! `tick` (it mutates the Host registries + dvui keybinds). The registry index is fetched +
 //! parsed by the backend (`store.Catalog`); compatibility is matched on the host ABI
 //! fingerprint + arch.
+//!
+//! The web build is browse-only: the catalog and READMEs load through the browser's `fetch`,
+//! but there are no wasm plugin binaries, so every card reads "no compatible build".
 const std = @import("std");
 const builtin = @import("builtin");
 const dvui = @import("dvui");
@@ -22,26 +25,14 @@ const compat = store.compat;
 const version = sdk.version;
 const dylib = sdk.dylib;
 
-/// README rendering depends on the in-tree markdown engine, which links cmark (libc) and is
-/// native-only. The store never runs on wasm (`register` bails on wasm32), so the web build gets
-/// a no-op stub and the `readme`/`markdown` modules are only resolved on native.
-const Readme = if (builtin.target.cpu.arch == .wasm32) struct {
-    pub fn select(_: []const u8, _: []const u8, _: []const u8) void {}
-    pub fn selectedId() ?[]const u8 {
-        return null;
-    }
-    pub fn draw() void {}
-    pub fn clear() void {}
-    pub fn deinit() void {}
-} else @import("readme.zig");
-
-const StoreIcon = if (builtin.target.cpu.arch == .wasm32) struct {
-    pub fn request(_: []const u8, _: []const u8, _: []const u8) void {}
-    pub fn draw(_: []const u8, _: f32) bool {
-        return false;
-    }
-    pub fn deinit() void {}
-} else @import("store_icon.zig");
+const Readme = @import("readme.zig");
+const StoreIcon = @import("store_icon.zig");
+const web_fetch = if (builtin.target.cpu.arch == .wasm32)
+    @import("../backend/web_fetch.zig")
+else
+    struct {
+        pub fn deinit() void {}
+    };
 
 pub const view_id = "fizzy.store";
 /// Center provider that renders the selected plugin's README. Mirrors the way the workbench
@@ -328,11 +319,10 @@ fn probeOnDiskInfo() void {
 /// have changed (see `disk_scan_dirty`).
 fn refreshLocalInfo() void {
     refreshDiskScan();
-    probeOnDiskInfo();
+    if (comptime builtin.target.cpu.arch != .wasm32) probeOnDiskInfo();
 }
 
 pub fn register(host: *sdk.Host) !void {
-    if (comptime builtin.target.cpu.arch == .wasm32) return; // no dylib loading on web
     const url = resolveRegistryUrl();
     const fp_hex = try std.fmt.allocPrint(fizzy.app.allocator, "0x{x}", .{dylib.abi_fingerprint});
     defer fizzy.app.allocator.free(fp_hex);
@@ -723,6 +713,7 @@ fn drawChangelogPlaceholder() void {
 /// testing) — `store.Catalog.init` appends `/summary.json` and `/<abi_fingerprint>/releases.json`
 /// to whatever this returns. Owned for the process lifetime (freed in `deinit`).
 fn resolveRegistryUrl() []const u8 {
+    if (comptime builtin.target.cpu.arch == .wasm32) return default_registry_url;
     if (std.process.Environ.getAlloc(fizzy.processEnviron(), fizzy.app.allocator, "FIZZY_PLUGIN_REGISTRY_URL")) |override| {
         if (override.len > 0) {
             registry_url_owned = override;
@@ -734,7 +725,14 @@ fn resolveRegistryUrl() []const u8 {
 }
 
 pub fn deinit() void {
-    if (comptime builtin.target.cpu.arch == .wasm32) return;
+    if (comptime builtin.target.cpu.arch == .wasm32) {
+        Readme.deinit();
+        StoreIcon.deinit();
+        if (catalog) |*c| c.deinit();
+        catalog = null;
+        web_fetch.deinit();
+        return;
+    }
     // `freeJob` cancels and awaits each job's download worker before freeing it, so quitting
     // mid-install can't leave a worker writing into a freed `Job` (see `Job.tasks`).
     for (jobs.values()) |job| freeJob(job);
@@ -1150,7 +1148,13 @@ fn offerPendingUpdates() void {
 /// before the Host-registry iterations, so a freshly-registered or unloaded plugin never
 /// mutates a list mid-iteration.
 pub fn tick() void {
-    if (comptime builtin.target.cpu.arch == .wasm32) return;
+    if (comptime builtin.target.cpu.arch == .wasm32) {
+        if (catalog) |*c| c.pump(web_fetch);
+        Readme.pump();
+        StoreIcon.pump();
+        syncReadmeCenter();
+        return;
+    }
 
     syncReadmeCenter();
     autoUpdateTick();
@@ -1316,6 +1320,7 @@ fn entryFor(id: []const u8, snapshot: ?store.Catalog.Snapshot) ?StoreEntry {
 /// missing/unreadable file isn't retried every frame. `manifest_cache` is cleared by
 /// `refreshDiskScan` (install/uninstall/update/Refresh) so stale values can't stick.
 fn probedManifestFor(id: []const u8) PluginLoader.ProbedManifest {
+    if (comptime builtin.target.cpu.arch == .wasm32) return .{};
     if (manifest_cache.get(id)) |cached| return cached;
 
     const a = fizzy.app.allocator;
@@ -1435,6 +1440,7 @@ fn removeJob(id: []const u8) void {
 /// Kick off a download for `id`'s selected release on a worker task. UI-thread only (`draw`), like
 /// every other `Job.tasks` operation.
 fn startDownload(id: []const u8, release: store.ShardRelease, opts: DownloadOptions) void {
+    if (comptime builtin.target.cpu.arch == .wasm32) return;
     const dl = release.downloadFor(compat.hostKey()) orelse return;
     startDownloadUrl(id, dl.url, dl.sha256, opts);
 }
@@ -2675,7 +2681,11 @@ fn drawNoStoreBuild(opts: dvui.Options) void {
     var no_build_box = dvui.box(@src(), .{ .dir = .horizontal }, opts.override(.{ .gravity_y = 0.5 }));
     defer no_build_box.deinit();
 
-    if (!host_optimize_matches_store) {
+    // Web has no plugin binaries at all, so the Debug/ReleaseSafe "Needs release" wording
+    // would be a lie — same "No store build" the native ReleaseFast host shows.
+    const optimize_mismatch = (comptime builtin.target.cpu.arch != .wasm32) and !host_optimize_matches_store;
+
+    if (optimize_mismatch) {
         dvui.icon(
             @src(),
             "StoreOptimizeMismatchIcon",
@@ -2687,7 +2697,7 @@ fn drawNoStoreBuild(opts: dvui.Options) void {
 
     dvui.labelNoFmt(
         @src(),
-        if (host_optimize_matches_store) "No store build" else "Needs release",
+        if (optimize_mismatch) "Needs release" else "No store build",
         .{},
         .{
             .color_text = theme.color(.err, .text),
@@ -2697,7 +2707,7 @@ fn drawNoStoreBuild(opts: dvui.Options) void {
         },
     );
 
-    if (host_optimize_matches_store) {
+    if (!optimize_mismatch) {
         dvui.tooltip(
             @src(),
             .{ .active_rect = no_build_box.data().borderRectScale().r },

@@ -90,7 +90,18 @@ const wasm = if (is_wasm) struct {
     extern "fizzy" fn fizzy_web_image_request(id: u32, url_ptr: [*]const u8, url_len: usize) void;
     extern "fizzy" fn fizzy_web_image_place(id: u32, x: f32, y: f32, w: f32, h: f32, cx: f32, cy: f32, cw: f32, ch: f32) void;
     extern "fizzy" fn fizzy_web_image_dismiss(id: u32) void;
+    /// Marks the start of a canvas frame so JS can hide overlays this frame did not
+    /// place. Idle (no frame) must not hide them — see `beginOverlayFrame`.
+    extern "fizzy" fn fizzy_web_image_frame_begin() void;
 } else struct {};
+
+/// Web only. Tell JS a canvas frame is starting. Overlays that aren't `placeOverlay`'d
+/// this frame hide after paint; when the app sleeps (mouse left the window) this is
+/// never called, so badges stay put instead of vanishing on a wall-clock timeout.
+pub fn beginOverlayFrame() void {
+    if (comptime !is_wasm) return;
+    wasm.fizzy_web_image_frame_begin();
+}
 
 /// Counted rather than tracked in a counter the workers would have to decrement: the map is
 /// small and bounded by `max_entries`, and a UI-thread-only walk keeps this state single-owner.

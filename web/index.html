@@ -147,6 +147,12 @@
       let wasmInstance = null;
       const overlayUrls = new Map();
       const overlays = new Map();
+      // Hide overlays that a canvas frame did not place — not ones that went unseen
+      // because the app slept. `frameBegin` is called from Zig at the start of every
+      // `dvui_update`; the rAF after paint hides the rest. No frame → no hide, so
+      // badges stay when the mouse leaves the window.
+      let overlayFrameOpen = false;
+      const placedThisFrame = new Set();
       const overlayRoot = document.createElement("div");
       overlayRoot.setAttribute("aria-hidden", "true");
       overlayRoot.style.cssText = "position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:1;";
@@ -184,6 +190,10 @@
               });
             });
           },
+          fizzy_web_image_frame_begin() {
+            overlayFrameOpen = true;
+            placedThisFrame.clear();
+          },
           fizzy_web_image_place(id, x, y, w, h, cx, cy, cw, ch) {
             const url = overlayUrls.get(id);
             if (!url) return;
@@ -198,7 +208,7 @@
               entry = { img };
               overlays.set(id, entry);
             }
-            entry.lastSeen = performance.now();
+            placedThisFrame.add(id);
             const img = entry.img;
             img.style.display = "block";
             img.style.left = x + "px";
@@ -218,6 +228,29 @@
             entry.img.remove();
             overlays.delete(id);
           },
+          // Byte fetch for the store catalog / READMEs / icons — no rasterize, just GET.
+          fizzy_web_fetch(id, urlPtr, urlLen) {
+            const inst = wasmInstance;
+            if (!inst) return;
+            const url = utf8.decode(new Uint8Array(inst.exports.memory.buffer, urlPtr, urlLen));
+            fetch(url, { cache: "no-cache" }).then((res) => {
+              if (!res.ok) throw new Error("http " + res.status);
+              return res.arrayBuffer();
+            }).then((buf) => {
+              const bytes = new Uint8Array(buf);
+              const ptr = inst.exports.FizzyWebFetchAlloc(bytes.length);
+              if (!ptr) {
+                inst.exports.FizzyWebFetchFailed(id);
+              } else {
+                new Uint8Array(inst.exports.memory.buffer, ptr, bytes.length).set(bytes);
+                inst.exports.FizzyWebFetchReady(id, ptr, bytes.length);
+              }
+              if (dvuiApp) dvuiApp.requestRender();
+            }).catch(() => {
+              inst.exports.FizzyWebFetchFailed(id);
+              if (dvuiApp) dvuiApp.requestRender();
+            });
+          },
         };
         return origInstantiateStreaming(source, imports).then((result) => {
           wasmInstance = result.instance;
@@ -225,12 +258,16 @@
         });
       };
 
-      setInterval(() => {
-        const now = performance.now();
-        for (const entry of overlays.values()) {
-          if (entry.lastSeen && now - entry.lastSeen > 250) entry.img.style.display = "none";
+      function hideUnplacedOverlays() {
+        if (overlayFrameOpen) {
+          for (const [id, entry] of overlays) {
+            if (!placedThisFrame.has(id)) entry.img.style.display = "none";
+          }
+          overlayFrameOpen = false;
         }
-      }, 250);
+        requestAnimationFrame(hideUnplacedOverlays);
+      }
+      requestAnimationFrame(hideUnplacedOverlays);
 
       /** Rasterize `url` the way an `<img>` would — PNG/JPEG and CORS-friendly SVG. */
       function loadImagePixels(url) {

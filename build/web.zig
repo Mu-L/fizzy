@@ -61,6 +61,9 @@ pub fn addSteps(
         "FizzyWebImageReady",
         "FizzyWebImageFailed",
         "FizzyWebImageOverlay",
+        "FizzyWebFetchAlloc",
+        "FizzyWebFetchReady",
+        "FizzyWebFetchFailed",
     };
 
     // `icons` (pure-Zig icon data) is referenced at file scope in

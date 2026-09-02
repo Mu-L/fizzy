@@ -1851,6 +1851,7 @@ fn renderTopLevel(doc_node: ast.Node, ids: *IdGen, ctx: RenderContext) void {
                 // the same frame still can't collide.
                 .id_extra = (run_id *% 0x100_0000) +% (run_n *% 0x1_0000) +% 0x7000_0000,
                 .min_size_content = .{ .h = run_h.* },
+                .max_size_content = .height(run_h.*),
             });
             spacer.deinit();
             run_h.* = 0;
@@ -1940,8 +1941,16 @@ fn renderTopLevel(doc_node: ast.Node, ids: *IdGen, ctx: RenderContext) void {
         // because there is nothing to hold it to — a block that has never been laid out is one
         // the reader has never seen, so it cannot be what they aimed at either.
         const pinnable = block_state == .settled or block_state == .deferred;
+        // A block that starts at or above the fold must occupy exactly `known_h`. Scrolling
+        // *up* turns the skip-spacer above the viewport into real widgets; their first-frame
+        // height (dvui sizes from last frame's children, which is 0) is not `known_h`, so
+        // everything below jumps, and next frame's anchor "corrects" it — the flash that
+        // only happens when scrolling up. Pin the *emitted* height to the table; measure
+        // the unconstrained inner box so `record` can still learn the real size.
+        const pin_for_above = known_h > 0 and !width_in_flux and y <= anchor_y;
         const pin_h: ?f32 = if (known_h > 0 and !width_in_flux and
-            ((frozen and block_state != .estimated) or
+            (pin_for_above or
+                (frozen and block_state != .estimated) or
                 (pinnable and rs.subtree_has_table.contains(@intFromPtr(ch.n))))) known_h else null;
         var wrapper = box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
@@ -1950,6 +1959,14 @@ fn renderTopLevel(doc_node: ast.Node, ids: *IdGen, ctx: RenderContext) void {
             .max_size_content = if (pin_h) |h| .height(h) else null,
         });
         const wrapper_id = wrapper.data().id;
+        // Always-present so child widget ids stay the same whether this frame is pinned
+        // (block crossed the fold) or not. A toggling parent would remount every text
+        // layout and bring the first-frame-zero problem back.
+        var inner = box(@src(), .{ .dir = .vertical }, .{
+            .expand = .horizontal,
+            .id_extra = index,
+        });
+        const inner_id = inner.data().id;
         // Where the table thinks this block starts, against where it was actually placed.
         //
         // Every other probe here measures a block that is being *drawn*. A skipped block is
@@ -1981,6 +1998,7 @@ fn renderTopLevel(doc_node: ast.Node, ids: *IdGen, ctx: RenderContext) void {
             .attempts = rs.blocks.attemptsAt(index),
         }).wantsMeasure();
         renderBlock(ch, ids, ctx);
+        inner.deinit();
         wrapper.deinit();
         if (block_profile) |list| {
             list.append(block_profile_gpa.?, .{
@@ -1992,7 +2010,14 @@ fn renderTopLevel(doc_node: ast.Node, ids: *IdGen, ctx: RenderContext) void {
             }) catch {};
         }
 
-        const measured = (dvui.minSizeGet(wrapper_id) orelse dvui.Size{}).h;
+        // Wrapper is what the scroll container saw. Inner is unconstrained — used only when
+        // we pinned for a block above the fold, so `record` can learn the real height
+        // without letting that height reach the layout this frame.
+        const emitted = (dvui.minSizeGet(wrapper_id) orelse dvui.Size{}).h;
+        const measured = if (pin_for_above)
+            (dvui.minSizeGet(inner_id) orelse dvui.Size{}).h
+        else
+            emitted;
         // The height is known — but is it *worth* knowing? A table whose rows have not all been
         // measured reports a height built from a scroll-position-dependent mix of real rows and
         // placeholders, so it measures differently depending on where the reader came from. That
@@ -2010,7 +2035,7 @@ fn renderTopLevel(doc_node: ast.Node, ids: *IdGen, ctx: RenderContext) void {
         // it wants to be. Filing that would promote a first, still-settling measurement to
         // `.settled` at the lagged height — the freeze would then *persist* the very error it
         // exists to hide from one click.
-        if (!frozen or pin_h == null)
+        if (measured > 0 and (!frozen or pin_h == null))
             rs.blocks.record(ctx.gpa, index, .{ .h = measured, .partial = partial }, metrics, ctx.column_width);
         const after_h = rs.blocks.heightAt(index, metrics, ctx.column_width);
         if (diag and known_h > 0 and @abs(after_h - known_h) > diag_height_jump) {
@@ -2028,22 +2053,22 @@ fn renderTopLevel(doc_node: ast.Node, ids: *IdGen, ctx: RenderContext) void {
         // it reaching the screen. A disagreement here is the layout and the bookkeeping telling
         // the reader two different stories, which looks exactly like "the text jumped but the
         // scrollbar is fine".
-        if (diag and known_h > 0 and @abs(measured - known_h) > diag_height_jump) {
+        if (diag and known_h > 0 and @abs(emitted - known_h) > diag_height_jump) {
             dvui.log.warn(
                 "md-diag: block {d} ({s}) EMITTED {d:.0} but table says {d:.0} (recorded {d:.0}, {s}, partial={any}, pinned={any}) at viewport y={d:.0}",
                 .{
                     index,                                             @tagName(rs.blocks.extents.items[index].kind),
-                    measured,                                          known_h,
+                    emitted,                                           known_h,
                     after_h,                                           @tagName(rs.blocks.stateAt(index)),
                     partial,                                           pin_h != null,
                     ctx.viewport.y,
                 },
             );
         }
-        // No scroll compensation here any more. A height change above the reader used to need a
-        // delta accumulated and applied to `viewport.y` after the fact; the anchor makes the
-        // reader's position a function of the current heights, so it simply re-derives.
-        y += after_h;
+        // Advance by what this frame actually emitted, not by a height `record` just learned.
+        // Pinning a block above the fold and then stepping `y` by the new inner height left a
+        // gap under it for one frame — the same flash, just inverted.
+        y += if (emitted > 0) emitted else after_h;
     }
     flushSkip(&skip_run_h, skip_run_id, skip_run_n);
 }
@@ -2422,6 +2447,7 @@ fn renderBlock(n: ast.Node, ids: *IdGen, ctx: RenderContext) void {
                 {
                     var pb = box(@src(), .{ .dir = .horizontal }, .{
                         .min_size_content = .{ .w = col_w, .h = 0 },
+                        .max_size_content = .width(col_w),
                         .gravity_y = 0,
                         // The item's content is a paragraph, and `CMARK_NODE_PARAGRAPH` gives its
                         // `textLayout` a 4pt top margin — without matching it here every marker
@@ -2444,8 +2470,17 @@ fn renderBlock(n: ast.Node, ids: *IdGen, ctx: RenderContext) void {
 
                 _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 5, .h = 0 }, .id_extra = ids.next() });
 
+                // Pin the text column to the room the row actually has. Without a max, a
+                // paragraph's `textLayout` reports its unwrapped width as min size, the list
+                // inflates the preview's `virtual_size.w`, the horizontal bar appears and
+                // shrinks the viewport, and the scroll anchor fights the new total every
+                // other frame. Same `max_size_content` trick as the store's own cards.
+                const row_w = row.data().contentRect().w;
+                const text_w = if (row_w > col_w + 5) row_w - col_w - 5 else 0;
                 var col = box(@src(), .{ .dir = .vertical }, .{
                     .expand = .horizontal,
+                    .min_size_content = if (text_w > 0) .{ .w = text_w } else null,
+                    .max_size_content = if (text_w > 0) .width(text_w) else null,
                     .id_extra = ids.next(),
                 });
                 defer col.deinit();

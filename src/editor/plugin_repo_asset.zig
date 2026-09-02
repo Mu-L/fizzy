@@ -12,6 +12,7 @@ pub fn gpa() std.mem.Allocator {
 
 /// GET `url`; return the body bytes (app-allocator owned) on HTTP 200, else null.
 pub fn fetchOk(io: std.Io, url: []const u8, limit: std.Io.Limit) ?[]u8 {
+    if (comptime @import("builtin").target.cpu.arch == .wasm32) return null;
     var client: std.http.Client = .{ .allocator = gpa(), .io = io };
     defer client.deinit();
 
@@ -45,6 +46,7 @@ pub const LocalAsset = struct {
 /// trees (`zig-out/bin` → repo root) and sideloaded checkouts; packaged installs fall through to
 /// the GitHub fetch below.
 pub fn readLocalAsset(io: std.Io, subpath: []const u8, filename: []const u8, limit: std.Io.Limit) ?LocalAsset {
+    if (comptime @import("builtin").target.cpu.arch == .wasm32) return null;
     const trimmed = std.mem.trim(u8, subpath, "/");
     if (trimmed.len == 0) return null;
 
