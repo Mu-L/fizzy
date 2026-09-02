@@ -22,23 +22,19 @@ fn applyImports(module: *std.Build.Module, imports: ModuleImports) void {
     if (imports.proxy_bridge) |proxy_bridge| module.addImport("proxy_bridge", proxy_bridge);
 }
 
-pub fn linkCmark(
+/// md4c, via our wrapper. The module carries md4c's C sources and include paths,
+/// so importing it is all a consumer has to do — including for wasm, where the
+/// wrapper supplies the libc subset md4c needs.
+pub fn addMd4zig(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     module: *std.Build.Module,
 ) void {
-    const cmark_gfm = b.lazyDependency("cmark_gfm", .{
+    module.addImport("md4zig", b.dependency("md4zig", .{
         .target = target,
         .optimize = optimize,
-    }) orelse return;
-
-    module.link_libc = true;
-    module.linkLibrary(cmark_gfm.artifact("cmark-gfm"));
-    module.linkLibrary(cmark_gfm.artifact("cmark-gfm-extensions"));
-    module.addIncludePath(cmark_gfm.path("src"));
-    module.addIncludePath(cmark_gfm.path("extensions"));
-    module.addIncludePath(b.path("src/plugins/markdown/src/md"));
+    }).module("md4zig"));
 }
 
 pub fn addStaticModule(
@@ -58,7 +54,7 @@ pub fn addStaticModule(
     // link modes must attach the *same* options step (see its doc comment for why).
     mod.addOptions(helpers.plugin_options_import, helpers.pluginOptionsFor(b, zon_path));
     applyImports(mod, imports);
-    linkCmark(b, target, optimize, mod);
+    addMd4zig(b, target, optimize, mod);
     return mod;
 }
 
@@ -76,6 +72,6 @@ pub fn addDylib(
         .optimize = optimize,
     });
     applyImports(created.module, imports);
-    linkCmark(b, target, optimize, created.module);
+    addMd4zig(b, target, optimize, created.module);
     return created.lib;
 }

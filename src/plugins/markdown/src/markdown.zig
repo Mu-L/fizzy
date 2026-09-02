@@ -3,7 +3,13 @@ const std = @import("std");
 const dvui = @import("dvui");
 const core_dvui = @import("core").dvui;
 
-const md_parse = @import("md/cmark_parse.zig");
+const md_ast = @import("md/ast.zig");
+
+/// `ast_root` is stored type-erased so `Preview` and `ParseJob` can share the
+/// field without either owning `md_ast`'s types in its signature.
+fn treeOf(root: *anyopaque) *md_ast.Tree {
+    return @ptrCast(@alignCast(root));
+}
 const render_ast = @import("md/render_ast.zig");
 const net_image = @import("md/net_image.zig");
 
@@ -37,14 +43,21 @@ pub const Preview = struct {
     /// In-flight background parse for large documents; see `ensureParsed`.
     parse_job: ?*ParseJob = null,
 
+    /// Frees the parsed tree, if there is one. `gpa` is null only before the first
+    /// parse, when there is nothing to free.
+    fn freeAst(self: *Preview) void {
+        const root = self.ast_root orelse return;
+        self.ast_root = null;
+        if (self.gpa) |gpa| md_ast.destroy(gpa, treeOf(root));
+    }
+
     pub fn deinit(self: *Preview) void {
         if (self.parse_job) |job| {
             // Job still owns its AST + scan maps until polled; `destroy` frees whatever remains.
             job.destroy();
             self.parse_job = null;
         }
-        md_parse.freeCachedRoot(self.ast_root);
-        self.ast_root = null;
+        self.freeAst();
         if (self.gpa) |gpa| self.rs.deinit(gpa);
         self.* = .{};
     }
@@ -224,14 +237,13 @@ pub const Preview = struct {
                 .{ self.content_hash, hash, content.len, self.rs.blocks.len() },
             );
         }
-        md_parse.freeCachedRoot(self.ast_root);
-        self.ast_root = null;
+        self.freeAst();
         self.rs.clear(gpa);
         self.content_hash = hash;
         const t0 = std.Io.Clock.boot.now(dvui.io).nanoseconds;
-        if (md_parse.parseMarkdown(content)) |ast| {
-            self.ast_root = @ptrCast(ast.root.n);
-            _ = render_ast.scanNode(ast.root, &self.rs, gpa, content);
+        if (md_ast.parse(gpa, content)) |tree| {
+            self.ast_root = @ptrCast(tree);
+            _ = render_ast.scanNode(tree.node(), &self.rs, gpa, content);
         }
         render_ast.stats.parse_ns +%= @intCast(std.Io.Clock.boot.now(dvui.io).nanoseconds - t0);
     }
@@ -287,7 +299,7 @@ pub const Preview = struct {
             self.parse_job = null;
             return false;
         }
-        md_parse.freeCachedRoot(self.ast_root);
+        self.freeAst();
         self.ast_root = job.ast_root;
         job.ast_root = null;
         // Worker already filled `job.rs` (parse + scan). Swap it in — no UI-thread scan.
@@ -334,9 +346,9 @@ const ParseJob = struct {
             // hand this takes `refreshBackend`, which is the documented cross-thread path.
             dvui.refresh(self.win, @src(), null);
         }
-        if (md_parse.parseMarkdown(self.bytes)) |ast| {
-            self.ast_root = @ptrCast(ast.root.n);
-            _ = render_ast.scanNode(ast.root, &self.rs, self.gpa, self.bytes);
+        if (md_ast.parse(self.gpa, self.bytes)) |tree| {
+            self.ast_root = @ptrCast(tree);
+            _ = render_ast.scanNode(tree.node(), &self.rs, self.gpa, self.bytes);
         }
     }
 
@@ -346,7 +358,7 @@ const ParseJob = struct {
         if (self.future) |*f| f.await(dvui.io);
         gpa.free(self.bytes);
         // Stale/abandoned jobs still own their AST + scan maps.
-        if (self.ast_root) |root| md_parse.freeCachedRoot(root);
+        if (self.ast_root) |root| md_ast.destroy(gpa, treeOf(root));
         self.rs.deinit(gpa);
         gpa.destroy(self);
     }
@@ -409,7 +421,7 @@ pub fn drawPreview(
     const parsing = state.pollParseJob();
 
     if (state.ast_root) |rp| {
-        const root: md_parse.Node = .{ .n = @ptrCast(@alignCast(rp)) };
+        const root = treeOf(rp).node();
         render_ast.preloadImages(root, .{
             .image_base_dir = opts.image_base_dir,
             .io = opts.io,
@@ -444,7 +456,7 @@ pub fn drawPreview(
         .background = opts.background,
         .color_fill = opts.color_fill orelse dvui.themeGet().fill,
         .style = .content,
-        .id_extra = opts.id_extra,
+        .id_extra = @truncate(opts.id_extra),
     });
     // Captured before `deinit` (which invalidates the widget) — the shadows are drawn *after* the
     // content so they sit on top of it, matching `PluginStore`'s panes. Note the workbench's
@@ -494,17 +506,17 @@ pub fn drawPreview(
             .max_size_content = .width(column_w),
             .gravity_x = 0,
             .padding = pad,
-            .id_extra = opts.id_extra + 1,
+            .id_extra = @truncate(opts.id_extra + 1),
         });
         defer v.deinit();
 
-        const root: md_parse.Node = .{ .n = @ptrCast(@alignCast(rp)) };
+        const root = treeOf(rp).node();
         render_ast.renderDocument(root, .{
             .image_base_dir = opts.image_base_dir,
             .io = opts.io,
             .gpa = gpa,
             .rs = &state.rs,
-            .id_base = @intCast(opts.id_extra << 16),
+            .id_base = @truncate(opts.id_extra << 16),
             .background = opts.background,
             .document_path = opts.document_path,
             // What lets the renderer lay out only the blocks on screen. `viewport` is in the
@@ -533,7 +545,7 @@ pub fn drawPreview(
                 .gravity_x = 0.5,
                 .gravity_y = 0.5,
                 .color_text = dvui.themeGet().color(.content, .text).opacity(0.55),
-                .id_extra = opts.id_extra,
+                .id_extra = @truncate(opts.id_extra),
             },
         );
     } else {
@@ -546,7 +558,7 @@ pub fn drawPreview(
                 .gravity_x = 0.5,
                 .gravity_y = 0.5,
                 .color_text = dvui.themeGet().color(.err, .text).opacity(0.85),
-                .id_extra = opts.id_extra,
+                .id_extra = @truncate(opts.id_extra),
             },
         );
     }

@@ -1,4 +1,4 @@
-//! `<img>` extraction from the raw-HTML nodes cmark hands back untouched.
+//! `<img>` extraction from the raw-HTML nodes md4c hands back untouched.
 //!
 //! GitHub-flavoured READMEs routinely wrap their hero image in HTML (`<p align="center"><img …>`),
 //! which CommonMark preserves verbatim as an HTML block rather than as an `IMAGE` node — so a
@@ -8,7 +8,7 @@
 //! act on: the image, the size it asks for, and the alignment its wrapper asks for — a hero image
 //! wrapped in `<p align="center">` is centered in every renderer that matters, so dropping the
 //! wrapper wholesale left it visibly left-hung. Everything else about the markup is discarded.
-//! Kept free of dvui and cmark so it stays directly unit-testable.
+//! Kept free of dvui and the parser so it stays directly unit-testable.
 const std = @import("std");
 
 /// An `<img>`'s requested size. HTML allows both `width="240"` (CSS pixels) and `width="25%"`.

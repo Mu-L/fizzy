@@ -6,54 +6,41 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const plugin = fizzy.plugin.create(b, .{ .target = target, .optimize = optimize });
-    linkCmark(b, target, optimize, plugin.module);
+    plugin.module.addImport("md4zig", md4zigModule(b, target, optimize));
 
     fizzy.plugin.install(b, plugin.lib, .{});
 
-    // `zig build test` — the escape/source-position logic in `src/md/wikilink_scan.zig`, run
-    // against the **real vendored cmark**. It can't live in fizzy's own pure-logic test list
-    // (`build/app.zig`) like `html_images`/`url_join` do: those are std-only by design, and this
-    // one is a claim about what cmark itself does to backslash escapes, which only cmark can
-    // confirm. So it tests from here, where cmark is already linked.
+    // `zig build test` — the parts of the preview that are claims about what the
+    // *parser* does, and so can only be tested with md4c linked: the AST built
+    // from md4c's event stream (`src/md/ast.zig`), and the escape handling that
+    // tells `[[A]]` from `\[\[A]]` (`src/md/wikilink_scan.zig`). Pure-logic tests
+    // live in fizzy's own list in `build/app.zig` instead.
     const test_step = b.step("test", "Run the markdown plugin's unit tests");
-    const scan_tests = b.addTest(.{
-        .name = "markdown-wikilink-scan-tests",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .root_source_file = b.path("src/md/wikilink_scan.zig"),
-        }),
-    });
-    scan_tests.root_module.addImport("fizzy_sdk", plugin.module.import_table.get("fizzy_sdk").?);
-    linkCmark(b, target, optimize, scan_tests.root_module);
-    test_step.dependOn(&b.addRunArtifact(scan_tests).step);
+    for ([_][]const u8{ "src/md/ast.zig", "src/md/wikilink_scan.zig" }) |path| {
+        const tests = b.addTest(.{
+            .name = b.fmt("markdown-{s}-tests", .{std.fs.path.stem(path)}),
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .root_source_file = b.path(path),
+            }),
+        });
+        tests.root_module.addImport("fizzy_sdk", plugin.module.import_table.get("fizzy_sdk").?);
+        tests.root_module.addImport("md4zig", md4zigModule(b, target, optimize));
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
 }
 
-/// Duplicated from `static/integration.zig`'s `linkCmark` — deliberately, not `@import`ed:
-/// `static/integration.zig` is fizzy-internal glue, itself reachable through the `fizzy` package
-/// dependency's own build graph (`build/plugins.zig` imports every built-in's, markdown
-/// included). Importing it directly from here makes the same physical file reachable through two
-/// disjoint module trees within one `zig build` invocation — markdown's own local "root.@build"
-/// and the "root.@dependencies" tree pulled in via `fizzy.plugin.create`'s `b.dependency("fizzy",
-/// …)` — which Zig's build graph refuses ("file exists in modules 'root.@build' and
-/// 'root.@dependencies...'"). Matches text/image/workbench's standalone `build.zig`, none of
-/// which ever reach into their own `static/` either — see docs/PLUGINS.md's "canonical
-/// third-party shape" note on why `build.zig` mirrors what any real external plugin would write.
-fn linkCmark(
+/// md4c, via our wrapper. The module carries md4c's C sources and include paths,
+/// so importing it is all a consumer has to do — including for wasm, where the
+/// wrapper supplies the libc subset md4c needs.
+fn md4zigModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    module: *std.Build.Module,
-) void {
-    const cmark_gfm = b.lazyDependency("cmark_gfm", .{
+) *std.Build.Module {
+    return b.dependency("md4zig", .{
         .target = target,
         .optimize = optimize,
-    }) orelse return;
-
-    module.link_libc = true;
-    module.linkLibrary(cmark_gfm.artifact("cmark-gfm"));
-    module.linkLibrary(cmark_gfm.artifact("cmark-gfm-extensions"));
-    module.addIncludePath(cmark_gfm.path("src"));
-    module.addIncludePath(cmark_gfm.path("extensions"));
-    module.addIncludePath(b.path("src/md"));
+    }).module("md4zig");
 }

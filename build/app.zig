@@ -642,7 +642,7 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
     // `zig build bench-markdown` — markdown preview frame-cost benchmark. Same rules as
     // `bench-text` above: its own step, prints timings instead of asserting, only comparable at
-    // equal `-Doptimize` (cmark and freetype build at the app's optimize level).
+    // equal `-Doptimize` (md4c and freetype build at the app's optimize level).
     {
         const bench_module = b.createModule(.{
             .target = target,

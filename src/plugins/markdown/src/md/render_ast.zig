@@ -5,13 +5,17 @@ const Io = std.Io;
 const dvui = @import("dvui");
 const sdk = @import("fizzy_sdk");
 
-const md = @import("cmark_parse.zig");
+const ast = @import("ast.zig");
 const net_image = @import("net_image.zig");
 const html_images_mod = @import("html_images.zig");
 const image_format = @import("image_format.zig");
 const url_join = @import("url_join.zig");
 const wikilink_scan = @import("wikilink_scan.zig");
 const bh = @import("block_heights.zig");
+
+/// Whether this build can read images off disk. See the local branch of
+/// `resolveImageBytes`, and `net_image.fetch_supported` for the remote half.
+const local_files_supported = @import("builtin").target.cpu.arch != .wasm32;
 const code_language = @import("code_language.zig");
 
 const WikilinkApi = sdk.services.wikilink.Api;
@@ -27,7 +31,7 @@ pub const ResolvedLink = struct {
 
 /// Memo key for one link: which text node, and which link within it. Node pointers are stable
 /// for the life of the AST, and the whole memo is dropped when the AST is rebuilt.
-fn wikilinkMemoKey(node: md.Node, token_index: usize) u64 {
+fn wikilinkMemoKey(node: ast.Node, token_index: usize) u64 {
     return std.hash.Wyhash.hash(@intFromPtr(node.n), std.mem.asBytes(&token_index));
 }
 
@@ -229,11 +233,6 @@ inline fn addText(tl: *dvui.TextLayoutWidget, txt: []const u8, opts: dvui.Option
     tl.addText(txt, opts);
 }
 
-// Extension node kinds that cmark-gfm identifies by type string rather than
-// integer constant.  Precomputed once after parsing so rendering never calls
-// typeString() or any C FFI inside the per-frame draw loop.
-pub const ExtNodeKind = enum { table, table_row, table_header, table_cell, strikethrough };
-
 /// All precomputed per-AST render data.  Lives in MarkDownPreviewWidget.State,
 /// rebuilt whenever the content hash changes, freed on deinit.
 pub const RenderState = struct {
@@ -247,8 +246,6 @@ pub const RenderState = struct {
     /// dvui warning, for as long as the document is open. Recorded once, then the placeholder
     /// path is taken.
     image_decode_failed: std.AutoHashMapUnmanaged(usize, void) = .empty,
-    /// @intFromPtr(node.n) → ExtNodeKind (extension nodes only).
-    ext_node_kinds: std.AutoHashMapUnmanaged(usize, ExtNodeKind) = .empty,
     /// Set of @intFromPtr(node.n) for every node whose subtree contains an IMAGE.
     subtree_has_image: std.AutoHashMapUnmanaged(usize, void) = .empty,
     /// Set of @intFromPtr(node.n) for every node whose subtree contains a TABLE. A table is
@@ -260,10 +257,6 @@ pub const RenderState = struct {
     /// @intFromPtr(table_node.n) → column count (from header row).
     /// Avoids re-traversing the header row every render frame.
     table_col_counts: std.AutoHashMapUnmanaged(usize, usize) = .empty,
-    /// @intFromPtr(item_node.n) → checked, for `- [ ]` / `- [x]` items only.
-    /// Absence means "plain bullet", which is what distinguishes an *unchecked* task item
-    /// from a normal one (both report `taskListItemChecked() == false`).
-    task_items: std.AutoHashMapUnmanaged(usize, bool) = .empty,
     /// @intFromPtr(html_node.n) → every `<img>` in that raw-HTML node (src + requested size), in
     /// document order (gpa-owned). Absent when the node has no `<img>`.
     html_images: std.AutoHashMapUnmanaged(usize, []html_images_mod.Image) = .empty,
@@ -334,11 +327,9 @@ pub const RenderState = struct {
         self.image_cache.deinit(gpa);
         self.image_sizes.deinit(gpa);
         self.image_decode_failed.deinit(gpa);
-        self.ext_node_kinds.deinit(gpa);
         self.subtree_has_image.deinit(gpa);
         self.subtree_has_table.deinit(gpa);
         self.table_col_counts.deinit(gpa);
-        self.task_items.deinit(gpa);
         self.html_images.deinit(gpa);
         self.wikilinks.deinit(gpa);
         self.wikilink_resolved.deinit(gpa);
@@ -356,11 +347,9 @@ pub const RenderState = struct {
         self.image_cache.clearRetainingCapacity();
         self.image_sizes.clearRetainingCapacity();
         self.image_decode_failed.clearRetainingCapacity();
-        self.ext_node_kinds.clearRetainingCapacity();
         self.subtree_has_image.clearRetainingCapacity();
         self.subtree_has_table.clearRetainingCapacity();
         self.table_col_counts.clearRetainingCapacity();
-        self.task_items.clearRetainingCapacity();
         var hi = self.html_images.valueIterator();
         while (hi.next()) |urls| html_images_mod.free(urls.*, gpa);
         self.html_images.clearRetainingCapacity();
@@ -458,14 +447,9 @@ const block_inset_x: f32 = 14;
 const max_image_bytes: usize = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
-// Per-node fast lookups (replaces isTable/typeString calls in render loop)
 // ---------------------------------------------------------------------------
 
-inline fn extKind(ctx: RenderContext, n: md.Node) ?ExtNodeKind {
-    return ctx.rs.ext_node_kinds.get(@intFromPtr(n.n));
-}
-
-inline fn hasImageSubtree(ctx: RenderContext, n: md.Node) bool {
+inline fn hasImageSubtree(ctx: RenderContext, n: ast.Node) bool {
     return ctx.rs.subtree_has_image.contains(@intFromPtr(n.n));
 }
 
@@ -477,130 +461,103 @@ inline fn hasImageSubtree(ctx: RenderContext, n: md.Node) bool {
 /// `wikilink_scan.zig`. Built once per parse rather than per node.
 const ScanSource = struct {
     bytes: []const u8,
-    index: ?wikilink_scan.LineIndex,
+    index: ?ast.LineIndex,
 
-    fn spanFor(self: ScanSource, node: md.Node) ?[]const u8 {
-        const index = self.index orelse return null;
-        return wikilink_scan.sourceSpanFor(self.bytes, index, node);
+    fn spanFor(self: ScanSource, node: ast.Node) ?[]const u8 {
+        return node.sourceSpan(self.bytes);
     }
 };
 
-/// Walk the AST once, populating rs.ext_node_kinds, rs.subtree_has_image, and rs.wikilinks.
+/// Walk the AST once, populating rs.subtree_has_image, rs.table_col_counts and rs.wikilinks.
 /// Returns true when any node in the subtree rooted at `node` is an IMAGE.
 ///
 /// `source` is the markdown these nodes were parsed from.
-pub fn scanNode(node: md.Node, rs: *RenderState, gpa: std.mem.Allocator, source: []const u8) bool {
-    // A failed line index only costs escape detection, so scanning continues without it.
-    var index: ?wikilink_scan.LineIndex = wikilink_scan.LineIndex.build(gpa, source) catch null;
+pub fn scanNode(node: ast.Node, rs: *RenderState, gpa: std.mem.Allocator, source: []const u8) bool {
+    // A failed line index only costs the per-block line numbers, so scanning continues without it.
+    var index: ?ast.LineIndex = ast.LineIndex.build(gpa, source) catch null;
     defer if (index) |*i| i.deinit(gpa);
     const scan_source: ScanSource = .{ .bytes = source, .index = index };
     recordBlockExtents(node, rs, gpa, scan_source);
     return scanNodeInner(node, rs, gpa, scan_source);
 }
 
-/// What shape a top-level block is, for the height estimator. A `table` here is the GFM extension
-/// node, which cmark reports through `typeString` rather than as a `CMARK_NODE_*` constant, so it
-/// comes from the kind map the scan built — except that the scan has not run yet the first time
-/// through, which is why the node's own type is checked first and the map only consulted for the
-/// extension types it is the only source for.
-fn blockKind(n: md.Node, rs: *const RenderState) bh.BlockKind {
+/// What shape a top-level block is, for the height estimator.
+fn blockKind(n: ast.Node) bh.BlockKind {
     switch (n.nodeType()) {
-        md.c.CMARK_NODE_HEADING => return .heading,
-        md.c.CMARK_NODE_CODE_BLOCK => return .code,
-        md.c.CMARK_NODE_LIST => return .list,
-        md.c.CMARK_NODE_BLOCK_QUOTE => return .quote,
-        md.c.CMARK_NODE_THEMATIC_BREAK => return .rule,
-        md.c.CMARK_NODE_HTML_BLOCK => return .html,
-        md.c.CMARK_NODE_PARAGRAPH => {
+        .heading => return .heading,
+        .code_block => return .code,
+        .list => return .list,
+        .block_quote => return .quote,
+        .thematic_break => return .rule,
+        .html_block => return .html,
+        .table => return .table,
+        .paragraph => {
             // A paragraph that exists to hold a picture is nothing like a paragraph of prose:
             // one line of source, and as tall as the image on screen.
             var c = n.firstChild();
             while (c) |x| : (c = x.nextSibling()) {
-                if (x.nodeType() == md.c.CMARK_NODE_IMAGE) return .image;
+                if (x.nodeType() == .image) return .image;
             }
             return .paragraph;
         },
         else => {},
     }
-    if (rs.ext_node_kinds.get(@intFromPtr(n.n))) |k| {
-        if (k == .table) return .table;
-    }
-    if (std.mem.eql(u8, n.typeString(), "table")) return .table;
     return .paragraph;
 }
 
 /// Record each top-level block's source span, for `renderTopLevel`'s first-sight height guess.
-/// cmark reports 1-based line numbers for block nodes; a node whose lines don't fit the source
-/// (nothing observed doing this, but the API doesn't promise it) simply gets a zero extent, and a
-/// zero extent means "no guess available" — that block is drawn rather than estimated.
-fn recordBlockExtents(doc_node: md.Node, rs: *RenderState, gpa: std.mem.Allocator, source: ScanSource) void {
+/// `ast.zig` reports byte offsets, so the byte extent and the identity hash come straight off the
+/// node; the line index only turns the start offset into the line number the anchor is keyed by.
+/// A node with no span — nothing in its subtree could be located in the source — gets a zero
+/// extent, and a zero extent means "no guess available": that block is drawn rather than estimated.
+fn recordBlockExtents(doc_node: ast.Node, rs: *RenderState, gpa: std.mem.Allocator, source: ScanSource) void {
     var child = doc_node.firstChild();
     while (child) |ch| : (child = ch.nextSibling()) {
-        var extent: SourceExtent = .{ .kind = blockKind(ch, rs) };
-        const start = ch.startLine();
-        const end = ch.endLine();
-        if (start >= 1 and end >= start) {
-            extent.lines = @intCast(end - start + 1);
-            extent.start_line = @intCast(start - 1);
+        var extent: SourceExtent = .{ .kind = blockKind(ch) };
+        if (ch.sourceSpan(source.bytes)) |span| {
+            const from = ch.startOffset();
+            extent.bytes = ch.endOffset() - from;
+            // The block's identity across re-parses. Hashed from the source rather than the AST
+            // because that is what an edit actually changes — a paragraph nobody touched hashes
+            // the same however far its index moved.
+            extent.hash = std.hash.XxHash3.hash(0, span);
             if (source.index) |idx| {
-                const starts = idx.starts;
-                const first: usize = @intCast(start - 1);
-                const after: usize = @intCast(end);
-                if (first < starts.len) {
-                    const from = starts[first];
-                    const to = if (after < starts.len) starts[after] else @as(u32, @intCast(source.bytes.len));
-                    if (to > from) {
-                        extent.bytes = to - from;
-                        // The block's identity across re-parses. Hashed from the source rather
-                        // than the AST because that is what an edit actually changes — a
-                        // paragraph nobody touched hashes the same however far its index moved.
-                        extent.hash = std.hash.XxHash3.hash(0, source.bytes[from..to]);
-                    }
-                }
+                const start_line = idx.lineOf(from);
+                extent.start_line = start_line;
+                extent.lines = idx.lineOf(ch.endOffset() -| 1) - start_line + 1;
             }
         }
         rs.blocks.appendExtent(gpa, extent);
     }
 }
 
-fn scanNodeInner(node: md.Node, rs: *RenderState, gpa: std.mem.Allocator, source: ScanSource) bool {
-    var self_has_table = false;
-    const ts = node.typeString();
-    if (std.mem.eql(u8, ts, "table")) {
-        self_has_table = true;
-        rs.ext_node_kinds.put(gpa, @intFromPtr(node.n), .table) catch {};
+fn scanNodeInner(node: ast.Node, rs: *RenderState, gpa: std.mem.Allocator, source: ScanSource) bool {
+    var self_has_table = node.nodeType() == .table;
+    if (self_has_table) {
         // Count columns once from the header (or first body row) so the render
         // loop never needs to re-traverse the row for this.
         var num_cols: usize = 0;
         var r = node.firstChild();
         while (r) |row| : (r = row.nextSibling()) {
-            const rts = row.typeString();
-            if (!std.mem.eql(u8, rts, "table_header") and !std.mem.eql(u8, rts, "table_row")) continue;
+            switch (row.nodeType()) {
+                .table_header, .table_row => {},
+                else => continue,
+            }
             var cl = row.firstChild();
             while (cl) |cell| : (cl = cell.nextSibling()) {
-                if (std.mem.eql(u8, cell.typeString(), "table_cell")) num_cols += 1;
+                if (cell.nodeType() == .table_cell) num_cols += 1;
             }
             break;
         }
         rs.table_col_counts.put(gpa, @intFromPtr(node.n), num_cols) catch {};
-    } else if (std.mem.eql(u8, ts, "table_row"))
-        rs.ext_node_kinds.put(gpa, @intFromPtr(node.n), .table_row) catch {}
-    else if (std.mem.eql(u8, ts, "table_header"))
-        rs.ext_node_kinds.put(gpa, @intFromPtr(node.n), .table_header) catch {}
-    else if (std.mem.eql(u8, ts, "table_cell"))
-        rs.ext_node_kinds.put(gpa, @intFromPtr(node.n), .table_cell) catch {}
-    else if (std.mem.eql(u8, ts, "strikethrough"))
-        rs.ext_node_kinds.put(gpa, @intFromPtr(node.n), .strikethrough) catch {};
-
-    if (node.nodeType() == md.c.CMARK_NODE_ITEM and node.isTaskListItem())
-        rs.task_items.put(gpa, @intFromPtr(node.n), node.taskListItemChecked()) catch {};
+    }
 
     // `[[wikilinks]]`. Only TEXT nodes: inline code (CMARK_NODE_CODE), fenced/indented code
     // blocks, and raw HTML all have their own node types and never reach here, so "don't link
     // inside code" needs no work. Link *labels* do — `[see [[A]]](http://x)` puts that text
     // under a LINK parent, and turning part of a link's own label into a second link is not a
     // thing a `TextLayoutWidget` can express.
-    if (node.nodeType() == md.c.CMARK_NODE_TEXT and !insideLinkOrImage(node)) {
+    if (node.nodeType() == .text and !insideLinkOrImage(node)) {
         if (node.literal()) |t| {
             if (wikilink_scan.tokensFor(gpa, t, source.spanFor(node))) |toks| {
                 if (toks.len > 0)
@@ -611,12 +568,12 @@ fn scanNodeInner(node: md.Node, rs: *RenderState, gpa: std.mem.Allocator, source
         }
     }
 
-    var self_has_image = (node.nodeType() == md.c.CMARK_NODE_IMAGE);
+    var self_has_image = (node.nodeType() == .image);
 
     // Raw HTML: GitHub READMEs routinely wrap their hero image in `<p align="center"><img …>`,
     // which cmark hands us as an opaque HTML block. Pull the `<img src>` URLs out once here so
     // rendering can show the actual images instead of the raw markup.
-    if (node.nodeType() == md.c.CMARK_NODE_HTML_BLOCK or node.nodeType() == md.c.CMARK_NODE_HTML_INLINE) {
+    if (node.nodeType() == .html_block or node.nodeType() == .html_inline) {
         if (node.literal()) |html| {
             if (html_images_mod.collect(html, gpa)) |urls| {
                 rs.html_images.put(gpa, @intFromPtr(node.n), urls) catch {
@@ -642,11 +599,11 @@ fn scanNodeInner(node: md.Node, rs: *RenderState, gpa: std.mem.Allocator, source
 
 /// True when `node` sits inside a markdown link or image, where its text is a label rather than
 /// body prose. Walks parents once per parse, never per frame.
-fn insideLinkOrImage(node: md.Node) bool {
+fn insideLinkOrImage(node: ast.Node) bool {
     var p = node.parent();
     while (p) |parent| : (p = parent.parent()) {
         switch (parent.nodeType()) {
-            md.c.CMARK_NODE_LINK, md.c.CMARK_NODE_IMAGE => return true,
+            .link, .image => return true,
             else => {},
         }
     }
@@ -660,14 +617,14 @@ fn insideLinkOrImage(node: md.Node) bool {
 /// Touch or create the GPU texture for every local image in the AST.
 /// Call every frame from MarkDownPreviewWidget.init() so dvui's one-frame
 /// texture eviction policy never fires between animation frames.
-pub fn preloadImages(root: md.Node, ctx: RenderContext) void {
+pub fn preloadImages(root: ast.Node, ctx: RenderContext) void {
     if (!ctx.rs.subtree_has_image.contains(@intFromPtr(root.n))) return;
     const arena = dvui.currentWindow().arena();
     preloadImageSubtree(root, ctx, arena);
 }
 
-fn preloadImageSubtree(node: md.Node, ctx: RenderContext, arena: std.mem.Allocator) void {
-    if (node.nodeType() == md.c.CMARK_NODE_IMAGE) {
+fn preloadImageSubtree(node: ast.Node, ctx: RenderContext, arena: std.mem.Allocator) void {
+    if (node.nodeType() == .image) {
         if (node.linkUrl()) |url| preloadSingleImage(url, ctx, arena);
         return;
     }
@@ -786,6 +743,11 @@ fn resolveImageBytes(ctx: RenderContext, arena: std.mem.Allocator, raw_url: []co
         return .{ .message = "cannot resolve image path (save file or use absolute path)" };
 
     if (ctx.rs.image_cache.get(abs_path)) |cached| return .{ .bytes = cached };
+
+    // `Io.Dir.cwd()` reaches for `posix.AT`, which wasm32-freestanding does not
+    // have — and the browser has no local files to read anyway. The document's
+    // own bytes still arrive through the host, so only `![](./shot.png)` is lost.
+    if (comptime !local_files_supported) return .{ .message = "no local files in the browser" };
 
     const fresh = Io.Dir.cwd().readFileAlloc(ctx.io, abs_path, ctx.gpa, .limited(max_image_bytes)) catch
         return .{ .message = "could not read image" };
@@ -1055,26 +1017,26 @@ fn decodeFileUriPath(arena: std.mem.Allocator, encoded: []const u8) ![]u8 {
 }
 
 /// Plain UTF-8 for clickable link labels; nested emph/strong in the label lose per-span styling.
-fn appendInlinePlainText(arena: std.mem.Allocator, n: md.Node, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-    var cur: ?md.Node = n.firstChild();
+fn appendInlinePlainText(arena: std.mem.Allocator, n: ast.Node, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+    var cur: ?ast.Node = n.firstChild();
     while (cur) |x| : (cur = x.nextSibling()) {
         switch (x.nodeType()) {
-            md.c.CMARK_NODE_TEXT => {
+            .text => {
                 if (x.literal()) |t| try out.appendSlice(arena, t);
             },
-            md.c.CMARK_NODE_SOFTBREAK => {
+            .softbreak => {
                 try out.append(arena, ' ');
             },
-            md.c.CMARK_NODE_LINEBREAK => {
+            .linebreak => {
                 try out.append(arena, '\n');
             },
-            md.c.CMARK_NODE_CODE => {
+            .code => {
                 if (x.literal()) |t| try out.appendSlice(arena, t);
             },
-            md.c.CMARK_NODE_LINK => {
+            .link => {
                 try appendInlinePlainText(arena, x, out);
             },
-            md.c.CMARK_NODE_IMAGE => {
+            .image => {
                 try out.appendSlice(arena, "![");
                 try appendInlinePlainText(arena, x, out);
                 try out.append(arena, ']');
@@ -1095,7 +1057,7 @@ fn appendInlinePlainText(arena: std.mem.Allocator, n: md.Node, out: *std.ArrayLi
     }
 }
 
-fn linkLabelPlainText(link: md.Node, arena: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+fn linkLabelPlainText(link: ast.Node, arena: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(arena);
     try appendInlinePlainText(arena, link, &list);
@@ -1132,7 +1094,7 @@ fn renderMarkdownImagePlaceholder(msg: []const u8, ids: *IdGen) void {
     });
 }
 
-fn renderMarkdownImage(img: md.Node, span: dvui.Options, ctx: RenderContext, ids: *IdGen) void {
+fn renderMarkdownImage(img: ast.Node, span: dvui.Options, ctx: RenderContext, ids: *IdGen) void {
     _ = span;
     const arena = dvui.currentWindow().arena();
     const raw_url = img.linkUrl() orelse {
@@ -1417,17 +1379,17 @@ fn renderTaskCheckbox(checked: bool, m: MarkerMetrics, ids: *IdGen) void {
     }
 }
 
-fn renderInlineFlowContainer(container: md.Node, span: dvui.Options, ctx: RenderContext, ids: *IdGen) void {
-    var cur: ?md.Node = container.firstChild();
+fn renderInlineFlowContainer(container: ast.Node, span: dvui.Options, ctx: RenderContext, ids: *IdGen) void {
+    var cur: ?ast.Node = container.firstChild();
     while (cur) |node| {
-        if (node.nodeType() == md.c.CMARK_NODE_IMAGE) {
+        if (node.nodeType() == .image) {
             renderMarkdownImage(node, span, ctx, ids);
             cur = node.nextSibling();
             continue;
         }
         if (hasImageSubtree(ctx, node)) {
             switch (node.nodeType()) {
-                md.c.CMARK_NODE_HTML_INLINE => {
+                .html_inline => {
                     // Only reachable when the tag carried an `<img src>` (that's what put this
                     // node in `subtree_has_image`); draw the images, drop the markup.
                     if (ctx.rs.html_images.get(@intFromPtr(node.n))) |urls| {
@@ -1440,25 +1402,25 @@ fn renderInlineFlowContainer(container: md.Node, span: dvui.Options, ctx: Render
                         }
                     }
                 },
-                md.c.CMARK_NODE_EMPH => {
+                .emph => {
                     if (node.firstChild()) |_| {
                         const f = span.fontGet().withStyle(.italic);
                         renderInlineFlowContainer(node, span.override(.{ .font = f }), ctx, ids);
                     }
                 },
-                md.c.CMARK_NODE_STRONG => {
+                .strong => {
                     if (node.firstChild()) |_| {
                         const f = span.fontGet().withWeight(.bold);
                         renderInlineFlowContainer(node, span.override(.{ .font = f }), ctx, ids);
                     }
                 },
-                md.c.CMARK_NODE_LINK => {
+                .link => {
                     const link_font = span.fontGet().withUnderline(.{});
                     const link_color = dvui.themeGet().focus;
                     renderInlineFlowContainer(node, span.override(.{ .font = link_font, .color_text = link_color }), ctx, ids);
                 },
                 else => {
-                    if (extKind(ctx, node) == .strikethrough) {
+                    if (node.nodeType() == .strikethrough) {
                         const strike_font = span.fontGet().withStrike(.{});
                         const strike_color = dvui.themeGet().color(.control, .text).opacity(0.5);
                         renderInlineFlowContainer(node, span.override(.{ .font = strike_font, .color_text = strike_color }), ctx, ids);
@@ -1482,9 +1444,9 @@ fn renderInlineFlowContainer(container: md.Node, span: dvui.Options, ctx: Render
         // Batch a run of siblings that contain no images into one textLayout.
         const run_first = node;
         var run_last = node;
-        var scan: ?md.Node = node;
+        var scan: ?ast.Node = node;
         while (scan) |s| {
-            if (s.nodeType() == md.c.CMARK_NODE_IMAGE) break;
+            if (s.nodeType() == .image) break;
             if (hasImageSubtree(ctx, s)) break;
             run_last = s;
             scan = s.nextSibling();
@@ -1497,7 +1459,7 @@ fn renderInlineFlowContainer(container: md.Node, span: dvui.Options, ctx: Render
             .id_extra = ids.next(),
         });
         defer tl.deinit();
-        var z: ?md.Node = run_first;
+        var z: ?ast.Node = run_first;
         while (z) |w| {
             renderInlineNodeToTl(tl, w, span, ctx, ids);
             if (w.n == run_last.n) break;
@@ -1510,9 +1472,9 @@ fn renderInlineFlowContainer(container: md.Node, span: dvui.Options, ctx: Render
 /// `span` carries inherited font/color down into inline content.
 /// Only `.font` and `.color_text` are meaningful here.
 /// Caller must ensure `n` has no `CMARK_NODE_IMAGE` in any descendant.
-fn renderInlines(tl: *dvui.TextLayoutWidget, n: md.Node, span: dvui.Options, ctx: RenderContext, ids: *IdGen) void {
+fn renderInlines(tl: *dvui.TextLayoutWidget, n: ast.Node, span: dvui.Options, ctx: RenderContext, ids: *IdGen) void {
     std.debug.assert(!hasImageSubtree(ctx, n));
-    var cur: ?md.Node = n.firstChild();
+    var cur: ?ast.Node = n.firstChild();
     while (cur) |x| : (cur = x.nextSibling()) {
         renderInlineNodeToTl(tl, x, span, ctx, ids);
     }
@@ -1526,7 +1488,7 @@ fn renderInlines(tl: *dvui.TextLayoutWidget, n: md.Node, span: dvui.Options, ctx
 /// installed, and it's why the fast path is a single hash miss.
 fn renderTextWithWikilinks(
     tl: *dvui.TextLayoutWidget,
-    node: md.Node,
+    node: ast.Node,
     literal: []const u8,
     span: dvui.Options,
     ctx: RenderContext,
@@ -1546,7 +1508,7 @@ fn renderTextWithWikilinks(
 
 fn renderWikilink(
     tl: *dvui.TextLayoutWidget,
-    node: md.Node,
+    node: ast.Node,
     token_index: usize,
     tok: wikilink_scan.Token,
     span: dvui.Options,
@@ -1586,18 +1548,18 @@ fn renderWikilink(
     }
 }
 
-fn renderInlineNodeToTl(tl: *dvui.TextLayoutWidget, x: md.Node, span: dvui.Options, ctx: RenderContext, ids: *IdGen) void {
+fn renderInlineNodeToTl(tl: *dvui.TextLayoutWidget, x: ast.Node, span: dvui.Options, ctx: RenderContext, ids: *IdGen) void {
     switch (x.nodeType()) {
-        md.c.CMARK_NODE_TEXT => {
+        .text => {
             if (x.literal()) |t| renderTextWithWikilinks(tl, x, t, span, ctx);
         },
-        md.c.CMARK_NODE_SOFTBREAK => {
+        .softbreak => {
             addText(tl, " ", .{});
         },
-        md.c.CMARK_NODE_LINEBREAK => {
+        .linebreak => {
             addText(tl, "\n", .{});
         },
-        md.c.CMARK_NODE_CODE => {
+        .code => {
             if (x.literal()) |t| {
                 addText(tl, t, .{
                     // Match the editor's monospace size (also `Font.theme(.mono)`).
@@ -1606,19 +1568,19 @@ fn renderInlineNodeToTl(tl: *dvui.TextLayoutWidget, x: md.Node, span: dvui.Optio
                 });
             }
         },
-        md.c.CMARK_NODE_EMPH => {
+        .emph => {
             if (x.firstChild()) |_| {
                 const f = span.fontGet().withStyle(.italic);
                 renderInlines(tl, x, span.override(.{ .font = f }), ctx, ids);
             }
         },
-        md.c.CMARK_NODE_STRONG => {
+        .strong => {
             if (x.firstChild()) |_| {
                 const f = span.fontGet().withWeight(.bold);
                 renderInlines(tl, x, span.override(.{ .font = f }), ctx, ids);
             }
         },
-        md.c.CMARK_NODE_LINK => {
+        .link => {
             const link_font = span.fontGet().withUnderline(.{});
             const link_color = dvui.themeGet().focus;
             const link_opts = span.override(.{ .font = link_font, .color_text = link_color });
@@ -1634,14 +1596,14 @@ fn renderInlineNodeToTl(tl: *dvui.TextLayoutWidget, x: md.Node, span: dvui.Optio
                 }
             }
         },
-        md.c.CMARK_NODE_IMAGE => unreachable,
-        md.c.CMARK_NODE_HTML_INLINE => {
+        .image => unreachable,
+        .html_inline => {
             if (x.literal()) |t| addText(tl, t, .{
                 .font = dvui.Font.theme(.mono),
                 .color_text = dvui.themeGet().color(.err, .text),
             });
         },
-        md.c.CMARK_NODE_FOOTNOTE_REFERENCE => {
+        .footnote_reference => {
             if (x.literal()) |t| {
                 const fn_font = dvui.Font.theme(.mono).larger(-1);
                 const fn_color = dvui.themeGet().focus.opacity(0.8);
@@ -1651,7 +1613,7 @@ fn renderInlineNodeToTl(tl: *dvui.TextLayoutWidget, x: md.Node, span: dvui.Optio
             }
         },
         else => {
-            if (extKind(ctx, x) == .strikethrough) {
+            if (x.nodeType() == .strikethrough) {
                 const strike_font = span.fontGet().withStrike(.{});
                 const strike_color = dvui.themeGet().color(.control, .text).opacity(0.5);
                 renderInlines(tl, x, span.override(.{ .font = strike_font, .color_text = strike_color }), ctx, ids);
@@ -1686,7 +1648,7 @@ fn renderInlineNodeToTl(tl: *dvui.TextLayoutWidget, x: md.Node, span: dvui.Optio
 ///
 /// The wrapper is also what makes the ids stable: widget ids inside a block are relative to it,
 /// so `ids` restarts per block and a skipped neighbour can't shift anything.
-fn renderTopLevel(doc_node: md.Node, ids: *IdGen, ctx: RenderContext) void {
+fn renderTopLevel(doc_node: ast.Node, ids: *IdGen, ctx: RenderContext) void {
     const rs = ctx.rs;
     const metrics = currentMetrics();
 
@@ -1962,7 +1924,7 @@ fn renderTopLevel(doc_node: md.Node, ids: *IdGen, ctx: RenderContext) void {
         if (block_profile) |list| {
             list.append(block_profile_gpa.?, .{
                 .index = index,
-                .kind = ch.typeString(),
+                .kind = @tagName(ch.nodeType()),
                 .ns = @intCast(std.Io.Clock.boot.now(dvui.io).nanoseconds - prof_t0),
                 .text_layouts = stats.text_layouts - prof_tl,
                 .add_text_bytes = stats.add_text_bytes - prof_bytes,
@@ -2167,11 +2129,11 @@ pub fn anchorCapture(rs: *const RenderState, viewport_y: f32, column_width: f32,
 /// True when any cell in this table row still needs a real layout pass — never measured, measured
 /// only once and so possibly still settling, or measured against a column width the grid has
 /// since changed its mind about.
-fn rowNeedsMeasure(ctx: RenderContext, g: *dvui.GridWidget, row: md.Node) bool {
+fn rowNeedsMeasure(ctx: RenderContext, g: *dvui.GridWidget, row: ast.Node) bool {
     var col: usize = 0;
     var cl = row.firstChild();
     while (cl) |cell| : (cl = cell.nextSibling()) {
-        if (extKind(ctx, cell) != .table_cell) continue;
+        if (cell.nodeType() != .table_cell) continue;
         defer col += 1;
         const cached = ctx.rs.cell_sizes.get(@intFromPtr(cell.n)) orelse return true;
         if (!cached.settled or cached.col_w != g.colWidth(col)) return true;
@@ -2190,7 +2152,7 @@ fn rowNeedsMeasure(ctx: RenderContext, g: *dvui.GridWidget, row: md.Node) bool {
 /// inside re-wraps narrower, the next frame's measurement is narrower still, and a short cell
 /// ends up one character wide. Natural widths are measured from the text instead, so they are the
 /// same every frame no matter what the table currently looks like.
-fn tableColumnWidths(n: md.Node, num_cols: usize, avail: f32, cell_padding: dvui.Rect, ctx: RenderContext) []const f32 {
+fn tableColumnWidths(n: ast.Node, num_cols: usize, avail: f32, cell_padding: dvui.Rect, ctx: RenderContext) []const f32 {
     const font = dvui.Font.theme(.body);
     const body_m = font.sizeM(1, 1).w;
     const mono_m = dvui.Font.theme(.mono).sizeM(1, 1).w;
@@ -2223,13 +2185,13 @@ fn tableColumnWidths(n: md.Node, num_cols: usize, avail: f32, cell_padding: dvui
 
     var row = n.firstChild();
     while (row) |r| : (row = r.nextSibling()) {
-        const rk = extKind(ctx, r);
+        const rk = r.nodeType();
         if (rk != .table_row and rk != .table_header) continue;
         const cell_font = if (rk == .table_header) font.withWeight(.bold) else font;
         var col: usize = 0;
         var cl = r.firstChild();
         while (cl) |cell| : (cl = cell.nextSibling()) {
-            if (extKind(ctx, cell) != .table_cell) continue;
+            if (cell.nodeType() != .table_cell) continue;
             defer col += 1;
             if (col >= num_cols) continue;
             // Rounded up: text measurement and layout disagree by fractions of a point, and a
@@ -2265,20 +2227,20 @@ fn tableColumnWidths(n: md.Node, num_cols: usize, avail: f32, cell_padding: dvui
 /// than flattening to plain text so each run is measured in the font it will actually be drawn
 /// in: `` `--verbose` `` is monospace and wider than the same characters in the body font, and a
 /// column measured in the wrong font is a column that wraps when it shouldn't.
-fn inlineNaturalWidth(node: md.Node, font: dvui.Font) f32 {
+fn inlineNaturalWidth(node: ast.Node, font: dvui.Font) f32 {
     var total: f32 = 0;
     var c = node.firstChild();
     while (c) |x| : (c = x.nextSibling()) {
         switch (x.nodeType()) {
-            md.c.CMARK_NODE_TEXT, md.c.CMARK_NODE_HTML_INLINE => {
+            .text, .html_inline => {
                 if (x.literal()) |t| total += font.textSize(t).w;
             },
-            md.c.CMARK_NODE_CODE => {
+            .code => {
                 if (x.literal()) |t| total += dvui.Font.theme(.mono).textSize(t).w;
             },
-            md.c.CMARK_NODE_SOFTBREAK, md.c.CMARK_NODE_LINEBREAK => total += font.textSize(" ").w,
-            md.c.CMARK_NODE_STRONG => total += inlineNaturalWidth(x, font.withWeight(.bold)),
-            md.c.CMARK_NODE_EMPH => total += inlineNaturalWidth(x, font.withStyle(.italic)),
+            .softbreak, .linebreak => total += font.textSize(" ").w,
+            .strong => total += inlineNaturalWidth(x, font.withWeight(.bold)),
+            .emph => total += inlineNaturalWidth(x, font.withStyle(.italic)),
             else => total += inlineNaturalWidth(x, font),
         }
     }
@@ -2336,12 +2298,12 @@ fn fitColumns(widths: []f32, avail: f32, gpa: std.mem.Allocator) void {
     }
 }
 
-fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
+fn renderBlock(n: ast.Node, ids: *IdGen, ctx: RenderContext) void {
     statBlock();
     const t = n.nodeType();
     switch (t) {
-        md.c.CMARK_NODE_DOCUMENT => renderTopLevel(n, ids, ctx),
-        md.c.CMARK_NODE_BLOCK_QUOTE => {
+        .document => renderTopLevel(n, ids, ctx),
+        .block_quote => {
             var outer = box(@src(), .{ .dir = .horizontal }, .{
                 .expand = .horizontal,
                 .margin = .{ .x = block_inset_x, .y = 4, .w = block_inset_x, .h = 4 },
@@ -2368,16 +2330,16 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
             var c = n.firstChild();
             while (c) |ch| : (c = ch.nextSibling()) renderBlock(ch, ids, ctx);
         },
-        md.c.CMARK_NODE_LIST => {
+        .list => {
             var it = n.firstChild();
-            var idx: i32 = n.listStart();
+            var idx: u32 = n.listStart();
             const list_kind = n.listKind();
             const col_w = dvui.Font.theme(.body).sizeM(2.2, 0).w;
             // Once per list rather than per item: `textSizeEx` shapes a glyph and hits the font
             // cache, and every marker in one list resolves to the same placement anyway.
             const marker_metrics: MarkerMetrics = .forBody();
             while (it) |item_node| : (it = item_node.nextSibling()) {
-                if (item_node.nodeType() != md.c.CMARK_NODE_ITEM) {
+                if (item_node.nodeType() != .item) {
                     renderBlock(item_node, ids, ctx);
                     continue;
                 }
@@ -2389,7 +2351,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 defer row.deinit();
 
                 var buf: [24]u8 = undefined;
-                const task_checked: ?bool = ctx.rs.task_items.get(@intFromPtr(item_node.n));
+                const task_checked: ?bool = if (item_node.isTaskListItem()) item_node.taskListItemChecked() else null;
                 const bullet_str: []const u8 = switch (list_kind) {
                     .ul => "•",
                     .ol => std.fmt.bufPrint(&buf, "{d}.", .{idx}) catch "?",
@@ -2433,11 +2395,11 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 }
             }
         },
-        md.c.CMARK_NODE_ITEM => {
+        .item => {
             var c = n.firstChild();
             while (c) |ch| : (c = ch.nextSibling()) renderBlock(ch, ids, ctx);
         },
-        md.c.CMARK_NODE_CODE_BLOCK => {
+        .code_block => {
             const info = n.fenceInfo() orelse "";
             const code = n.literal() orelse "";
             var outer = box(@src(), .{ .dir = .vertical }, .{
@@ -2479,7 +2441,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
             const mono: dvui.Options = .{ .font = dvui.Font.theme(.mono) };
             if (!drawHighlightedCode(tl_c, code, info, mono)) addText(tl_c, code, mono);
         },
-        md.c.CMARK_NODE_HTML_BLOCK => {
+        .html_block => {
             // `<p align="center"><img …></p>` is how most READMEs carry their hero image; render
             // the images and drop the wrapper markup rather than dumping the tags as raw text.
             if (ctx.rs.html_images.get(@intFromPtr(n.n))) |urls| {
@@ -2513,7 +2475,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 });
             }
         },
-        md.c.CMARK_NODE_PARAGRAPH => {
+        .paragraph => {
             if (!hasImageSubtree(ctx, n)) {
                 var tl = textLayout(@src(), .{}, .{
                     .expand = .horizontal,
@@ -2533,7 +2495,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 renderInlineFlowContainer(n, .{ .background = ctx.background }, ctx, ids);
             }
         },
-        md.c.CMARK_NODE_HEADING => {
+        .heading => {
             const level = @max(1, @min(6, n.headingLevel()));
             const size_bump: f32 = switch (level) {
                 1 => 9,
@@ -2571,7 +2533,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 renderInlineFlowContainer(n, span, ctx, ids);
             }
         },
-        md.c.CMARK_NODE_THEMATIC_BREAK => {
+        .thematic_break => {
             _ = dvui.separator(@src(), .{
                 .expand = .horizontal,
                 .margin = .{ .y = 10, .h = 10 },
@@ -2579,7 +2541,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 .id_extra = ids.next(),
             });
         },
-        md.c.CMARK_NODE_FOOTNOTE_DEFINITION => {
+        .footnote_definition => {
             if (n.literal()) |name| {
                 var tl = textLayout(@src(), .{}, .{
                     .expand = .horizontal,
@@ -2598,7 +2560,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
             while (c) |ch| : (c = ch.nextSibling()) renderBlock(ch, ids, ctx);
         },
         else => {
-            if (extKind(ctx, n) == .table) {
+            if (n.nodeType() == .table) {
                 const arena = dvui.currentWindow().arena();
 
                 const num_cols = ctx.rs.table_col_counts.get(@intFromPtr(n.n)) orelse return;
@@ -2718,14 +2680,14 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 var body_row: usize = 0;
                 var c = n.firstChild();
                 while (c) |row| : (c = row.nextSibling()) {
-                    const rk = extKind(ctx, row);
+                    const rk = row.nodeType();
                     if (rk != .table_row and rk != .table_header) continue;
 
                     if (rk == .table_header) {
                         var col: usize = 0;
                         var cl = row.firstChild();
                         while (cl) |cell| : (cl = cell.nextSibling()) {
-                            if (extKind(ctx, cell) != .table_cell) continue;
+                            if (cell.nodeType() != .table_cell) continue;
                             const label = linkLabelPlainText(cell, arena) catch "";
                             const hcell = g.colHeader(col, banded.opts(0, cell_padding));
                             defer hcell.deinit();
@@ -2782,7 +2744,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
                         var col: usize = 0;
                         var cl = row.firstChild();
                         while (cl) |cell| : (cl = cell.nextSibling()) {
-                            if (extKind(ctx, cell) != .table_cell) continue;
+                            if (cell.nodeType() != .table_cell) continue;
                             // A skipped cell still has to hand the grid the size its contents
                             // would have, or the row collapses and the column shrinks to whatever
                             // happens to be on screen. A cell with no measurement yet — or one
@@ -2863,7 +2825,7 @@ fn renderBlock(n: md.Node, ids: *IdGen, ctx: RenderContext) void {
     }
 }
 
-pub fn renderDocument(root: md.Node, ctx: RenderContext) void {
+pub fn renderDocument(root: ast.Node, ctx: RenderContext) void {
     // Per-draw counters reset here; `render_ns` deliberately accumulates (see `Stats`).
     const carried_ns = stats.render_ns;
     const carried_parse_ns = stats.parse_ns;
@@ -2910,7 +2872,7 @@ fn wikilinkResolver(ctx: RenderContext) ?*WikilinkApi {
 /// visible link, so the steady-state path must be the hash lookup and nothing more.
 fn resolveWikilink(
     ctx: RenderContext,
-    node: md.Node,
+    node: ast.Node,
     token_index: usize,
     tok: wikilink_scan.Token,
 ) ResolvedLink {

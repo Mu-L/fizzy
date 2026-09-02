@@ -10,7 +10,17 @@
 //! pointer stays valid across map growth, and each worker writes only its own entry's bytes
 //! before flipping `status` with release ordering.
 const std = @import("std");
+const builtin = @import("builtin");
 const dvui = @import("dvui");
+
+/// Whether this build can fetch at all. Remote images need an HTTP client and a
+/// worker thread; the wasm build has neither — `dvui.io` is the failing vtable
+/// there and the module is single-threaded — so a remote image resolves to
+/// `.failed` and the preview draws its placeholder, exactly as it does natively
+/// when a fetch fails. Wiring the browser's `fetch` into a real `std.Io` is the
+/// seam that turns this back on; it is the same one the plugin store's catalog
+/// fetch is waiting for, so both light up together.
+pub const fetch_supported = builtin.target.cpu.arch != .wasm32;
 
 pub const Status = enum(u8) { fetching, ready, failed };
 
@@ -64,6 +74,7 @@ pub const Result = union(enum) {
 
 /// Look up `url`, starting a fetch on first sight. UI thread only.
 pub fn request(allocator: std.mem.Allocator, url: []const u8) Result {
+    if (comptime !fetch_supported) return .failed;
     if (gpa == null) gpa = allocator;
     const a = gpa.?;
 
@@ -102,6 +113,7 @@ pub fn request(allocator: std.mem.Allocator, url: []const u8) Result {
 /// Join every worker and free the cache. Called from the plugin's `deinit` — a dylib must not be
 /// unloaded with its own threads still running.
 pub fn deinit() void {
+    if (comptime !fetch_supported) return;
     const a = gpa orelse {
         entries = .empty;
         return;

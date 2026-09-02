@@ -46,10 +46,9 @@
         .dvui_singleton_app = .{
             .path = "libs/dvui-singleton-app",
         },
-        .cmark_gfm = .{
-            .url = "git+https://github.com/kristoff-it/cmark-gfm#cd0aba87cc89f0c8aa9393e59505db271ea30239",
-            .hash = "cmark_gfm-0.1.0-uQgTKymaFwDK0jVZszXfDtQtW6BnS44Bp0GS55TVBD4p",
-            .lazy = true,
+        .md4zig = .{
+            .url = "git+https://github.com/fizzyedit/md4zig#2d0a687d28be9849b9abe3453bfb7c9f22ffcda1",
+            .hash = "md4zig-0.1.0-iiatj7oOBgCcrw8ee3UISfYe2LsKVEf7O3osC85HthPX",
         },
         .nightwatch = .{
             .url = "git+https://github.com/neurocyte/nightwatch#cac3b9edb3a59f5b3a290cf3b76044ad9b09ef28",
