@@ -28,9 +28,9 @@ the first time; use it as reference after that.
         │  window · frame loop · menu/sidebar/panel layout · docs │
         │                                                         │
         │   ┌──────────────┐        ┌──────────────────────────┐  │
-        │   │     Host     │◄──────►│        EditorAPI         │  │
+        │   │     Host     │<------>│        EditorAPI         │  │
         │   │  registries  │  reach │ (Fizzy's read/util       │  │
-        │   │  + services  │  back  │  surface: arena, folder…) │  │
+        │   │  + services  │  back  │  surface: arena, folder) │  │
         │   └──────┬───────┘        └──────────────────────────┘  │
         └──────────┼──────────────────────────────────────────────┘
                    │ register(host) + vtable calls

@@ -27,6 +27,9 @@ pub const Preview = struct {
     /// The offset `applyAnchor` last wrote. Anything else finding a different one there means the
     /// position was set from outside the frame loop — see `applyAnchor`.
     anchor_applied_y: ?f32 = null,
+    /// Diagnostics only (`render_ast.diag`): last frame's virtual size, to spot the scroll
+    /// container's own total moving without any single block tripping the height probe.
+    diag_prev_virt: f32 = -1,
     content_hash: u64 = std.math.maxInt(u64),
     ast_root: ?*anyopaque = null,
     gpa: ?std.mem.Allocator = null,
@@ -91,7 +94,19 @@ pub const Preview = struct {
         // An offset that differs from what this function last wrote is therefore an instruction,
         // not drift. Adopt it, and re-derive the anchor from it.
         if (self.anchor_applied_y) |prev| {
-            if (@abs(self.scroll.viewport.y - prev) > 0.01) self.anchor = null;
+            if (@abs(self.scroll.viewport.y - prev) > 0.01) {
+                // Something moved the scroll position between frames and the anchor is about to
+                // adopt it. Normal for a wheel tick; a *large* delta here is the signature of the
+                // layout jumping, because it means the position changed by more than the input
+                // that caused it. See `render_ast.diag`.
+                if (render_ast.diag and @abs(self.scroll.viewport.y - prev) > 40) {
+                    dvui.log.warn(
+                        "md-diag: scroll moved {d:.1} -> {d:.1} ({d:.1}pt) between frames, anchor re-derived",
+                        .{ prev, self.scroll.viewport.y, self.scroll.viewport.y - prev },
+                    );
+                }
+                self.anchor = null;
+            }
         }
         if (self.anchor == null) {
             self.anchor = render_ast.anchorCapture(
@@ -104,6 +119,7 @@ pub const Preview = struct {
         }
 
         const a = self.anchor orelse return;
+        const before_y = self.scroll.viewport.y;
         const y = render_ast.anchorResolve(
             &self.rs,
             a,
@@ -111,8 +127,30 @@ pub const Preview = struct {
             opts.content_padding.y,
             geo.max_scroll,
         );
+        // The anchor moving the reader itself.
+        //
+        // The adopt-log above only fires when something *else* changed the offset. It cannot see
+        // this: here the anchor is the thing writing the offset, so a wrong resolve moves the
+        // reader with nothing to report it. `anchorResolve` clamps against `max_scroll`, which
+        // comes from `virtual_size` — i.e. from the widgets, not from the height table — so it
+        // can move even when every block height is stable and the height probes stay silent.
+        if (render_ast.diag and @abs(y - before_y) > 20) {
+            dvui.log.warn(
+                "md-diag: ANCHOR resolved {d:.1} -> {d:.1} ({d:.1}pt) line={d} off={d:.1} at_end={any} virt={d:.1} max_scroll={d:.1}",
+                .{ before_y, y, y - before_y, a.line, a.offset_px, a.at_end, self.scroll.virtual_size.h, geo.max_scroll },
+            );
+        }
         self.scroll.viewport.y = y;
         self.anchor_applied_y = y;
+        if (render_ast.diag) {
+            const v = self.scroll.virtual_size.h;
+            if (self.diag_prev_virt >= 0 and @abs(v - self.diag_prev_virt) > 20) {
+                dvui.log.warn("md-diag: virtual_size {d:.1} -> {d:.1} ({d:.1}pt) — the scroll total moved", .{
+                    self.diag_prev_virt, v, v - self.diag_prev_virt,
+                });
+            }
+            self.diag_prev_virt = v;
+        }
     }
 
     fn captureAnchor(self: *Preview, opts: PreviewOptions) void {
@@ -154,6 +192,12 @@ pub const Preview = struct {
         // as the preview sash / first layout, which is exactly when a hitch is most visible.
         // Edits (ast already present) stay synchronous so we don't thrash workers per keystroke.
         if (self.ast_root == null and self.parse_job == null) {
+            if (render_ast.diag) {
+                dvui.log.warn(
+                    "md-diag: starting background parse (hash {x} -> {x}, {d} bytes, {d} blocks discarded)",
+                    .{ self.content_hash, h, content.len, self.rs.blocks.len() },
+                );
+            }
             self.content_hash = h;
             self.rs.clear(gpa);
             self.startParseJob(content, gpa, h);
@@ -174,6 +218,12 @@ pub const Preview = struct {
         // `scanNode` needs the original source, not just the AST: cmark's text nodes have had
         // backslash escapes applied and adjacent runs merged, so `\[\[A]]` is indistinguishable
         // from `[[A]]` by then. See `md/wikilink_scan.zig`.
+        if (render_ast.diag) {
+            dvui.log.warn(
+                "md-diag: SYNC re-parse (hash {x} -> {x}, {d} bytes, {d} blocks discarded)",
+                .{ self.content_hash, hash, content.len, self.rs.blocks.len() },
+            );
+        }
         md_parse.freeCachedRoot(self.ast_root);
         self.ast_root = null;
         self.rs.clear(gpa);
@@ -241,6 +291,12 @@ pub const Preview = struct {
         self.ast_root = job.ast_root;
         job.ast_root = null;
         // Worker already filled `job.rs` (parse + scan). Swap it in — no UI-thread scan.
+        if (render_ast.diag) {
+            dvui.log.warn(
+                "md-diag: parse job landed — replacing RenderState ({d} measured blocks, layout_width {d:.1}) with the worker's fresh one",
+                .{ self.rs.blocks.len(), self.rs.blocks.layout_width },
+            );
+        }
         self.rs.clear(gpa);
         self.rs.deinit(gpa);
         self.rs = job.rs;

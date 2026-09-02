@@ -139,8 +139,14 @@ pub const TableLayout = struct {
 /// future caller ever set it.
 pub var virtualize_blocks: bool = true;
 
-/// `FIZZY_MD_DIAG=1` logs the two things that make this preview jump: the column width being
-/// treated as "still resizing", and a block's height changing under the reader.
+/// `FIZZY_MD_DIAG=1` logs what makes this preview jump: the column width being treated as "still
+/// resizing", a block's height changing under the reader, a block *emitting* a height the table
+/// disagrees with, the anchor or the scroll total moving, and — the one that finally found the
+/// spacer bug — a block being laid out somewhere other than where the height table puts it.
+///
+/// The last of those exists because every other probe here asks the height table, and the table
+/// can be perfectly self-consistent while the layout disagrees with it. A jump whose cause is not
+/// a block at all (a spacer, a stale widget size) is invisible to all the others.
 ///
 /// Env-gated because the useful version is noisy — it prints per block per frame — and because
 /// every real cause found in this file so far was found by measuring, not by reasoning. A profile
@@ -156,7 +162,12 @@ pub fn initDiagFromEnv() void {
 }
 
 /// A height change at least this large is worth reporting — bigger than any settling wobble.
-const diag_height_jump: f32 = 50;
+///
+/// Deliberately small. A whole-layout jump does not have to come from one block moving a long
+/// way: a dozen blocks each shifting 15pt move the reader just as far, and at the old threshold
+/// of 50 none of them were reported, which made the log say "nothing happened" during a jump the
+/// user could plainly see.
+const diag_height_jump: f32 = 8;
 
 /// Off-screen blocks `renderTopLevel` may re-measure per frame after a width change. Bounds what
 /// a resize costs: without it, every frame of a window drag or a panel's open animation is a
@@ -300,6 +311,14 @@ pub const RenderState = struct {
     /// as owed work: `Stats.pending_measure` asks for another frame, and a table whose cells never
     /// settle would otherwise keep the whole app awake for ever.
     block_measure_exhausted: bool = false,
+    /// Diagnostics only (`diag`): the gap between where the height table says the first drawn
+    /// block of the frame is and where it actually got laid out. A *change* in this gap is the
+    /// spacer standing in for skipped blocks disagreeing with the blocks it replaces.
+    place_err: f32 = std.math.nan(f32),
+    /// Diagnostics only: the last spacer height emitted for a skipped run, and the block it
+    /// started at. Lets the placement probe say whether the cursor or the spacer moved.
+    diag_last_spacer: f32 = 0,
+    diag_last_skip_from: usize = 0,
     /// Whether the text column changed width this frame — a sash drag, a window resize, a panel
     /// animating open. Set by `renderTopLevel`, read by the table renderer, which spends its own
     /// measuring budgets and needs the same answer for the same reason: work done at a width that
@@ -436,8 +455,6 @@ const paragraph_margin_y: f32 = 4;
 const block_inset_x: f32 = 14;
 
 const max_image_bytes: usize = 16 * 1024 * 1024;
-const max_image_display_width: f32 = 720;
-const max_image_display_height: f32 = 540;
 
 // ---------------------------------------------------------------------------
 // Per-node fast lookups (replaces isTable/typeString calls in render loop)
@@ -494,8 +511,8 @@ fn blockKind(n: md.Node, rs: *const RenderState) bh.BlockKind {
         md.c.CMARK_NODE_THEMATIC_BREAK => return .rule,
         md.c.CMARK_NODE_HTML_BLOCK => return .html,
         md.c.CMARK_NODE_PARAGRAPH => {
-            // A paragraph that exists to hold a picture is nothing like a paragraph of prose: one
-            // line of source, and up to `max_image_display_height` on screen.
+            // A paragraph that exists to hold a picture is nothing like a paragraph of prose:
+            // one line of source, and as tall as the image on screen.
             var c = n.firstChild();
             while (c) |x| : (c = x.nextSibling()) {
                 if (x.nodeType() == md.c.CMARK_NODE_IMAGE) return .image;
@@ -1181,8 +1198,24 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
     // During a sash/resize frame the wrapper's content rect can briefly report 0 — fall back to
     // the column width so the hero doesn't collapse to nothing for that frame.
     const avail_w = blk: {
-        const w = outer.data().contentRect().w;
-        break :blk if (w > 1) w else ctx.column_width;
+        const rect_w = outer.data().contentRect().w;
+        // During a sash/resize frame the wrapper's content rect can briefly report 0 — fall back
+        // to the column width so the hero doesn't collapse to nothing for that frame.
+        if (!(rect_w > 1)) break :blk ctx.column_width;
+        // ...and take the smaller of the two the rest of the time.
+        //
+        // The wrapper's content rect LAGS while the pane is being resized — measured at two
+        // frames behind during a slide — whereas `column_width` is recomputed every frame and
+        // tracks the real width exactly. A stale rect is a *larger* width while the pane is
+        // narrowing, so the image was being drawn wider than the pane it had to fit in, then
+        // snapping back once the rect caught up: the "image jumps while the split animates"
+        // glitch. (The old fixed 720x540 box hid this for any column wider than 720, because
+        // both widths clamped to the same box.)
+        //
+        // `@min` is what makes this safe in both directions: a quote or list item genuinely has
+        // less room than the column, and taking the smaller value keeps that indentation
+        // working, while never letting a stale value push the image past the column.
+        break :blk @min(rect_w, ctx.column_width);
     };
 
     const bytes: []const u8 = switch (resolved) {
@@ -1260,27 +1293,42 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
 }
 
 /// Point size to draw an image of natural size `nat` at, honouring what the markup asked for and
-/// the pane's ceilings. Null for a degenerate natural size. Shared by the raster and SVG paths so
-/// a `<img width="25%">` means the same thing either way.
+/// the width of the column it has to fit in. Null for a degenerate natural size.
+///
+/// **The column is the only ceiling.** This used to fit every image inside a fixed 720x540 box,
+/// which predated `avail_w` existing at all — back then that box *was* the layout rule. Once the
+/// real constraint arrived the box was left in place, and it did two things nobody wanted:
+///
+///   - The height half had nothing to justify it. A pane scrolls vertically, so a tall image
+///     overflows nothing. All the cap did was shrink tall images, and because the fit preserves
+///     the aspect ratio it took their *width* down with it — an 800x2400 diagram rendered 180pt
+///     wide in an 850pt column, a fifth of the space it had.
+///   - Both halves silently overrode an explicit `width=`/`height=` in the markup, which is the
+///     one case where the document has actually said what it wants.
+///
+/// So: an image is drawn at the size the markup asked for, or at its natural size, and is scaled
+/// down only when that would be wider than the column. Nothing else touches it.
 fn displaySize(nat: dvui.Size, want: RequestedSize, avail_w: f32) ?dvui.Size {
     if (nat.w <= 0 or nat.h <= 0) return null;
     const r = nat.w / nat.h;
 
     // `width="25%"` is treated as a scale of the image's *intrinsic* size, not of the pane —
     // so a logo stays a constant 25% of itself as the store/center is resized. (Resolving
-    // against the containing block made the pixi hero grow and shrink with the pane.) A size
-    // the markup asked for still wins over the natural size; the pane is only a fit ceiling.
+    // against the containing block made the pixi hero grow and shrink with the pane.)
     const requested_w: ?f32 = resolveRequested(want.width, nat.w);
     const requested_h: ?f32 = resolveRequested(want.height, nat.h);
     const target_w: f32 = requested_w orelse
-        if (requested_h) |h| h * r else @min(nat.w, max_image_display_width);
+        if (requested_h) |h| h * r else nat.w;
     const target_h: f32 = if (requested_w == null and requested_h != null) requested_h.? else target_w / r;
     if (target_w <= 0 or target_h <= 0) return null;
 
-    const ceiling_w = if (avail_w > 0) @min(avail_w, max_image_display_width) else max_image_display_width;
-    const ceiling_h = max_image_display_height;
-    const fit = @min(1.0, @min(ceiling_w / target_w, ceiling_h / target_h));
-    return .{ .w = target_w * fit, .h = target_h * fit };
+    // Wider than the column is the one thing that cannot be allowed: it would overflow the pane
+    // horizontally. Scale the whole image down to fit, preserving the ratio.
+    if (avail_w > 0 and target_w > avail_w) {
+        const fit = avail_w / target_w;
+        return .{ .w = target_w * fit, .h = target_h * fit };
+    }
+    return .{ .w = target_w, .h = target_h };
 }
 
 fn alignGravityX(want: RequestedSize) f32 {
@@ -1744,17 +1792,40 @@ fn renderTopLevel(doc_node: md.Node, ids: *IdGen, ctx: RenderContext) void {
     // multi-thousand-block document that meant thousands of widgets per frame even when only a
     // handful were on screen — the open hitch and the steady ~20ms frames while a large preview
     // sat idle. Contiguous skips collapse into one spacer instead.
+    var diag_first_drawn = true;
     var skip_run_h: f32 = 0;
+    var skip_run_n: usize = 0;
     var skip_run_id: usize = 0;
 
     const flushSkip = struct {
-        fn f(run_h: *f32, run_id: usize) void {
+        fn f(run_h: *f32, run_id: usize, run_n: usize) void {
             if (run_h.* <= 0) return;
             var spacer = box(@src(), .{ .dir = .vertical }, .{
                 .expand = .horizontal,
                 // Stable across frames for a given skip-run start so scroll anchoring stays
                 // coherent when a neighbouring run's height changes.
-                .id_extra = run_id +% 0x7000_0000,
+                // The id varies with how many blocks the run stands for, not just where it
+                // starts.
+                //
+                // dvui sizes a widget to `max(min_size_content, what it measured last frame)`,
+                // so a widget that keeps its id also keeps its height — and pinning
+                // `max_size_content` does not override that. Scrolling *up* shrinks this run as
+                // blocks come into view, so the spacer asks to get shorter and is handed last
+                // frame's taller value instead, laying every block below it exactly one block
+                // too low before snapping back the next frame. Measured: block 70 laid out at
+                // 12406.8 (block 71's spacer height) instead of 12365.4.
+                //
+                // That is a whole-document jump with nothing to log, because the height table,
+                // the anchor and `virtual_size` are all computed from block heights and stay
+                // perfectly consistent — it is the spacer, which is not a block, that moved.
+                // Scrolling down never showed it: a growing run is already the larger value, so
+                // `max` takes it immediately.
+                //
+                // Folding the run length into the id means a run that changes size is a new
+                // widget with no remembered height, so it gets the size it asks for on the
+                // frame it asks for it. The run start stays in the id as well, so two runs in
+                // the same frame still can't collide.
+                .id_extra = (run_id *% 0x100_0000) +% (run_n *% 0x1_0000) +% 0x7000_0000,
                 .min_size_content = .{ .h = run_h.* },
             });
             spacer.deinit();
@@ -1806,12 +1877,16 @@ fn renderTopLevel(doc_node: md.Node, ids: *IdGen, ctx: RenderContext) void {
         if (!draw) {
             if (skip_run_h == 0) skip_run_id = index;
             skip_run_h += known_h;
+            skip_run_n += 1;
             y += known_h;
             continue;
         }
 
         // Emit the spacer for everything we skipped above this block before laying it out.
-        flushSkip(&skip_run_h, skip_run_id);
+        rs.diag_last_spacer = skip_run_h;
+        rs.diag_last_skip_from = skip_run_id;
+        flushSkip(&skip_run_h, skip_run_id, skip_run_n);
+        skip_run_n = 0;
 
         // A block whose last measurement could not be trusted gets its height *pinned* to the one
         // we do trust, rather than being allowed to report whatever this frame's layout produces.
@@ -1851,6 +1926,26 @@ fn renderTopLevel(doc_node: md.Node, ids: *IdGen, ctx: RenderContext) void {
             .max_size_content = if (pin_h) |h| .height(h) else null,
         });
         const wrapper_id = wrapper.data().id;
+        // Where the table thinks this block starts, against where it was actually placed.
+        //
+        // Every other probe here measures a block that is being *drawn*. A skipped block is
+        // replaced by a spacer built from `known_h` and is never measured, so if that spacer is
+        // the wrong height nothing reports it — the reader simply sees different content at the
+        // same offset. That is invisible to the height probes, to `virtual_size`, and to the
+        // anchor, because all three can be perfectly stable while the content above the viewport
+        // is laid out at a different height than the bookkeeping believes.
+        if (diag_first_drawn) {
+            diag_first_drawn = false;
+            const err = wrapper.data().rect.y - y;
+            const prev = rs.place_err;
+            if (diag and !std.math.isNan(prev) and @abs(err - prev) > 8) {
+                dvui.log.warn(
+                    "md-diag: PLACEMENT drift {d:.1} -> {d:.1} ({d:.1}pt) at block {d} ({s}) cursor_y={d:.1} laid_at={d:.1} spacer={d:.1} skipped_from={d} at viewport y={d:.0}",
+                    .{ prev, err, err - prev, index, @tagName(rs.blocks.extents.items[index].kind), y, wrapper.data().rect.y, rs.diag_last_spacer, rs.diag_last_skip_from, ctx.viewport.y },
+                );
+            }
+            rs.place_err = err;
+        }
         const prof_t0 = if (block_profile == null) 0 else std.Io.Clock.boot.now(dvui.io).nanoseconds;
         const prof_tl = stats.text_layouts;
         const prof_bytes = stats.add_text_bytes;
@@ -1900,12 +1995,33 @@ fn renderTopLevel(doc_node: md.Node, ids: *IdGen, ctx: RenderContext) void {
                 .{ index, @tagName(rs.blocks.extents.items[index].kind), known_h, after_h, @tagName(rs.blocks.stateAt(index)), rs.block_rows_pending, ctx.viewport.y },
             );
         }
+        // What the widget actually EMITTED, against what the height table believes.
+        //
+        // The check above compares the table with itself: `record` filters, so a contaminated or
+        // refused measurement leaves `after_h == known_h` and reports nothing — while the bad
+        // height has already gone into the layout. On-screen positions and `virtual_size` come
+        // from the widgets, not from this table, so refusing to *record* a number never stopped
+        // it reaching the screen. A disagreement here is the layout and the bookkeeping telling
+        // the reader two different stories, which looks exactly like "the text jumped but the
+        // scrollbar is fine".
+        if (diag and known_h > 0 and @abs(measured - known_h) > diag_height_jump) {
+            dvui.log.warn(
+                "md-diag: block {d} ({s}) EMITTED {d:.0} but table says {d:.0} (recorded {d:.0}, {s}, partial={any}, pinned={any}) at viewport y={d:.0}",
+                .{
+                    index,                                             @tagName(rs.blocks.extents.items[index].kind),
+                    measured,                                          known_h,
+                    after_h,                                           @tagName(rs.blocks.stateAt(index)),
+                    partial,                                           pin_h != null,
+                    ctx.viewport.y,
+                },
+            );
+        }
         // No scroll compensation here any more. A height change above the reader used to need a
         // delta accumulated and applied to `viewport.y` after the fact; the anchor makes the
         // reader's position a function of the current heights, so it simply re-derives.
         y += after_h;
     }
-    flushSkip(&skip_run_h, skip_run_id);
+    flushSkip(&skip_run_h, skip_run_id, skip_run_n);
 }
 
 /// Font metrics for `block_heights.zig`, which is deliberately dvui-free and so cannot read the

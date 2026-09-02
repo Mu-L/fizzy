@@ -5,6 +5,7 @@ for `*-windows-*` targets. It references `fizzy.ico` in this directory.
 
 ## fizzy.ico
 
+
 A multi-resolution Windows icon. Include at least the 16, 32, 48, and 256 px
 frames so Explorer / Taskbar / Alt-Tab pick the right size at every shell
 density. PNG-compressed frames are fine.

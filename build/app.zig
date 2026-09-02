@@ -563,6 +563,10 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // The document with the 45KB table — the case table-row culling exists for, and the one it
     // could get wrong.
     integration_module.addAnonymousImport("markdown_sample_tables", .{ .root_source_file = b.path("docs/PLUGIN_MANIFEST_PLAN.md") });
+    // The image-heavy fixture. Both docs above are prose and tables, so without this no test ever
+    // laid out an image block — the one block kind whose height nothing in the source predicts
+    // and which rescales with the pane right up until the pane is wider than the image.
+    integration_module.addAnonymousImport("markdown_sample_images", .{ .root_source_file = b.path("tests/data/markdown_sample_images.md") });
 
     const integration_tests = b.addTest(.{
         .name = "fizzy-integration-tests",

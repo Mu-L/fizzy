@@ -1,3 +1,0 @@
-testing
-
-[CLAUDE](CLAUDE.md)

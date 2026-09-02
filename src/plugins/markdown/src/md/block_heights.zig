@@ -317,10 +317,22 @@ pub const Table = struct {
                 // padding whatever its content does.
                 break :blk @max(src_lines, text_lines) * m.line_h + src_lines * 10 + 16;
             },
-            // Nothing in the source says how tall an image is; this is the middle of the range
-            // the renderer clamps them to (see `max_image_display_height`). Wrong either way,
-            // but wrong by a few hundred points instead of by five hundred.
-            .image => 240,
+            // Nothing in the source says how tall an image is — that depends on a file this
+            // module never sees. What the renderer does guarantee is that an image is never
+            // wider than the column (`displaySize` in render_ast.zig scales it down to fit, and
+            // that is now its only ceiling), so the column is the one real handle available.
+            //
+            // Assume the common document image: wide enough to be scaled to the column, at the
+            // landscape ratio screenshots and diagrams usually have. This was a flat 240, which
+            // ignored the column entirely and left an image-dense document estimating at 54% of
+            // its real length (7,503 vs 13,867 in tests/data/markdown_sample_images.md) — a
+            // scrollbar claiming the document was half its true size until the sweep finished.
+            //
+            // Calibrated, not derived, exactly like the table divisor above: the aspect ratio of
+            // any particular image is unknowable from here, and one markedly taller or wider
+            // than 4:3 will be off. Tracking the column at least makes it wrong in the same
+            // direction as the renderer, which a constant could not be.
+            .image => column_width * 0.75,
             .rule => m.line_h,
         };
     }
@@ -677,6 +689,37 @@ test "estimate is positive and grows with source" {
     var wide = testTable(gpa, 1, 40);
     defer wide.deinit(gpa);
     try testing.expect(wide.estimate(0, tm, 600).? > e);
+}
+
+// An image estimate used to be a flat constant, which ignored the column entirely: the same
+// number whether the pane was 900pt wide or 200. That constant left an image-dense document
+// estimating at 54% of its real length, and the scrollbar said so until every block had been
+// laid out. The estimator cannot know an image's aspect ratio, but it does know the box the
+// renderer will fit it into, and that box is a function of the column.
+test "an image estimate tracks the column and respects the display ceiling" {
+    const gpa = testing.allocator;
+    var t: Table = .{};
+    defer t.deinit(gpa);
+    t.appendExtent(gpa, .{ .lines = 1, .bytes = 40, .start_line = 0, .kind = .image });
+
+    // Narrow pane: the column binds, so the estimate follows it down.
+    const narrow = t.estimate(0, tm, 200).?;
+    const wide = t.estimate(0, tm, 900).?;
+    try testing.expect(narrow > 0);
+    try testing.expect(narrow < wide);
+
+    // It keeps tracking the column all the way up, because the renderer does too: the column is
+    // the only ceiling an image has, so there is no width at which the estimate should flatten
+    // out. (It used to flatten at a fixed 540pt display cap, which is gone — that cap shrank
+    // tall images to a fifth of the column and overrode explicit sizes in the markup.)
+    try testing.expect(t.estimate(0, tm, 4000).? > wide);
+
+    // And it is an image estimate, not a paragraph one: a single line of source that lays out
+    // hundreds of points tall is the entire reason this kind is special-cased.
+    var prose: Table = .{};
+    defer prose.deinit(gpa);
+    prose.appendExtent(gpa, .{ .lines = 1, .bytes = 40, .start_line = 0, .kind = .paragraph });
+    try testing.expect(wide > prose.estimate(0, tm, 900).? * 4);
 }
 
 test "estimate is null without a source extent" {

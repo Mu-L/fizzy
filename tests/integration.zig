@@ -556,13 +556,24 @@ const md_sample = @embedFile("markdown_sample");
 /// Table-heavy: one of its tables is 45KB on its own, which is what makes it the document that
 /// exercises row culling inside a table rather than only block skipping around it.
 const md_sample_tables = @embedFile("markdown_sample_tables");
+/// Image-heavy. Both samples above are prose and tables, so without this one no test in this file
+/// ever laid out an image block — the block kind whose height nothing in the source predicts, and
+/// which rescales with the pane right up until the pane is wider than the image. Its images point
+/// at real files in `assets/`, which is what makes the heights below real numbers rather than
+/// placeholder text.
+const md_sample_images = @embedFile("markdown_sample_images");
 
 fn markdownFrame() !dvui.App.Result {
     var b = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
     defer b.deinit();
     markdown.drawPreview(&md_preview, md_doc, std.testing.allocator, .{
         .io = dvui.io,
-        .image_base_dir = ".",
+        // The directory the image fixture actually lives in, because that is what the app passes:
+        // `image_base_dir` is the *document's* directory, so a document's relative image links
+        // have to resolve from there. Passing the repo root here instead made the fixture's links
+        // work in tests and break in the app — the fixture is opened both ways, and only one of
+        // them was being checked.
+        .image_base_dir = "tests/data",
         .id_extra = 0,
     });
     return .ok;
@@ -651,7 +662,7 @@ test "markdown preview: skipping off-screen blocks lays the document out identic
     defer md_render_ast.virtualize_blocks = true;
 
     // Top, a screen or so down, and far enough that most of the document is behind the viewport.
-    for ([_][]const u8{ md_sample, md_sample_tables }) |sample| for ([_]f32{ 0, -1200, -6000 }) |ticks| {
+    for ([_][]const u8{ md_sample, md_sample_tables, md_sample_images }) |sample| for ([_]f32{ 0, -1200, -6000 }) |ticks| {
         md_doc = sample;
         const full = try markdownLayout(gpa, false, ticks);
         defer full.deinit(gpa);
@@ -970,6 +981,275 @@ test "markdown preview: the reader holds position while the sash is dragged" {
     try std.testing.expect(md_preview.scroll.virtual_size.h > total_before + 500);
 }
 
+/// How tall a block has to be before only a decoded image can explain it. Prose blocks in the
+/// image fixture wrap to something on the order of 100pt at the widths used here; a "file not
+/// found" placeholder is a single line of text. A 512x512 image lands at 512pt and a 1024x1024
+/// one at the 540pt display ceiling, so this threshold sits in a wide empty gap between the two
+/// populations rather than close to either.
+const md_image_block_min_h: f32 = 400;
+
+fn mdTallBlockCount() usize {
+    var n: usize = 0;
+    for (md_preview.rs.blocks.heights.items) |e| {
+        if (e.h > md_image_block_min_h) n += 1;
+    }
+    return n;
+}
+
+// Guards every other image test in this file against passing vacuously.
+//
+// The image fixture's stability claims are only worth something if the images behind them are
+// actually being decoded and laid out. If the harness cannot resolve `assets/fox.png` — a
+// different working directory, a moved asset, a change to how `image_base_dir` is joined — then
+// every image in the document renders as a one-line "image not found" placeholder, the document
+// becomes ordinary prose, and a stability test over it passes while testing nothing at all.
+//
+// So this asserts the fixture is live *before* anything asserts it is stable: three of its images
+// point at real square PNGs in `assets/`, and a decoded square image is hundreds of points tall.
+// Nothing else in the document can produce a block that size.
+test "markdown preview: the image fixture's images really decode" {
+    const gpa = std.testing.allocator;
+    md_doc = md_sample_images;
+    var t = try dvui.testing.init(.{ .allocator = gpa, .window_size = .{ .w = 900, .h = 700 } });
+    defer t.deinit();
+    md_preview = .{};
+    defer md_preview.deinit();
+
+    try markdownSettle();
+
+    // assets/fox.png and assets/fox_bg.png are 512x512, assets/icon.png is 1024x1024 and is
+    // capped at the 540pt display ceiling.
+    const tall = mdTallBlockCount();
+    if (tall < 3) {
+        std.debug.print(
+            "\nonly {d} block(s) tall enough to be a decoded image — images are not loading, " ++
+                "so every image test over this fixture is vacuous\n",
+            .{tall},
+        );
+        for (md_preview.rs.blocks.heights.items, 0..) |e, i| {
+            if (i >= 12) break;
+            std.debug.print("  block {d}: h={d:.2} state={s}\n", .{ i, e.h, @tagName(e.state) });
+        }
+        return error.ImagesNotLoading;
+    }
+}
+
+// The condition the user named: dragging the sash, on a document with images in it.
+//
+// The table fixture already covers this, but an image is the harder case and was never covered.
+// A table's height is width-dependent because its cells re-wrap; an image's is width-dependent by
+// construction — a square image occupies the full column width until the column is wider than the
+// image, so every image above the reader loses height on every frame of a narrowing drag, and the
+// anchor has to absorb all of it at once. The blank-pane bug this whole area started from was
+// exactly an image: a measured 540pt block crushed to its ~14pt source estimate mid-drag.
+//
+// Images are also the one block kind the pin at `render_ast.zig` does not cover — it is scoped to
+// blocks containing a table — so nothing holds an image's emitted height steady on its behalf.
+test "markdown preview: the reader holds position while the sash is dragged past images" {
+    const gpa = std.testing.allocator;
+    md_doc = md_sample_images;
+    var t = try dvui.testing.init(.{ .allocator = gpa, .window_size = .{ .w = 900, .h = 700 } });
+    defer t.deinit();
+    md_preview = .{};
+    defer md_preview.deinit();
+
+    try markdownSettle();
+    try std.testing.expect(mdTallBlockCount() >= 3); // fixture is live; see the test above
+
+    const max = md_preview.scroll.virtual_size.h - md_preview.scroll.viewport.h;
+    md_preview.scroll.scrollToOffset(.vertical, max * 0.6);
+    try markdownSettle();
+
+    const start = md_preview.anchor orelse return error.NoAnchor;
+    try std.testing.expect(md_preview.scroll.viewport.y > max * 0.4); // really did park
+
+    // Snapshot the image blocks so the end of the test can prove the drag actually squeezed them.
+    // Recorded as heights rather than checked against a fixed threshold: at a 500pt window the
+    // column is still ~470pt, so a 512pt image only falls to ~470 and any absolute cutoff either
+    // sits inside the prose population or above the squeezed images. What matters is that they
+    // moved, not where they landed.
+    var img_before = std.ArrayList(struct { index: usize, h: f32 }).empty;
+    defer img_before.deinit(gpa);
+    for (md_preview.rs.blocks.heights.items, 0..) |e, idx| {
+        if (e.h > md_image_block_min_h) try img_before.append(gpa, .{ .index = idx, .h = e.h });
+    }
+
+    // 900 -> 400 in 10pt steps, one frame each: a drag, not a jump.
+    //
+    // It has to travel this far to be a real test. The fixture's images are 512pt and 1024pt
+    // square, and an image only starts losing height once the column is narrower than it is —
+    // so a drag that stops at 500 leaves the 512pt images still sitting at their natural size,
+    // and the only block under any pressure is the one that was pinned to the 540pt display
+    // ceiling. Going to 400 puts every image in the document under the column.
+    var w: f32 = 900;
+    var i: usize = 0;
+    while (i < 50) : (i += 1) {
+        w -= 10;
+        t.backend.size = .{ .w = w, .h = 700 };
+        t.backend.size_pixels = .{ .w = w * 2, .h = 1400 };
+        _ = try dvui.testing.step(markdownFrame);
+
+        // Checked every frame rather than only at the end: the failure mode is the reader
+        // creeping a little on each frame of the drag, which a before/after comparison would
+        // report as one small discrepancy instead of forty.
+        const now = md_preview.anchor orelse return error.NoAnchor;
+        if (start.line != now.line or @abs(start.offset_px - now.offset_px) > 2.0) {
+            std.debug.print(
+                "\nreader moved on drag frame {d} (w={d:.0}): line {d}+{d:.2} -> {d}+{d:.2}\n",
+                .{ i, w, start.line, start.offset_px, now.line, now.offset_px },
+            );
+            return error.ReaderMovedDuringSashDrag;
+        }
+
+        // The pane must still be drawing while it is dragged — see the table version of this
+        // test, where an over-eager budget cut rendered the table blank for the whole drag while
+        // the timings looked excellent.
+        try std.testing.expect(md_render_ast.stats.add_text_bytes > 500);
+    }
+
+    // The drag has to have actually done something to the images, or the test above is holding
+    // the reader still against no pressure at all. Every image the fixture loads is wider than
+    // the narrowed column, so every one of them has to have given up height.
+    try std.testing.expect(md_preview.rs.blocks.layout_width < 450);
+    // Let the drag's aftermath finish before judging the heights: off-screen blocks are
+    // re-measured on a per-frame budget, so an image above the reader is legitimately still
+    // carrying its pre-drag height on the frame the drag ends. What is not legitimate is it
+    // still carrying that height once nothing is asking to be measured any more.
+    try markdownSettle();
+    for (img_before.items) |b| {
+        const now = md_preview.rs.blocks.heights.items[b.index].h;
+        if (b.h - now < 20) {
+            std.debug.print(
+                "\nimage block {d} went {d:.2} -> {d:.2} across a 900->{d:.0} drag: the images " ++
+                    "did not rescale, so this test held the reader still against no pressure\n",
+                .{ b.index, b.h, now, w },
+            );
+            return error.ImagesDidNotRescale;
+        }
+    }
+}
+
+// An image must never be drawn wider than the column it is in, on ANY frame — including the
+// frames of a pane slide, which is where it was going wrong.
+//
+// The wrapper's content rect, which is what the image was sized from, lags while the pane is
+// being resized (measured at two frames behind during a slide). While the pane is *narrowing* a
+// stale width is a larger one, so the image was drawn wider than the pane it had to fit in and
+// then snapped back once the rect caught up — visible as the image jumping around while the
+// split animation ran. `column_width` is recomputed from the viewport every frame, so the size
+// is taken as the smaller of the two.
+//
+// This was invisible until the fixed 720x540 display box was removed: for any column wider than
+// 720 both widths clamped to the same box, so the lag could not show.
+//
+// Only the FIRST image is checked, with the reader held at the top so that block is on screen
+// and therefore actually drawn every frame. An off-screen block legitimately carries its last
+// measurement until the re-measure budget reaches it, so asserting over every block would fail
+// on blocks that are behaving correctly. Both sides of the comparison come from the same frame,
+// which keeps it honest regardless of how the harness times a backend resize.
+test "markdown preview: an image is never wider than the column while the pane slides" {
+    const gpa = std.testing.allocator;
+    md_doc = md_sample_images;
+    var t = try dvui.testing.init(.{ .allocator = gpa, .window_size = .{ .w = 900, .h = 700 } });
+    defer t.deinit();
+    md_preview = .{};
+    defer md_preview.deinit();
+
+    try markdownSettle();
+    try std.testing.expect(mdTallBlockCount() >= 3); // fixture is live
+    md_preview.scroll.scrollToOffset(.vertical, 0);
+    try markdownSettle();
+
+    var first_img: ?usize = null;
+    for (md_preview.rs.blocks.extents.items, 0..) |ext, idx| {
+        if (ext.kind == .image) {
+            first_img = idx;
+            break;
+        }
+    }
+    const img = first_img orelse return error.NoImageBlock;
+
+    // Everything the fixture loads is square, so an image block's height is its width plus the
+    // caption line under it. Allow for the caption and its margins, and nothing more.
+    const caption_slack: f32 = 80;
+
+    // Big steps on purpose: the error is proportional to how far the pane moves per frame, so a
+    // slow drag hides it. This is a slide, not a drag.
+    var w: f32 = 900;
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        w -= 100;
+        t.backend.size = .{ .w = w, .h = 700 };
+        t.backend.size_pixels = .{ .w = w * 2, .h = 1400 };
+        _ = try dvui.testing.step(markdownFrame);
+
+        const col = md_preview.rs.blocks.layout_width;
+        const h = md_preview.rs.blocks.heights.items[img];
+        if (h.state == .estimated) continue; // never drawn; nothing was emitted to be wrong
+        if (h.h > col + caption_slack) {
+            std.debug.print(
+                "\nimage block {d} is {d:.1}pt tall in a {d:.1}pt column: the image is being " ++
+                    "drawn wider than the pane it is in\n",
+                .{ img, h.h, col },
+            );
+            return error.ImageWiderThanColumn;
+        }
+    }
+}
+
+// Scrolling UP must not lay the document out at last frame's geometry.
+//
+// Off-screen blocks are collapsed into a single spacer whose height is the sum of the heights it
+// stands in for. dvui sizes a widget to `max(min_size_content, what it measured last frame)`, so a
+// spacer that keeps the same widget id also keeps its old height. Scrolling up shrinks the run as
+// blocks come into view, so the spacer asks to get *shorter* and is handed last frame's taller
+// value instead — laying every block below it exactly one block too low, then snapping back on the
+// next frame.
+//
+// This is the bug that survived every other probe in this file, because nothing it touches is a
+// block: the height table, the anchor and `virtual_size` are all computed from block heights and
+// stayed perfectly consistent while the page visibly jumped. `RenderState.place_err` is the gap
+// between where the table says the first drawn block is and where it was actually laid out, which
+// is the one quantity that can see it. Measured at 290pt on docs/PLUGINS.md and 589pt on the image
+// fixture before the fix.
+//
+// Note the direction: scrolling DOWN never showed it, because a growing run is already the larger
+// value and `max` takes it immediately. A test that only scrolls down passes either way.
+test "markdown preview: scrolling up does not lay blocks out at the previous frame's geometry" {
+    const gpa = std.testing.allocator;
+    for ([_][]const u8{ md_sample, md_sample_tables, md_sample_images }) |sample| {
+        md_doc = sample;
+        var t = try dvui.testing.init(.{ .allocator = gpa, .window_size = .{ .w = 560, .h = 800 } });
+        defer t.deinit();
+        md_preview = .{};
+        defer md_preview.deinit();
+        try markdownSettle();
+
+        // Park deep enough that there is a substantial run of skipped blocks above the reader —
+        // which is the thing whose height goes stale.
+        const max = md_preview.scroll.virtual_size.h - md_preview.scroll.viewport.h;
+        md_preview.scroll.scrollToOffset(.vertical, max * 0.4);
+        try markdownSettle();
+        try std.testing.expect(md_preview.scroll.viewport.y > 1000); // really did park
+
+        var prev = md_preview.rs.place_err;
+        var i: usize = 0;
+        while (i < 60) : (i += 1) {
+            try markdownScroll(30, 1); // positive ticks scroll up
+            const cur = md_preview.rs.place_err;
+            if (!std.math.isNan(prev) and !std.math.isNan(cur) and @abs(cur - prev) > 8) {
+                std.debug.print(
+                    "\nplacement moved {d:.1} -> {d:.1} ({d:.1}pt) at viewport y={d:.1}: the block " ++
+                        "was laid out somewhere other than where the height table puts it\n",
+                    .{ prev, cur, cur - prev, md_preview.scroll.viewport.y },
+                );
+                return error.BlockLaidOutAtStaleGeometry;
+            }
+            prev = cur;
+        }
+    }
+}
+
 // The workflow this preview actually exists for: typing in the editor with the preview beside it.
 // Every keystroke re-parses the document, and a re-parse used to throw the whole height table
 // away — all 50 blocks fell back to estimates, the total collapsed from 20,093 to 8,886, and the
@@ -1029,7 +1309,7 @@ test "markdown preview: an edit does not move the reader or lose the layout" {
 // right order of magnitude, and that a future change to the estimator cannot quietly undo that.
 test "markdown preview: the estimated document length is in the right ballpark" {
     const gpa = std.testing.allocator;
-    for ([_][]const u8{ md_sample, md_sample_tables }) |sample| {
+    for ([_][]const u8{ md_sample, md_sample_tables, md_sample_images }) |sample| {
         md_doc = sample;
         var t = try dvui.testing.init(.{ .allocator = gpa, .window_size = .{ .w = 900, .h = 700 } });
         defer t.deinit();
@@ -1068,7 +1348,7 @@ test "markdown preview: scrolling through the document never jumps past where it
     const gpa = std.testing.allocator;
     // Both samples: PLUGINS.md is the longer one (185 blocks) and has its own tables. Running
     // this only on the table-heavy sample missed it entirely.
-    for ([_][]const u8{ md_sample, md_sample_tables }) |sample| {
+    for ([_][]const u8{ md_sample, md_sample_tables, md_sample_images }) |sample| {
     md_doc = sample;
     var t = try dvui.testing.init(.{ .allocator = gpa, .window_size = .{ .w = 900, .h = 700 } });
     defer t.deinit();
@@ -1132,7 +1412,7 @@ fn markdownReachesIdle() !bool {
 
 test "markdown preview: stops asking for frames so the app can sleep" {
     const gpa = std.testing.allocator;
-    for ([_][]const u8{ md_sample, md_sample_tables }) |sample| {
+    for ([_][]const u8{ md_sample, md_sample_tables, md_sample_images }) |sample| {
         md_doc = sample;
         var t = try dvui.testing.init(.{ .allocator = gpa, .window_size = .{ .w = 900, .h = 700 } });
         defer t.deinit();
