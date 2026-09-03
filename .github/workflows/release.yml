@@ -106,19 +106,24 @@ jobs:
       # backoff; zig build msvcup-setup alone can hit HttpConnectionClosing with no retries.
       - name: Fetch deps with retries
         run: |
+          # These jobs run with a per-run cache dir and `use-cache: false`, so every
+          # release fetches cold from codeload.github.com and Zig 0.16's HTTP client
+          # has no retry of its own (`HttpConnectionClosing`). Fetch with the SAME
+          # options the package step uses -- a lazy dep reached only under those
+          # options (zig_objc on macOS, zigwin32 on Windows) would otherwise be
+          # fetched by `zig build package`, which has no retries at all.
           fetch() {
-            local args="$1"
             local n=0
-            until [ "$n" -ge 5 ]; do
-              zig build --fetch $args && return 0
+            until [ "$n" -ge 8 ]; do
+              zig build --fetch "$@" && return 0
               n=$((n+1))
-              echo "Fetch attempt $n ($args) failed, sleeping $((n*10))s..."
-              sleep $((n*10))
+              echo "Fetch attempt $n ($*) failed, sleeping $((n*15))s..."
+              sleep $((n*15))
             done
             return 1
           }
-          fetch "" || exit 1
-          fetch "-Dtarget=${{ matrix.target }}" || exit 1
+          fetch || exit 1
+          fetch "-Dtarget=${{ matrix.target }}" -Doptimize=ReleaseFast || exit 1
 
       # MSVC SDK has to materialize on disk BEFORE `zig build package` configures,
       # because applyMsvcIncludesToReachableTranslateC reads zig-libc-*.ini during
@@ -213,19 +218,24 @@ jobs:
       - name: Fetch deps with retries
         shell: bash
         run: |
+          # These jobs run with a per-run cache dir and `use-cache: false`, so every
+          # release fetches cold from codeload.github.com and Zig 0.16's HTTP client
+          # has no retry of its own (`HttpConnectionClosing`). Fetch with the SAME
+          # options the package step uses -- a lazy dep reached only under those
+          # options (zig_objc on macOS, zigwin32 on Windows) would otherwise be
+          # fetched by `zig build package`, which has no retries at all.
           fetch() {
-            local args="$1"
             local n=0
-            until [ "$n" -ge 5 ]; do
-              zig build --fetch $args && return 0
+            until [ "$n" -ge 8 ]; do
+              zig build --fetch "$@" && return 0
               n=$((n+1))
-              echo "Fetch attempt $n ($args) failed, sleeping $((n*10))s..."
-              sleep $((n*10))
+              echo "Fetch attempt $n ($*) failed, sleeping $((n*15))s..."
+              sleep $((n*15))
             done
             return 1
           }
-          fetch "" || exit 1
-          fetch "-Dtarget=${{ matrix.target }}" || exit 1
+          fetch || exit 1
+          fetch "-Dtarget=${{ matrix.target }}" -Doptimize=ReleaseFast || exit 1
 
       - name: Check signing config
         id: signing_config

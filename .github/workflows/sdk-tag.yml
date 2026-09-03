@@ -145,8 +145,12 @@ jobs:
           \`\`\`zig
           .fizzy = .{
               .url = "https://github.com/fizzyedit/fizzy/releases/download/${tag}/fizzy-sdk-v${version}.tar.gz",
-              .hash = "…", // zig fetch --save=fizzy <url>
+              .hash = "…",
           },
+          \`\`\`
+
+          \`\`\`
+          zig fetch --save=fizzy https://github.com/fizzyedit/fizzy/releases/download/${tag}/fizzy-sdk-v${version}.tar.gz
           \`\`\`
 
           Do **not** pin the git archive of this tag — that is the full monorepo (app zon / Velopack).

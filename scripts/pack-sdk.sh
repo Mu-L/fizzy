@@ -67,8 +67,11 @@ archive="$out_dir/${pkg_name}.tar.gz"
 tar -czf "$archive" -C "$staging" "$pkg_name"
 
 echo "Packed $tag -> $archive"
+url="https://github.com/fizzyedit/fizzy/releases/download/${tag}/${pkg_name}.tar.gz"
 echo "Pin example:"
 echo "  .fizzy = .{"
-echo "      .url = \"https://github.com/fizzyedit/fizzy/releases/download/${tag}/${pkg_name}.tar.gz\","
-echo "      .hash = \"…\",  # zig fetch --save=fizzy <url>"
+echo "      .url = \"${url}\","
+echo "      .hash = \"…\","
 echo "  },"
+echo
+echo "  zig fetch --save=fizzy ${url}"
