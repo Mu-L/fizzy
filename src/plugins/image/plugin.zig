@@ -27,7 +27,7 @@ var plugin: sdk.Plugin = .{
 
 const vtable: sdk.Plugin.VTable = .{
     .deinit = deinit,
-    .fileTypePriority = fileTypePriority,
+    .fileTypes = fileTypes,
     .documentStackSize = documentStackSize,
     .documentStackAlign = documentStackAlign,
     .loadDocument = loadDocument,
@@ -80,15 +80,19 @@ fn deinit(state: *anyopaque) void {
     gpa.destroy(st);
 }
 
+/// The flat-raster formats this viewer opens. One list, used both for the routing offer
+/// (`fileTypes`) and for the file-tree glyph / document checks (`isFlatImageExtension`).
+const flat_image_extensions = [_][]const u8{ ".png", ".jpg", ".jpeg" };
+
 fn isFlatImageExtension(ext: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(ext, ".png") or
-        std.ascii.eqlIgnoreCase(ext, ".jpg") or
-        std.ascii.eqlIgnoreCase(ext, ".jpeg");
+    for (flat_image_extensions) |e| {
+        if (std.ascii.eqlIgnoreCase(ext, e)) return true;
+    }
+    return false;
 }
 
-fn fileTypePriority(_: *anyopaque, ext: []const u8) ?u8 {
-    if (!isFlatImageExtension(ext)) return null;
-    return 99;
+fn fileTypes(_: *anyopaque) []const []const u8 {
+    return &flat_image_extensions;
 }
 
 fn drawFileIcon(_: ?*anyopaque, ext: []const u8, _: []const u8, color: dvui.Color) bool {

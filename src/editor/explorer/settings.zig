@@ -20,6 +20,7 @@ const dvui = @import("dvui");
 const core = @import("core");
 const Editor = fizzy.Editor;
 const KeybindSettings = @import("../KeybindSettings.zig");
+const FileTypeSettings = @import("../FileTypeSettings.zig");
 
 const fuzzy = core.fuzzy;
 
@@ -176,6 +177,22 @@ pub const groups = [_]Group{
                 .keywords = "keybind shortcut hotkey chord keyboard remap keys",
                 // Every command is individually searchable — see `KeybindSettings`.
                 .search = .{ .score = KeybindSettings.score, .draw = KeybindSettings.draw },
+            },
+        },
+    },
+    .{
+        .title = "File Types",
+        .icon = icons.tvg.lucide.file,
+        .items = &.{
+            .{
+                .label = "Defaults",
+                .key = "file_types",
+                .description = "The below extensions can be handled by multiple plugins, the " ++
+                    "active plugin determines how the file will be opened and displayed. " ++
+                    "Unlisted extensions will be opened with the built-in text plugin.",
+                .keywords = "file type extension default open association plugin",
+                // Every extension is individually searchable — see `FileTypeSettings`.
+                .search = .{ .score = FileTypeSettings.score, .draw = FileTypeSettings.draw },
             },
         },
     },

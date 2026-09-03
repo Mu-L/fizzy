@@ -119,6 +119,12 @@ fn drawOption(view: *const SidebarView, index: usize, size: f32) !Action {
         if (r.y < strip_h) fizzy.backend.pushTitleBarInteractiveRect(r);
     }
 
+    // Only the store view can carry one; nothing else in the rail has a pending-decision notion.
+    const undecided_count: usize = if (std.mem.eql(u8, view.id, PluginStore.view_id))
+        fizzy.editor.undecidedPluginCount()
+    else
+        0;
+
     const color: dvui.Color = if (selected) theme.color(.highlight, .fill) else if (bw.hovered()) theme.color(.window, .text) else theme.color(.window, .fill);
 
     // Apply both fill and stroke: Entypo glyphs are fill-based, Lucide (and most
@@ -134,6 +140,28 @@ fn drawOption(view: *const SidebarView, index: usize, size: f32) !Action {
             .min_size_content = .{ .h = size },
         },
     );
+
+    // Attention badge, same idiom (and colour) as the infobar's app-update dot: a plugin build
+    // is sitting in `plugins/` waiting for the user to say whether to load it, and the card that
+    // offers it is inside this very view. Purely condition-driven — it disappears when the last
+    // undecided build is loaded, switched off, or removed, not when the tab is merely opened.
+    if (undecided_count > 0) {
+        const brs = bw.data().rectScale();
+        const r = 4 * brs.s;
+        // Anchored to the *glyph's* top-right corner, not the rail cell's: the cell is twice the
+        // icon's height, so a corner-anchored dot would float well clear of the icon it marks.
+        const center = r: {
+            const c = brs.r.center();
+            break :r dvui.Point.Physical{ .x = c.x + size / 2 * brs.s, .y = c.y - size / 2 * brs.s };
+        };
+        var dot = dvui.Rect.Physical.fromPoint(center).toSize(.{ .w = 2 * r, .h = 2 * r });
+        dot.x -= r;
+        dot.y -= r;
+        dot.fill(dvui.CornerRect.Physical.round(r), .{
+            .color = theme.color(.highlight, .fill),
+            .fade = 0,
+        });
+    }
 
     if (bw.clicked()) {
         // Tapping the icon for the view that's already showing toggles the explorer
@@ -195,6 +223,13 @@ fn drawOption(view: *const SidebarView, index: usize, size: f32) !Action {
             tl2.format("{s}", .{tip}, .{
                 .font = dvui.Font.theme(.heading),
             });
+            // Say what the dot means — a bare badge on a 20px rail icon is otherwise a riddle.
+            if (undecided_count > 0) {
+                tl2.format("\n{d} plugin{s} ready to load", .{
+                    undecided_count,
+                    if (undecided_count == 1) "" else "s",
+                }, .{});
+            }
             tl2.deinit();
         }
     }

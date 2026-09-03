@@ -116,6 +116,11 @@ services: std.StringHashMapUnmanaged(ServiceEntry) = .empty,
 /// installed by fizzy during startup. Null until installed (headless/test).
 fizzy_api: ?EditorAPI = null,
 
+/// The one plugin that opens anything no other plugin owns (`text`). Set by
+/// `registerFallbackEditor`, cleared in `unregisterPlugin`. Null in a headless host, or
+/// before the fallback editor has registered.
+fallback_editor: ?*Plugin = null,
+
 /// Not-yet-flushed per-plugin settings writes (see `PluginSettings`); drained by
 /// `takePendingPluginSettings`. Whether the composed merge write actually touches disk is
 /// decided once, over the *whole* merged file, by `Editor.writeMergedSettings` — there is no
@@ -578,6 +583,7 @@ pub fn unregisterPlugin(self: *Host, plugin: *Plugin) void {
     removeOwned(FileIcon, &self.file_icons, plugin);
     removeOwned(PluginIcon, &self.plugin_icons, plugin);
     removeOwnedSettingsSchemas(&self.settings_schemas, plugin);
+    if (self.fallback_editor == plugin) self.fallback_editor = null;
 
     // Services: free the owned key strings and drop the entries.
     {
@@ -704,6 +710,17 @@ pub fn fileRowFillColor(self: *Host, color_index: usize) ?dvui.Color {
     return null;
 }
 
+/// Declare `plugin` the fallback editor: the owner of every extension no other plugin owns
+/// and the user has not assigned elsewhere. Called once, from that plugin's own `register` —
+/// exactly one plugin (`text`) has any business calling it.
+///
+/// A second caller is a plugin-author bug, not a user-facing conflict: the last registration
+/// silently wins. Deliberately an opt-in call rather than a `Plugin` field, since the concept
+/// is meaningless to every other plugin author (same shape as `registerFileIcon` below).
+pub fn registerFallbackEditor(self: *Host, plugin: *Plugin) void {
+    self.fallback_editor = plugin;
+}
+
 pub fn registerFileIcon(self: *Host, drawer: FileIcon) !void {
     try self.file_icons.append(self.allocator, drawer);
 }
@@ -713,7 +730,8 @@ pub fn registerFileIcon(self: *Host, drawer: FileIcon) !void {
 /// Order (first success wins):
 /// 1. Language plugin that claims the extension (tree-sitter or preview) → that plugin's logo
 /// 2. Explicit `registerFileIcon` drawers (pixi sprites, image glyph, text code glyph, …)
-/// 3. Specialized document owner (`fileTypePriority` below the text fallback) → that plugin's logo
+/// 3. Specialized document owner (offers `ext` via `fileTypes`, i.e. not the fallback editor)
+///    → that plugin's logo
 ///
 /// Returns false when nothing claimed it — caller draws a generic filesystem default.
 /// **Caller must reserve a `core.dvui.treeRowGlyph` slot**; drawers use `expand = .ratio`.
@@ -742,10 +760,8 @@ pub fn drawFileIcon(self: *Host, ext: []const u8, path: []const u8, color: dvui.
     // Specialized document plugins (pixi, image, …) that didn't register a FileIcon drawer
     // still get their logo when they uniquely claim the extension.
     if (self.pluginForExtension(ext)) |p| {
-        if (p.fileTypePriority(ext)) |prio| {
-            if (prio < Plugin.file_type_fallback_priority) {
-                if (self.drawPluginIcon(p.id)) return true;
-            }
+        if (p != self.fallback_editor) {
+            if (self.drawPluginIcon(p.id)) return true;
         }
     }
     return false;
@@ -1123,21 +1139,48 @@ pub fn activeCenter(self: *Host) ?*CenterProvider {
     return null;
 }
 
-/// The registered plugin with the highest priority (lowest numeric value) for `ext`,
-/// or null if none claims it. Specialized plugins claim known types at low values;
-/// the code plugin claims every extension at `Plugin.file_type_fallback_priority`.
+/// Whether `plugin` may legitimately own `ext`: it either offers `ext` via `fileTypes`, or it
+/// is the registered fallback editor (which owns anything, `fileTypes` notwithstanding). Used
+/// to validate a persisted assignment before honoring it — a plugin that dropped support for an
+/// extension since the user assigned it no longer owns it.
+pub fn ownsExtension(self: *Host, plugin: *Plugin, ext: []const u8) bool {
+    for (plugin.fileTypes()) |e| {
+        if (std.mem.eql(u8, e, ext)) return true;
+    }
+    return plugin == self.fallback_editor;
+}
+
+/// The plugin that opens files with extension `ext` (including the dot, `""` for none), or
+/// null if nothing can. Fully deterministic and non-numeric — a plugin cannot outrank another
+/// by declaring a smaller number, because there are no numbers:
+///
+///   1. The user's persisted assignment for `ext`, if its owner is loaded and still owns it.
+///   2. Otherwise the unique remaining plugin offering `ext` via `fileTypes`. Two or more
+///      offers with no assignment is a genuine ambiguity that the install-time dialog should
+///      already have caught; as a safety net, pick the alphabetically-first id so the result
+///      never depends on dylib load/scan order. Nothing is written to disk here.
+///   3. Otherwise the registered fallback editor.
 pub fn pluginForExtension(self: *Host, ext: []const u8) ?*Plugin {
-    var best: ?*Plugin = null;
-    var best_priority: u8 = 255;
-    for (self.plugins.items) |plugin| {
-        if (plugin.fileTypePriority(ext)) |p| {
-            if (best == null or p < best_priority) {
-                best = plugin;
-                best_priority = p;
+    if (self.fizzy_api) |a| {
+        if (a.extensionOwnerOverride(ext)) |owner_id| {
+            if (self.pluginById(owner_id)) |p| {
+                if (self.ownsExtension(p, ext)) return p;
             }
         }
     }
-    return best;
+
+    var best: ?*Plugin = null;
+    for (self.plugins.items) |plugin| {
+        for (plugin.fileTypes()) |e| {
+            if (std.mem.eql(u8, e, ext)) {
+                if (best == null or std.mem.lessThan(u8, plugin.id, best.?.id)) best = plugin;
+                break;
+            }
+        }
+    }
+    if (best) |p| return p;
+
+    return self.fallback_editor;
 }
 
 /// Open a "new document" flow. `parent_path` (when set) targets an on-disk folder; `id_extra`
@@ -1311,6 +1354,112 @@ fn createUntitledDocumentDirect(self: *Host, parent_path: ?[]const u8) !void {
 // ---- tests -----------------------------------------------------------------
 
 const testing = std.testing;
+
+test "pluginForExtension resolves by assignment, unique claimant, then fallback" {
+    const imageTypes = struct {
+        fn f(_: *anyopaque) []const []const u8 {
+            return &.{ ".png", ".jpg" };
+        }
+    }.f;
+    const pixiTypes = struct {
+        fn f(_: *anyopaque) []const []const u8 {
+            return &.{ ".fiz", ".png" };
+        }
+    }.f;
+
+    var host = Host.init(testing.allocator);
+    defer host.deinit();
+
+    const image_vt = Plugin.VTable{ .fileTypes = imageTypes };
+    const pixi_vt = Plugin.VTable{ .fileTypes = pixiTypes };
+    const text_vt = Plugin.VTable{};
+    var image = Plugin{ .state = undefined, .vtable = &image_vt, .id = "image", .display_name = "Image" };
+    var pixi = Plugin{ .state = undefined, .vtable = &pixi_vt, .id = "pixi", .display_name = "Pixi" };
+    var text = Plugin{ .state = undefined, .vtable = &text_vt, .id = "text", .display_name = "Text" };
+
+    // No fallback editor registered yet: an unclaimed extension resolves to nothing.
+    try host.registerPlugin(&image);
+    try testing.expectEqual(@as(?*Plugin, null), host.pluginForExtension(".zig"));
+
+    host.registerFallbackEditor(&text);
+    try host.registerPlugin(&text);
+
+    // Unique claimant wins; everything else falls to the fallback editor.
+    try testing.expectEqual(&image, host.pluginForExtension(".png").?);
+    try testing.expectEqual(&text, host.pluginForExtension(".zig").?);
+    try testing.expectEqual(&text, host.pluginForExtension("").?);
+
+    // Two claimants, no user assignment: deterministic alphabetical tie-break, never load order.
+    try host.registerPlugin(&pixi);
+    try testing.expectEqual(&image, host.pluginForExtension(".png").?);
+    try testing.expectEqual(&pixi, host.pluginForExtension(".fiz").?);
+
+    // `ownsExtension`: offered extensions, plus anything for the fallback editor.
+    try testing.expect(host.ownsExtension(&pixi, ".fiz"));
+    try testing.expect(!host.ownsExtension(&image, ".fiz"));
+    try testing.expect(host.ownsExtension(&text, ".anything"));
+
+    // Unregistering the fallback editor clears it, so unclaimed extensions resolve to nothing.
+    host.unregisterPlugin(&text);
+    try testing.expectEqual(@as(?*Plugin, null), host.fallback_editor);
+    try testing.expectEqual(@as(?*Plugin, null), host.pluginForExtension(".zig"));
+}
+
+test "pluginForExtension honors a user assignment and ignores a stale one" {
+    const Fake = struct {
+        var override: ?[]const u8 = null;
+
+        fn extensionOwnerOverride(_: *anyopaque, ext: []const u8) ?[]const u8 {
+            // Only `.png` is ever assigned in this test.
+            return if (std.mem.eql(u8, ext, ".png")) override else null;
+        }
+        fn imageTypes(_: *anyopaque) []const []const u8 {
+            return &.{".png"};
+        }
+        fn pixiTypes(_: *anyopaque) []const []const u8 {
+            return &.{".fiz"}; // deliberately does NOT offer .png
+        }
+    };
+
+    var host = Host.init(testing.allocator);
+    defer host.deinit();
+
+    const image_vt = Plugin.VTable{ .fileTypes = Fake.imageTypes };
+    const pixi_vt = Plugin.VTable{ .fileTypes = Fake.pixiTypes };
+    const text_vt = Plugin.VTable{};
+    var image = Plugin{ .state = undefined, .vtable = &image_vt, .id = "image", .display_name = "Image" };
+    var pixi = Plugin{ .state = undefined, .vtable = &pixi_vt, .id = "pixi", .display_name = "Pixi" };
+    var text = Plugin{ .state = undefined, .vtable = &text_vt, .id = "text", .display_name = "Text" };
+    try host.registerPlugin(&image);
+    try host.registerPlugin(&pixi);
+    try host.registerPlugin(&text);
+    host.registerFallbackEditor(&text);
+
+    // Only the one vtable member `pluginForExtension` reaches; the rest stay unreachable here.
+    var api_vt: EditorAPI.VTable = undefined;
+    api_vt.extensionOwnerOverride = Fake.extensionOwnerOverride;
+    var ctx: u8 = 0;
+    host.installFizzyApi(.{ .ctx = &ctx, .vtable = &api_vt });
+
+    // An assignment to a plugin that offers the extension is honored over the unique claimant.
+    Fake.override = "image";
+    try testing.expectEqual(&image, host.pluginForExtension(".png").?);
+
+    // Stale: `pixi` no longer offers `.png`, so its assignment is ignored and `.png` falls
+    // through to ordinary resolution rather than routing to a plugin that cannot open it.
+    Fake.override = "pixi";
+    try testing.expectEqual(&image, host.pluginForExtension(".png").?);
+
+    // An assignment naming a plugin that is not loaded is likewise ignored.
+    Fake.override = "ghost";
+    try testing.expectEqual(&image, host.pluginForExtension(".png").?);
+
+    // The fallback editor legitimately owns anything, so assigning it is honored.
+    Fake.override = "text";
+    try testing.expectEqual(&text, host.pluginForExtension(".png").?);
+
+    Fake.override = null;
+}
 
 test "unregisterPlugin removes a plugin's contributions, service, and resets active ids" {
     const noopDraw = struct {

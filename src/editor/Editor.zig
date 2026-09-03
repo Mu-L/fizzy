@@ -36,9 +36,43 @@ pub const Settings = @import("Settings.zig");
 /// One id's pending fizzy-reserved `.plugins.<id>` field writes. A null field means "not
 /// touched this cycle" — `writeMergedSettings` reads that half back off disk instead, so
 /// toggling auto-update can never clobber a concurrent enable/disable or vice versa.
+/// One persisted `.extensions` entry fizzy declined to honor, surfaced to the user rather than
+/// silently ignored — the same treatment `keymap.Conflict` gets in the Keyboard Shortcuts pane.
+///
+/// **Fizzy never produces one of these itself.** `resolveExtensionConflict` is the app's single
+/// writer and always strips an extension from every other plugin's list before adding it, so a
+/// conflict only ever arrives via a hand-edited (or hand-merged, e.g. synced across machines)
+/// `settings.zon`. Reconciliation is read-only: the file is left exactly as the user wrote it
+/// until they repair it from the File Types table.
+pub const ExtensionConflict = struct {
+    /// The extension (with dot) the unhonored entry names. Owned.
+    ext: []const u8,
+    /// The plugin id fizzy actually routes `ext` to. Null for `.stale`, where the entry is
+    /// simply ignored and `ext` falls through to ordinary resolution. Owned when non-null.
+    winner: ?[]const u8,
+    /// The plugin id whose persisted entry was not honored. Owned.
+    loser: []const u8,
+    kind: Kind,
+
+    pub const Kind = enum {
+        /// Two or more loaded plugins persist the same extension. Alphabetically-first id wins.
+        duplicate,
+        /// The plugin no longer offers `ext` via `fileTypes` — an update dropped support — and
+        /// it is not the fallback editor, so the entry no longer means anything.
+        stale,
+    };
+};
+
 pub const PendingPluginFlags = struct {
+    /// `null` = leave whatever is on disk alone. Note the *value* is itself tri-state on disk
+    /// (see `SettingsPluginsZon.Reserved.enabled`); use `erase` to get back to "no decision".
     enabled: ?bool = null,
     auto_update: ?bool = null,
+    /// Wipe fizzy's decision record for this id — `.enabled` removed entirely and `.extensions`
+    /// emptied, leaving the plugin's own `.settings` block untouched. Uninstall's flag, and the
+    /// one thing that makes a later reinstall ask about file types again. Applied before the
+    /// other fields, so an `.{ .erase = true, .enabled = true }` would still end up enabled.
+    erase: bool = false,
 };
 
 pub const Dialogs = @import("dialogs/Dialogs.zig");
@@ -110,6 +144,16 @@ loaded_plugin_libs: std.ArrayListUnmanaged(PluginLoader.LoadedLib) = .empty,
 /// list is only the UI/skip-load set for the current session. Freed in `deinit`.
 disabled_plugin_ids: std.ArrayListUnmanaged([]const u8) = .empty,
 
+/// Subset of `disabled_plugin_ids`: on disk with **no `.plugins.<id>.enabled` field on record at
+/// all** — i.e. a build the user dropped in (or `zig build install`ed from a plugin repo) that
+/// fizzy has never been told to run. Distinct from a plugin the user deliberately switched off,
+/// which carries an explicit `.enabled = false`: that one is a settled decision and must stay
+/// quiet, while this one is an undecided offer and gets the store's "Load" button plus the
+/// file-association prompt on its first load (see `setPluginEnabled`). Runtime-only, like
+/// `disabled_plugin_ids`; a decision either way (or an uninstall) drops the entry. Freed in
+/// `deinit`.
+undecided_plugin_ids: std.ArrayListUnmanaged([]const u8) = .empty,
+
 /// Runtime bookkeeping of user-plugin ids the user opted **out** of store updates for
 /// (`.plugins.<id>.auto_update = false` in `settings.zon`). Stored as the opt-out set rather than
 /// the opt-in one because auto-update defaults to *on* — an absent entry is the overwhelmingly
@@ -123,6 +167,26 @@ auto_update_off_ids: std.ArrayListUnmanaged([]const u8) = .empty,
 /// plugin itself — only by `setPluginEnabled` / `setPluginAutoUpdate` / store install. Keys are
 /// app-allocator-owned.
 plugin_flags_pending: std.StringArrayHashMapUnmanaged(PendingPluginFlags) = .empty,
+
+/// Fizzy-only pending `.plugins.<id>.extensions` writes (id → the plugin's complete new list).
+/// A separate map from `plugin_flags_pending` because the value is owned, variable-length data
+/// rather than two bools: both the key and every extension string are app-allocator-owned and
+/// freed when `writeMergedSettings` drains it. Written only by `resolveExtensionConflict`.
+plugin_extensions_pending: std.StringArrayHashMapUnmanaged([]const []const u8) = .empty,
+
+/// In-memory `ext → owning plugin id` map, rebuilt by `rebuildExtensionOwnerCache` from the
+/// persisted per-plugin `.extensions` lists of the *currently loaded* plugins. Backs
+/// `EditorAPI.extensionOwnerOverride`, i.e. step 1 of `Host.pluginForExtension`.
+///
+/// **Every string here is duped and owned by the Editor** — never a slice borrowed from
+/// `plugin.id`, which lives inside a dylib image that `dlclose` can unmap out from under us
+/// (see `Host.unregisterPlugin`'s ordering note).
+extension_owner: std.StringArrayHashMapUnmanaged([]const u8) = .empty,
+
+/// `.extensions` entries fizzy could not honor as written, rebuilt alongside `extension_owner`
+/// and surfaced in Settings > File Types exactly as `keybind_conflicts` is surfaced in Keyboard
+/// Shortcuts. Owned duped strings, freed on the next rebuild.
+extension_conflicts: std.ArrayListUnmanaged(ExtensionConflict) = .empty,
 
 /// Snapshot of dvui's *built-in* keybinds (`char_left`, `copy`, `next_widget`, …), taken in
 /// `init` before fizzy adds its own. `Window.init` installs these once and never again,
@@ -285,6 +349,14 @@ panel_ratio: f32 = 0.25,
 /// attempt on every drag frame.
 window_ratios_dirty: bool = false,
 window_ratios_save_deadline_ns: i128 = 0,
+
+/// Collapsed-layout (phone / narrow web viewport) center focus: while true the bottom panel
+/// stays swung shut so the center region owns the whole viewport. Set by `revealCenter`, which
+/// callers use when a tap has just put something worth reading in the center (e.g. picking a
+/// plugin in the store). Deliberately *not* a `panel_ratio` write: the user's panel height
+/// survives, so dragging the handle back up — or widening the window out of the collapsed
+/// layout — restores the panel where they left it.
+panel_hidden_for_center: bool = false,
 
 /// Watches `<config>/` recursively (via nightwatch — see R12) for external `settings.zon`
 /// changes and newly-created plugin directories, reconciling them live via `tick`. Null on wasm,
@@ -1172,6 +1244,9 @@ fn unloadPluginLibs(editor: *Editor) void {
     for (editor.disabled_plugin_ids.items) |id| fizzy.app.allocator.free(id);
     editor.disabled_plugin_ids.deinit(fizzy.app.allocator);
 
+    for (editor.undecided_plugin_ids.items) |id| fizzy.app.allocator.free(id);
+    editor.undecided_plugin_ids.deinit(fizzy.app.allocator);
+
     for (editor.auto_update_off_ids.items) |id| fizzy.app.allocator.free(id);
     editor.auto_update_off_ids.deinit(fizzy.app.allocator);
 
@@ -1180,6 +1255,16 @@ fn unloadPluginLibs(editor: *Editor) void {
         while (it.next()) |e| fizzy.app.allocator.free(e.key_ptr.*);
         editor.plugin_flags_pending.deinit(fizzy.app.allocator);
     }
+
+    {
+        var it = editor.plugin_extensions_pending.iterator();
+        while (it.next()) |e| {
+            fizzy.app.allocator.free(e.key_ptr.*);
+            SettingsPluginsZon.freeExtensions(fizzy.app.allocator, e.value_ptr.*);
+        }
+        editor.plugin_extensions_pending.deinit(fizzy.app.allocator);
+    }
+    editor.clearExtensionOwnerCache();
 
     editor.dvui_default_keybinds.deinit(fizzy.app.allocator);
 }
@@ -1274,8 +1359,12 @@ fn seedPluginFlags(editor: *Editor) void {
         // (which takes effect the moment it is enabled again), so neither read short-circuits
         // the other.
         editor.trackAutoUpdate(id, readPluginAutoUpdate(gpa, data, id)) catch {};
-        if (readPluginEnabled(gpa, data, id)) continue;
+        const state = readPluginEnabledState(gpa, data, id);
+        if (state == .enabled) continue;
         editor.trackDisabledPlugin(id) catch {};
+        // Never asked about: a build that appeared while fizzy wasn't running. Offer it in the
+        // store rather than leaving it looking like a plugin the user had switched off.
+        if (state == .unset) editor.trackUndecidedPlugin(id) catch {};
     }
 }
 
@@ -1330,6 +1419,64 @@ fn trackDisabledPlugin(editor: *Editor, id: []const u8) !void {
     try editor.disabled_plugin_ids.append(fizzy.app.allocator, dup);
 }
 
+/// True when `id` is on disk but fizzy has never been told whether to run it (no
+/// `.plugins.<id>.enabled` on record) — see `undecided_plugin_ids`. The store draws these with a
+/// "Load" button rather than the settled Enabled checkbox a deliberately-disabled plugin gets.
+pub fn isPluginUndecided(editor: *const Editor, id: []const u8) bool {
+    for (editor.undecided_plugin_ids.items) |d| {
+        if (std.mem.eql(u8, d, id)) return true;
+    }
+    return false;
+}
+
+/// How many on-disk plugins are waiting for a load decision — what the sidebar's Plugins badge
+/// counts (see `Sidebar.drawOption`). Kept honest by `pruneMissingUndecidedPlugins`.
+pub fn undecidedPluginCount(editor: *const Editor) usize {
+    return editor.undecided_plugin_ids.items.len;
+}
+
+/// Drop undecided entries whose `plugins/<id>/` directory is gone — the author deleted or moved
+/// the build instead of answering the offer. Without this the rail badge would advertise a
+/// decision the user can no longer make. Called from `reconcileDiscoveredPlugins`, which the
+/// watcher already runs for any change under `<config>/` (a deleted directory very much included).
+fn pruneMissingUndecidedPlugins(editor: *Editor, plugins_dir: []const u8) void {
+    const gpa = fizzy.app.allocator;
+    var i: usize = editor.undecided_plugin_ids.items.len;
+    while (i > 0) {
+        i -= 1;
+        const id = editor.undecided_plugin_ids.items[i];
+        const dir_path = std.fs.path.join(gpa, &.{ plugins_dir, id }) catch continue;
+        defer gpa.free(dir_path);
+        var dir = std.Io.Dir.cwd().openDir(dvui.io, dir_path, .{}) catch {
+            gpa.free(editor.undecided_plugin_ids.orderedRemove(i));
+            continue;
+        };
+        dir.close(dvui.io);
+    }
+}
+
+/// Mark `id` as an undiscovered-until-now drop-in. Writes nothing: the whole point is that no
+/// `.enabled` field exists yet.
+fn trackUndecidedPlugin(editor: *Editor, id: []const u8) !void {
+    if (editor.isPluginUndecided(id)) return;
+    if (!isValidPluginId(id)) return error.InvalidPluginId;
+    const dup = try fizzy.app.allocator.dupe(u8, id);
+    errdefer fizzy.app.allocator.free(dup);
+    try editor.undecided_plugin_ids.append(fizzy.app.allocator, dup);
+}
+
+/// Drop `id`'s undecided status — called from every path that records an explicit decision
+/// (`setPluginEnabledPersisted`, either direction) or removes the plugin entirely
+/// (`uninstallPlugin`).
+fn untrackUndecidedPlugin(editor: *Editor, id: []const u8) void {
+    for (editor.undecided_plugin_ids.items, 0..) |d, i| {
+        if (std.mem.eql(u8, d, id)) {
+            fizzy.app.allocator.free(editor.undecided_plugin_ids.orderedRemove(i));
+            return;
+        }
+    }
+}
+
 fn untrackDisabledPlugin(editor: *Editor, id: []const u8) void {
     for (editor.disabled_plugin_ids.items, 0..) |d, i| {
         if (std.mem.eql(u8, d, id)) {
@@ -1359,9 +1506,18 @@ fn readPluginReservedField(gpa: std.mem.Allocator, settings_data: ?[:0]const u8,
 /// Reads `.plugins.<id>.enabled` from already-loaded `settings_data` (null source → false).
 /// Missing `.plugins` / missing id / missing or non-`true` `.enabled` all mean disabled.
 fn readPluginEnabled(gpa: std.mem.Allocator, settings_data: ?[:0]const u8, id: []const u8) bool {
-    const text = readPluginReservedField(gpa, settings_data, id, "enabled") orelse return false;
+    return readPluginEnabledState(gpa, settings_data, id) == .enabled;
+}
+
+/// Three-way form of `readPluginEnabled`: `.unset` (no `.enabled` field on record at all) is
+/// what separates a freshly dropped-in plugin from one the user deliberately switched off — both
+/// are "not enabled", but only the first is an undecided offer (see `undecided_plugin_ids`).
+const PluginEnabledState = enum { unset, enabled, disabled };
+
+fn readPluginEnabledState(gpa: std.mem.Allocator, settings_data: ?[:0]const u8, id: []const u8) PluginEnabledState {
+    const text = readPluginReservedField(gpa, settings_data, id, "enabled") orelse return .unset;
     defer gpa.free(text);
-    return std.mem.eql(u8, std.mem.trim(u8, text, " \t\r\n"), "true");
+    return if (std.mem.eql(u8, std.mem.trim(u8, text, " \t\r\n"), "true")) .enabled else .disabled;
 }
 
 /// Reads `.plugins.<id>.auto_update` from already-loaded `settings_data`. **Defaults to true** —
@@ -1404,8 +1560,12 @@ fn setPluginFlagsPersisted(editor: *Editor, id: []const u8, flags: PendingPlugin
     }
     const gpa = fizzy.app.allocator;
     if (editor.plugin_flags_pending.getPtr(id)) |slot| {
-        if (flags.enabled) |e| slot.enabled = e;
-        if (flags.auto_update) |a| slot.auto_update = a;
+        if (flags.erase) {
+            slot.* = .{ .erase = true };
+        } else {
+            if (flags.enabled) |e| slot.enabled = e;
+            if (flags.auto_update) |a| slot.auto_update = a;
+        }
     } else {
         const key = try gpa.dupe(u8, id);
         errdefer gpa.free(key);
@@ -1422,7 +1582,512 @@ fn setPluginFlagsPersisted(editor: *Editor, id: []const u8, flags: PendingPlugin
 }
 
 fn setPluginEnabledPersisted(editor: *Editor, id: []const u8, enabled: bool) !void {
+    // Either direction is a decision, so the plugin stops being an undecided drop-in offer.
+    editor.untrackUndecidedPlugin(id);
     return editor.setPluginFlagsPersisted(id, .{ .enabled = enabled });
+}
+
+/// Erase fizzy's decision record for `id` — the `.enabled` field and the `.extensions` list —
+/// leaving the plugin's own `.settings` block alone. Called from `uninstallPlugin`, and only
+/// from there.
+///
+/// This is the whole mechanism behind "uninstalling makes a reinstall ask again": with no
+/// `.enabled` on record the plugin comes back as *undecided* (rail badge + Load button), and with
+/// no `.extensions` on record it has no claim on any file type, so the first load recomputes the
+/// ownership question from scratch. Enable, disable and update all leave the record intact and
+/// therefore stay silent. Settings survive because they are the plugin's own data, not a fizzy
+/// decision — the pre-existing "reinstalling picks your config back up" promise (docs/PLUGINS.md
+/// §3.1) is about exactly that half.
+fn clearPluginOwnershipRecord(editor: *Editor, id: []const u8) void {
+    editor.setPluginFlagsPersisted(id, .{ .erase = true }) catch |err|
+        dvui.log.warn("uninstall '{s}': could not clear its enabled/extensions record: {s}", .{ id, @errorName(err) });
+}
+
+// ---- file-type ownership (`.plugins.<id>.extensions`) -------------------------------
+//
+// Which plugin opens a given extension is an explicit, persisted, per-extension user choice —
+// there is no numeric priority contest between plugin authors. `Host.pluginForExtension`
+// resolves it as: the user's assignment (via `EditorAPI.extensionOwnerOverride`, backed by
+// `extension_owner` below) → the unique plugin offering it via `fileTypes` → the fallback
+// editor. Everything here interprets `settings.zon`; only `resolveExtensionConflict` writes it.
+
+/// Reads `.plugins.<id>.extensions` from already-loaded `settings_data`. Empty (never null) when
+/// absent or unparseable — a hand-edited file must degrade to "no explicit choice", not an error.
+/// Caller frees with `SettingsPluginsZon.freeExtensions`.
+fn readPluginExtensions(gpa: std.mem.Allocator, settings_data: ?[:0]const u8, id: []const u8) []const []const u8 {
+    const text = readPluginReservedField(gpa, settings_data, id, "extensions") orelse return &.{};
+    defer gpa.free(text);
+    return SettingsPluginsZon.parseExtensions(gpa, text) catch &.{};
+}
+
+fn clearExtensionOwnerCache(editor: *Editor) void {
+    const gpa = fizzy.app.allocator;
+    {
+        var it = editor.extension_owner.iterator();
+        while (it.next()) |e| {
+            gpa.free(e.key_ptr.*);
+            gpa.free(e.value_ptr.*);
+        }
+        editor.extension_owner.clearAndFree(gpa);
+    }
+    for (editor.extension_conflicts.items) |c| {
+        gpa.free(c.ext);
+        gpa.free(c.loser);
+        if (c.winner) |w| gpa.free(w);
+    }
+    editor.extension_conflicts.clearAndFree(gpa);
+}
+
+/// Rebuild `extension_owner` (and `extension_conflicts`) from the persisted `.extensions` lists
+/// of the **currently loaded** plugins. Call after any change to that set: startup load, install,
+/// update/reload, enable/disable, unload, and every File Types settings edit.
+///
+/// **Strictly read-only.** `settings.zon` is watched live and reconciled externally (see
+/// `SettingsWatcher`), so a self-heal that wrote as a side effect of loading would race that
+/// watcher instead of composing with it. Two on-disk states are therefore *interpreted*, never
+/// corrected, and both are recorded in `extension_conflicts` for the File Types table to surface:
+///
+///   1. **Stale** — the entry names an extension the plugin no longer offers via `fileTypes`
+///      (an update dropped support). Ignored, so the extension falls through to ordinary
+///      resolution. The fallback editor is exempt: it legitimately owns anything.
+///   2. **Duplicate** — two loaded plugins persist the same extension, only reachable from a
+///      hand-edited file. The alphabetically-first id wins, so the result never depends on
+///      dylib load/scan order.
+///
+/// Iterating only *loaded* plugins is also what makes uninstall compose for free: an uninstalled
+/// plugin's block deliberately survives in `settings.zon`, and its claim simply doesn't appear
+/// while it's gone — then comes back intact if it is reinstalled.
+pub fn rebuildExtensionOwnerCache(editor: *Editor) void {
+    const gpa = fizzy.app.allocator;
+    editor.clearExtensionOwnerCache();
+    if (comptime builtin.target.cpu.arch == .wasm32) return;
+
+    const settings_path = std.fs.path.join(gpa, &.{ editor.config_folder, "settings.zon" }) catch return;
+    defer gpa.free(settings_path);
+    const data = fizzy.fs.readZ(gpa, dvui.io, settings_path) catch null;
+    defer if (data) |d| gpa.free(d);
+
+    // Stable order: sort ids so a duplicate's winner matches `Host.pluginForExtension`'s own
+    // alphabetical tie-break rather than depending on registration order.
+    var ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer ids.deinit(gpa);
+    for (editor.host.plugins.items) |plugin| ids.append(gpa, plugin.id) catch return;
+    std.mem.sort([]const u8, ids.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+
+    for (ids.items) |id| {
+        const plugin = editor.host.pluginById(id) orelse continue;
+        const exts = readPluginExtensions(gpa, data, id);
+        defer SettingsPluginsZon.freeExtensions(gpa, exts);
+
+        for (exts) |ext| {
+            if (!editor.host.ownsExtension(plugin, ext)) {
+                editor.recordExtensionConflict(ext, null, id, .stale);
+                continue;
+            }
+            if (editor.extension_owner.get(ext)) |winner| {
+                // Alphabetical order means the incumbent always wins; this entry is the loser.
+                editor.recordExtensionConflict(ext, winner, id, .duplicate);
+                continue;
+            }
+            const key = gpa.dupe(u8, ext) catch continue;
+            const val = gpa.dupe(u8, id) catch {
+                gpa.free(key);
+                continue;
+            };
+            editor.extension_owner.put(gpa, key, val) catch {
+                gpa.free(key);
+                gpa.free(val);
+            };
+        }
+    }
+}
+
+fn recordExtensionConflict(
+    editor: *Editor,
+    ext: []const u8,
+    winner: ?[]const u8,
+    loser: []const u8,
+    kind: ExtensionConflict.Kind,
+) void {
+    const gpa = fizzy.app.allocator;
+    const ext_owned = gpa.dupe(u8, ext) catch return;
+    errdefer gpa.free(ext_owned);
+    const loser_owned = gpa.dupe(u8, loser) catch {
+        gpa.free(ext_owned);
+        return;
+    };
+    errdefer gpa.free(loser_owned);
+    const winner_owned: ?[]const u8 = if (winner) |w| (gpa.dupe(u8, w) catch {
+        gpa.free(ext_owned);
+        gpa.free(loser_owned);
+        return;
+    }) else null;
+    editor.extension_conflicts.append(gpa, .{
+        .ext = ext_owned,
+        .winner = winner_owned,
+        .loser = loser_owned,
+        .kind = kind,
+    }) catch {
+        gpa.free(ext_owned);
+        gpa.free(loser_owned);
+        if (winner_owned) |w| gpa.free(w);
+    };
+}
+
+/// The plugin id the user assigned as `ext`'s default owner, or null. Backs
+/// `EditorAPI.extensionOwnerOverride`, i.e. step 1 of `Host.pluginForExtension`.
+pub fn extensionOwner(editor: *Editor, ext: []const u8) ?[]const u8 {
+    return editor.extension_owner.get(ext);
+}
+
+/// **The only function that writes `.extensions` to disk**, and it runs only in direct response
+/// to an explicit user decision — the install-time dialog's Confirm, or a File Types dropdown.
+/// No load or reconcile path may call it.
+///
+/// Single-writer-per-extension: `ext` is added to `chosen_id`'s list *and* stripped from every
+/// other plugin that currently lists it, which is what keeps fizzy from ever producing the
+/// duplicate state `rebuildExtensionOwnerCache` has to tolerate from hand-edited files. It is
+/// also how a repair works — assigning an owner in a conflicted row rewrites both sides.
+///
+/// `chosen_id` may be the fallback editor's own id ("keep Plain Text for `.foo`"): `ownsExtension`
+/// treats the fallback editor as owning anything, so that is a legal, meaningful entry.
+pub fn resolveExtensionConflict(editor: *Editor, ext: []const u8, chosen_id: []const u8) !void {
+    const gpa = fizzy.app.allocator;
+    if (ext.len == 0) return error.InvalidExtension;
+
+    const settings_path = try std.fs.path.join(gpa, &.{ editor.config_folder, "settings.zon" });
+    defer gpa.free(settings_path);
+    const data = fizzy.fs.readZ(gpa, dvui.io, settings_path) catch null;
+    defer if (data) |d| gpa.free(d);
+
+    // Every id with a block on disk, not just the loaded ones — a disabled or uninstalled
+    // plugin's stale claim on `ext` must be stripped too, or it would come back the moment
+    // that plugin loads again and silently re-contest an extension the user just decided.
+    const entries = try SettingsPluginsZon.listPluginBlocks(gpa, data);
+    defer SettingsPluginsZon.freeEntries(gpa, entries);
+
+    var seen_chosen = false;
+    for (entries) |entry| {
+        const is_chosen = std.mem.eql(u8, entry.id, chosen_id);
+        if (is_chosen) seen_chosen = true;
+        const current = readPluginExtensions(gpa, data, entry.id);
+        defer SettingsPluginsZon.freeExtensions(gpa, current);
+
+        var next: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer {
+            for (next.items) |e| gpa.free(e);
+            next.deinit(gpa);
+        }
+        var changed = false;
+        var already_has = false;
+        for (current) |e| {
+            if (std.mem.eql(u8, e, ext)) {
+                if (is_chosen) {
+                    already_has = true;
+                } else {
+                    changed = true; // strip: this plugin is no longer the owner
+                    continue;
+                }
+            }
+            try next.append(gpa, try gpa.dupe(u8, e));
+        }
+        if (is_chosen and !already_has) {
+            try next.append(gpa, try gpa.dupe(u8, ext));
+            changed = true;
+        }
+        if (!changed) {
+            for (next.items) |e| gpa.free(e);
+            next.deinit(gpa);
+            continue;
+        }
+        try editor.setPluginExtensionsPersisted(entry.id, try next.toOwnedSlice(gpa));
+    }
+
+    // The chosen plugin may have no block on disk yet (first ever decision about it).
+    if (!seen_chosen) {
+        var next: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer {
+            for (next.items) |e| gpa.free(e);
+            next.deinit(gpa);
+        }
+        try next.append(gpa, try gpa.dupe(u8, ext));
+        try editor.setPluginExtensionsPersisted(chosen_id, try next.toOwnedSlice(gpa));
+    }
+
+    try editor.flushPluginExtensionWrites();
+    editor.rebuildExtensionOwnerCache();
+}
+
+/// Buffer `id`'s complete new `.extensions` list. Takes ownership of `exts` and every string in
+/// it. Buffered rather than written per call so one Confirm covering several extensions produces
+/// a single `settings.zon` write; `resolveExtensionConflict` flushes at the end.
+fn setPluginExtensionsPersisted(editor: *Editor, id: []const u8, exts: []const []const u8) !void {
+    const gpa = fizzy.app.allocator;
+    errdefer SettingsPluginsZon.freeExtensions(gpa, exts);
+    if (editor.plugin_extensions_pending.getPtr(id)) |slot| {
+        SettingsPluginsZon.freeExtensions(gpa, slot.*);
+        slot.* = exts;
+        return;
+    }
+    const key = try gpa.dupe(u8, id);
+    errdefer gpa.free(key);
+    try editor.plugin_extensions_pending.put(gpa, key, exts);
+}
+
+/// Flush buffered `.extensions` writes immediately, like `setPluginFlagsPersisted` does for the
+/// boolean flags: an explicit ownership decision is discrete and important enough that losing it
+/// to a skipped autosave window is worse than one extra write.
+fn flushPluginExtensionWrites(editor: *Editor) !void {
+    if (comptime builtin.target.cpu.arch == .wasm32) {
+        editor.host.markSettingsDirty();
+        return;
+    }
+    editor.saveSettingsRaw() catch |err| {
+        dvui.log.err("Failed to persist file-type ownership immediately ({s}); deferring to autosave", .{@errorName(err)});
+        editor.host.markSettingsDirty();
+    };
+}
+
+/// Offer the user a decision about any extension `id` offers that something else already opens.
+///
+/// **Only ever called when a plugin *arrives*:** `installAndLoadPlugin` (a store install) and
+/// `setPluginEnabled`'s first load of an undecided drop-in. Never from the plain startup load
+/// path (`loadUserPlugins`/`loadUserPluginById`), and — since the R19 follow-up — never from
+/// `updatePlugin` either: an update is the same plugin the user already answered for, and
+/// prompting on every store update or every local rebuild is nagging, not consent.
+///
+/// That scoping is the entire mechanism keeping an unresolved conflict from nagging, and it is
+/// why no per-extension "already asked" flag is persisted anywhere. What *is* persisted is the
+/// coarser record: `.plugins.<id>.enabled`'s presence means "fizzy has asked about this plugin".
+/// Enable, disable and update leave it be; only `uninstallPlugin` erases it
+/// (`clearPluginOwnershipRecord`), which is what lets a reinstall ask again.
+///
+/// A conflict is "some *other* plugin currently opens this extension" — including the case where
+/// that other plugin is only the `text` fallback, which is the ".txt claimed by a new plugin"
+/// scenario. A plugin-vs-plugin overlap and a plugin-vs-builtin overlap go through this one path
+/// identically; there is no special-casing of builtins.
+pub fn maybeShowFileTypeDialog(editor: *Editor, id: []const u8) !void {
+    if (comptime builtin.target.cpu.arch == .wasm32) return;
+    const gpa = fizzy.app.allocator;
+    const plugin = editor.host.pluginById(id) orelse return;
+
+    var rows: std.ArrayListUnmanaged(Dialogs.FileTypeDefaults.Row) = .empty;
+    errdefer {
+        for (rows.items) |r| freeFileTypeDialogRow(gpa, r);
+        rows.deinit(gpa);
+    }
+
+    for (plugin.fileTypes()) |ext| {
+        // Resolve as if this plugin were not loaded: it registered before we got here, so a
+        // plain `pluginForExtension` could simply answer "you". Done inline rather than as a new
+        // SDK surface — this is the only call site that ever needs it.
+        const prior = editor.extensionOwnerExcluding(ext, plugin) orelse continue;
+        if (prior == plugin) continue;
+        try editor.appendFileTypeDialogRow(&rows, plugin, ext, prior);
+    }
+
+    if (rows.items.len == 0) {
+        rows.deinit(gpa);
+        return;
+    }
+    // The dialog takes ownership of the rows (and frees them in its `callAfter`).
+    Dialogs.FileTypeDefaults.request(plugin.id, plugin.display_name, try rows.toOwnedSlice(gpa));
+}
+
+fn freeFileTypeDialogRow(gpa: std.mem.Allocator, r: Dialogs.FileTypeDefaults.Row) void {
+    gpa.free(r.ext);
+    for (r.choices) |c| {
+        gpa.free(c.id);
+        gpa.free(c.name);
+    }
+    if (r.choices.len > 0) gpa.free(r.choices);
+}
+
+fn appendFileTypeChoice(
+    gpa: std.mem.Allocator,
+    list: *std.ArrayListUnmanaged(Dialogs.FileTypeDefaults.Choice),
+    id: []const u8,
+    name: []const u8,
+    is_builtin: bool,
+) !void {
+    const id_d = try gpa.dupe(u8, id);
+    errdefer gpa.free(id_d);
+    const name_d = try gpa.dupe(u8, name);
+    errdefer gpa.free(name_d);
+    try list.append(gpa, .{ .id = id_d, .name = name_d, .builtin = is_builtin });
+}
+
+fn fileTypeChoicesContain(choices: []const Dialogs.FileTypeDefaults.Choice, id: []const u8) bool {
+    for (choices) |c| {
+        if (std.mem.eql(u8, c.id, id)) return true;
+    }
+    return false;
+}
+
+/// One dialog row: the arriving plugin first (and pre-selected), then other loaded plugins that
+/// offer `ext`, then fizzy's built-ins, then the fallback editor if it is not already in the
+/// list. Every string is duped — `FileTypeDefaults` owns the row past this call, and a plugin
+/// pointer would dangle the moment that dylib unloads.
+fn appendFileTypeDialogRow(
+    editor: *Editor,
+    rows: *std.ArrayListUnmanaged(Dialogs.FileTypeDefaults.Row),
+    arriving: *sdk.Plugin,
+    ext: []const u8,
+    prior: *sdk.Plugin,
+) !void {
+    const gpa = fizzy.app.allocator;
+    const Choice = Dialogs.FileTypeDefaults.Choice;
+
+    var choices: std.ArrayListUnmanaged(Choice) = .empty;
+    errdefer {
+        for (choices.items) |c| {
+            gpa.free(c.id);
+            gpa.free(c.name);
+        }
+        choices.deinit(gpa);
+    }
+
+    try appendFileTypeChoice(gpa, &choices, arriving.id, arriving.display_name, isBundledPluginId(arriving.id));
+
+    var plugins: std.ArrayListUnmanaged(*sdk.Plugin) = .empty;
+    defer plugins.deinit(gpa);
+    var builtins: std.ArrayListUnmanaged(*sdk.Plugin) = .empty;
+    defer builtins.deinit(gpa);
+
+    for (editor.host.plugins.items) |p| {
+        if (p == arriving) continue;
+        if (p == editor.host.fallback_editor) continue;
+        if (!editor.host.ownsExtension(p, ext)) continue;
+        if (isBundledPluginId(p.id)) {
+            try builtins.append(gpa, p);
+        } else {
+            try plugins.append(gpa, p);
+        }
+    }
+
+    const by_id = struct {
+        fn lt(_: void, a: *sdk.Plugin, b: *sdk.Plugin) bool {
+            return std.mem.lessThan(u8, a.id, b.id);
+        }
+    }.lt;
+    std.mem.sort(*sdk.Plugin, plugins.items, {}, by_id);
+    std.mem.sort(*sdk.Plugin, builtins.items, {}, by_id);
+
+    for (plugins.items) |p| {
+        try appendFileTypeChoice(gpa, &choices, p.id, p.display_name, false);
+    }
+    for (builtins.items) |p| {
+        try appendFileTypeChoice(gpa, &choices, p.id, p.display_name, true);
+    }
+    if (editor.host.fallback_editor) |text| {
+        if (!fileTypeChoicesContain(choices.items, text.id)) {
+            try appendFileTypeChoice(gpa, &choices, text.id, "Text (fallback)", true);
+        }
+    }
+
+    var current: ?usize = null;
+    for (choices.items, 0..) |c, i| {
+        if (std.mem.eql(u8, c.id, prior.id)) {
+            current = i;
+            break;
+        }
+    }
+
+    const owned = try choices.toOwnedSlice(gpa);
+    errdefer {
+        for (owned) |c| {
+            gpa.free(c.id);
+            gpa.free(c.name);
+        }
+        if (owned.len > 0) gpa.free(owned);
+    }
+
+    const ext_d = try gpa.dupe(u8, ext);
+    errdefer gpa.free(ext_d);
+
+    try rows.append(gpa, .{
+        .ext = ext_d,
+        .choices = owned,
+        .current = current,
+        .selected = 0,
+    });
+}
+
+/// `Host.pluginForExtension`, but pretending `skip` is not loaded — what would open `ext` if this
+/// plugin had never arrived. Mirrors that function's resolution order exactly, including its
+/// alphabetical tie-break, so the "prior owner" shown in the dialog is the one the user would
+/// actually have gotten.
+fn extensionOwnerExcluding(editor: *Editor, ext: []const u8, skip: *sdk.Plugin) ?*sdk.Plugin {
+    if (editor.extensionOwner(ext)) |owner_id| {
+        if (editor.host.pluginById(owner_id)) |p| {
+            if (p != skip and editor.host.ownsExtension(p, ext)) return p;
+        }
+    }
+    var best: ?*sdk.Plugin = null;
+    for (editor.host.plugins.items) |plugin| {
+        if (plugin == skip) continue;
+        for (plugin.fileTypes()) |e| {
+            if (std.mem.eql(u8, e, ext)) {
+                if (best == null or std.mem.lessThan(u8, plugin.id, best.?.id)) best = plugin;
+                break;
+            }
+        }
+    }
+    if (best) |p| return p;
+    return editor.host.fallback_editor;
+}
+
+/// Open documents of extension `ext` whose owner is no longer the plugin that would open `ext`
+/// today — i.e. documents left behind by a reassignment. Reassigning never closes anything, so
+/// these keep working under their original owner; this is what lets the File Types table offer
+/// to reopen them. Returned ids are stable across the call; the slice is caller-owned.
+pub fn staleOpenDocsForExtension(editor: *Editor, gpa: std.mem.Allocator, ext: []const u8) ![]u64 {
+    const want = editor.host.pluginForExtension(ext) orelse return &.{};
+    var out: std.ArrayListUnmanaged(u64) = .empty;
+    errdefer out.deinit(gpa);
+    for (editor.open_files.values()) |doc| {
+        if (doc.owner == want) continue;
+        const path = editor.docPath(doc);
+        if (!std.mem.eql(u8, std.fs.path.extension(path), ext)) continue;
+        try out.append(gpa, doc.id);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// Reopen every *clean* document in `doc_ids` so it lands under whichever plugin now owns its
+/// extension. Dirty documents are deliberately skipped and counted rather than closed — a
+/// file-type preference must never be able to discard unsaved work; the caller tells the user
+/// how many were left alone. Returns `.{ reopened, skipped_dirty }`.
+pub fn reopenDocsUnderCurrentOwner(editor: *Editor, doc_ids: []const u64) struct { usize, usize } {
+    const gpa = fizzy.app.allocator;
+    var reopened: usize = 0;
+    var skipped: usize = 0;
+    for (doc_ids) |doc_id| {
+        const doc = editor.open_files.get(doc_id) orelse continue;
+        if (doc.owner.isDirty(doc)) {
+            skipped += 1;
+            continue;
+        }
+        // Both the path and the grouping live in the owner's image / bookkeeping, which the
+        // close below tears down — copy them first.
+        const path = gpa.dupe(u8, editor.docPath(doc)) catch continue;
+        defer gpa.free(path);
+        const grouping = editor.docGrouping(doc);
+        editor.rawCloseFileID(doc_id) catch |err| {
+            dvui.log.err("reopen '{s}': close failed: {s}", .{ path, @errorName(err) });
+            continue;
+        };
+        _ = editor.openFilePath(path, grouping) catch |err| {
+            dvui.log.err("reopen '{s}': open failed: {s}", .{ path, @errorName(err) });
+            continue;
+        };
+        reopened += 1;
+    }
+    return .{ reopened, skipped };
 }
 
 /// Rebuild the whole window keybind map from scratch: fizzy binds + every *currently
@@ -1497,6 +2162,8 @@ pub fn installAndLoadPlugin(editor: *Editor, id: []const u8) !void {
     editor.untrackDisabledPlugin(id);
     try editor.setPluginEnabledPersisted(id, true);
     try editor.loadUserPluginById(id);
+    editor.rebuildExtensionOwnerCache();
+    try editor.maybeShowFileTypeDialog(id);
 }
 
 /// True if `plugin` owns any document with an async save still in flight.
@@ -1624,6 +2291,12 @@ pub fn unloadPlugin(editor: *Editor, id: []const u8, force: bool) UnloadError!vo
 pub fn setPluginEnabled(editor: *Editor, id: []const u8, enabled: bool, force: bool) !void {
     if (isBundledPluginId(id)) return error.NotUnloadable;
 
+    // Read before `setPluginEnabledPersisted` settles it: enabling a plugin fizzy has never been
+    // told to run is the same event as installing one from the store, so it gets the same
+    // file-association prompt at the end (see `maybeShowFileTypeDialog`'s scoping note — this is
+    // a genuine install-equivalent, not the startup load path).
+    const first_load = enabled and editor.isPluginUndecided(id);
+
     if (enabled) {
         editor.untrackDisabledPlugin(id);
         try editor.setPluginEnabledPersisted(id, true);
@@ -1634,14 +2307,28 @@ pub fn setPluginEnabled(editor: *Editor, id: []const u8, enabled: bool, force: b
         try editor.setPluginEnabledPersisted(id, false);
         if (editor.host.pluginById(id) != null) try editor.unloadPlugin(id, force);
     }
+    // The *cache* drops (or regains) this plugin's claims immediately; `settings.zon` keeps
+    // remembering them non-destructively, so re-enabling restores ownership with no re-prompt.
+    editor.rebuildExtensionOwnerCache();
+    if (first_load) try editor.maybeShowFileTypeDialog(id);
 }
 
 /// Replace an installed plugin with a freshly downloaded build (in the plugins dir already)
 /// by unloading then reloading. `force` controls dirty-document handling on the unload.
+/// Deliberately does **not** raise the file-type prompt: an update is the same plugin the user
+/// already answered for, and re-asking on every store update (or every `zig build` of a plugin
+/// you are developing, via `reconcileChangedPluginBinaries`) would be pure nagging. The prompt
+/// belongs to arrival — a store install, or the first load of a dropped-in build — and uninstall
+/// is what makes a plugin able to arrive again (`clearPluginOwnershipRecord`).
+///
+/// The gap this leaves on purpose: an update that starts offering a *new* extension does not
+/// prompt. It falls through the normal resolution order (unique claimant, else the fallback
+/// editor), and Settings > File Types is where to override it.
 pub fn updatePlugin(editor: *Editor, id: []const u8, force: bool) !void {
     if (isBundledPluginId(id)) return error.NotUnloadable;
     try editor.unloadPlugin(id, force);
     try editor.loadUserPluginById(id);
+    editor.rebuildExtensionOwnerCache();
 }
 
 /// Fully remove a user plugin: unload it if loaded, clear any disabled flag, and delete its
@@ -1659,6 +2346,9 @@ pub fn uninstallPlugin(editor: *Editor, id: []const u8, force: bool) !void {
     // `.plugins.<id>` settings block deliberately survives (reinstall restores config); a
     // later store install writes `.enabled = true` fresh.
     editor.untrackDisabledPlugin(id);
+    editor.untrackUndecidedPlugin(id);
+    // Uninstall is the one lifecycle event that resets "we have already asked about this plugin".
+    editor.clearPluginOwnershipRecord(id);
 
     const plugin_dir = try std.fs.path.join(fizzy.app.allocator, &.{ editor.config_folder, "plugins", id });
     defer fizzy.app.allocator.free(plugin_dir);
@@ -1667,6 +2357,7 @@ pub fn uninstallPlugin(editor: *Editor, id: []const u8, force: bool) !void {
     // A broken (failed-to-load) build can be uninstalled too; clear its failure record so the
     // card disappears instead of lingering as "Failed".
     editor.clearFailedUserPlugin(id);
+    editor.rebuildExtensionOwnerCache();
 }
 
 pub fn postInit(editor: *Editor) !void {
@@ -1725,6 +2416,10 @@ pub fn postInit(editor: *Editor) !void {
 
     // User-installed plugins from `<config>/plugins/{id}.{dylib,so,dll}`.
     editor.loadUserPlugins(editor.config_folder);
+
+    // Now that the loaded-plugin set is final, interpret the persisted `.extensions` lists into
+    // the routing cache `Host.pluginForExtension` reads. Read-only — see its doc comment.
+    editor.rebuildExtensionOwnerCache();
 
     for (editor.host.plugins.items) |p| try p.initPlugin();
 
@@ -1845,6 +2540,7 @@ fn drawSettingsPane(_: ?*anyopaque) anyerror!void {
 
 const fizzy_api_vtable: sdk.EditorAPI.VTable = .{
     .arena = fizzyArena,
+    .extensionOwnerOverride = fizzyExtensionOwnerOverride,
     .folder = fizzyFolder,
     .paletteFolder = fizzyPaletteFolder,
     .markSettingsDirty = fizzyMarkSettingsDirty,
@@ -1979,6 +2675,11 @@ fn fizzyCtx(ctx: *anyopaque) *Editor {
 }
 fn fizzyArena(ctx: *anyopaque) std.mem.Allocator {
     return fizzyCtx(ctx).arena.allocator();
+}
+
+fn fizzyExtensionOwnerOverride(ctx: *anyopaque, ext: []const u8) ?[]const u8 {
+    const editor: *Editor = @ptrCast(@alignCast(ctx));
+    return editor.extensionOwner(ext);
 }
 fn fizzyFolder(ctx: *anyopaque) ?[]const u8 {
     return fizzyCtx(ctx).folder;
@@ -2506,6 +3207,24 @@ pub fn markWindowRatiosDirty(editor: *Editor) void {
     editor.window_ratios_save_deadline_ns = fizzy.perf.nanoTimestamp() + Settings.autosave_timeout_ns;
 }
 
+/// Hand the center region the whole viewport on a collapsed (phone / narrow web) layout: close
+/// the explorer peek and swing the bottom panel shut. Call it right after a tap has put
+/// something worth reading in the center — e.g. selecting a plugin in the store, whose detail
+/// page renders as a center provider behind the peeked-open explorer.
+///
+/// No-op unless the explorer paned is collapsed *and* peeked open — i.e. exactly the state that
+/// draws the floating collapse-explorer button (see `Explorer.drawCollapseButton`). On a
+/// desktop-width window both panes are visible at once, so there is nothing to reveal and the
+/// user's layout is left alone.
+///
+/// Must be called from inside the frame's explorer/center subtree, where `explorer.paned`
+/// exists — see the `Sidebar` note about deferring paned pokes to `tick`.
+pub fn revealCenter(editor: *Editor) void {
+    if (!editor.explorer.paned.collapsed() or !editor.explorer.peek_open) return;
+    editor.explorer.peekClose();
+    editor.panel_hidden_for_center = true;
+}
+
 /// This frame's answer, sampled in `tick` — see `plugins_drawing`. Callers run after that
 /// sample; on the first frame, before any sample, it reads false, which is the harmless
 /// direction (an autosave happens one frame earlier than it might have).
@@ -2562,6 +3281,17 @@ fn writeMergedSettings(editor: *Editor, settings_path: []const u8) !void {
         pending_flags.deinit(gpa);
     }
 
+    var pending_exts = editor.plugin_extensions_pending;
+    editor.plugin_extensions_pending = .empty;
+    defer {
+        var it = pending_exts.iterator();
+        while (it.next()) |e| {
+            gpa.free(e.key_ptr.*);
+            SettingsPluginsZon.freeExtensions(gpa, e.value_ptr.*);
+        }
+        pending_exts.deinit(gpa);
+    }
+
     // Union of ids touched by either buffer this cycle.
     var touched: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer touched.deinit(gpa);
@@ -2571,6 +3301,10 @@ fn writeMergedSettings(editor: *Editor, settings_path: []const u8) !void {
     }
     {
         var it = pending_flags.iterator();
+        while (it.next()) |e| try touched.put(gpa, e.key_ptr.*, {});
+    }
+    {
+        var it = pending_exts.iterator();
         while (it.next()) |e| try touched.put(gpa, e.key_ptr.*, {});
     }
 
@@ -2590,18 +3324,34 @@ fn writeMergedSettings(editor: *Editor, settings_path: []const u8) !void {
         const id = te.key_ptr.*;
 
         // Base from disk, then overlay whichever of the two buffers changed this cycle.
+        const disk_exts = readPluginExtensions(gpa, existing, id);
+        defer SettingsPluginsZon.freeExtensions(gpa, disk_exts);
         var reserved: SettingsPluginsZon.Reserved = .{
-            .enabled = readPluginEnabled(gpa, existing, id),
+            // Tri-state, not `readPluginEnabled`'s bool: an id that has never been decided about
+            // must stay that way when some *other* part of its block is written (a plugin can
+            // have `.settings` on disk long before anyone answers "should this load?").
+            .enabled = switch (readPluginEnabledState(gpa, existing, id)) {
+                .unset => null,
+                .enabled => true,
+                .disabled => false,
+            },
             .auto_update = readPluginAutoUpdate(gpa, existing, id),
+            .extensions = disk_exts,
         };
         var settings_owned = readPluginSettingsText(gpa, existing, id);
         defer if (settings_owned) |s| gpa.free(s);
         var settings_text: ?[]const u8 = settings_owned;
 
         if (pending_flags.get(id)) |f| {
+            if (f.erase) {
+                reserved.enabled = null;
+                reserved.extensions = &.{};
+            }
             if (f.enabled) |e| reserved.enabled = e;
             if (f.auto_update) |a| reserved.auto_update = a;
         }
+        // Pending owns the list (freed with `pending_exts`); borrow it for composition.
+        if (pending_exts.get(id)) |exts| reserved.extensions = exts;
         if (pending_settings.get(id)) |maybe| {
             // Pending owns this blob (freed with `pending_settings`); borrow for composition.
             if (settings_owned) |s| {
@@ -2612,8 +3362,13 @@ fn writeMergedSettings(editor: *Editor, settings_path: []const u8) !void {
         }
 
         // Every reserved field back at its default *and* no author settings means the block
-        // would compose to a bare `.{}` — drop the id from the file instead (R12).
-        if (!reserved.enabled and reserved.auto_update and settings_text == null) {
+        // would compose to a bare `.{}` — drop the id from the file instead (R12). An explicit
+        // `.enabled = false` is *not* a default: it is the user's recorded decision to keep this
+        // plugin off, and dropping it would demote the plugin back to "never asked".
+        // A non-empty `extensions` is a real, user-made decision — it keeps the id in the file
+        // even when everything else sits at its default (e.g. an extension assigned to a plugin
+        // that is currently disabled).
+        if (reserved.enabled == null and reserved.auto_update and reserved.extensions.len == 0 and settings_text == null) {
             try overlay.append(gpa, .{ .id = id, .text = null });
         } else {
             const block = try SettingsPluginsZon.composePluginIdBlock(gpa, reserved, settings_text);
@@ -2899,6 +3654,8 @@ pub fn reconcileDiscoveredPlugins(editor: *Editor) void {
     const data = fizzy.fs.readZ(gpa, dvui.io, settings_path) catch null;
     defer if (data) |d| gpa.free(d);
 
+    editor.pruneMissingUndecidedPlugins(plugins_dir);
+
     var dir = std.Io.Dir.cwd().openDir(dvui.io, plugins_dir, .{ .iterate = true }) catch return;
     defer dir.close(dvui.io);
     var iter = dir.iterate();
@@ -2919,10 +3676,18 @@ pub fn reconcileDiscoveredPlugins(editor: *Editor) void {
 
         // Only track as disabled when there's no `.enabled = true` on record — a store install
         // that raced the watcher will have written enabled=true and (usually) already loaded.
-        if (readPluginEnabled(gpa, data, id)) continue;
+        const state = readPluginEnabledState(gpa, data, id);
+        if (state == .enabled) continue;
 
         editor.trackDisabledPlugin(id) catch continue;
-        dvui.log.info("settings watcher: discovered dropped-in plugin '{s}' (disabled until enabled in UI)", .{id});
+        // No `.enabled` field at all: nobody has decided about this build yet, so it becomes a
+        // "Load" offer in the store's installed pane instead of a switched-off row.
+        if (state == .unset) editor.trackUndecidedPlugin(id) catch {};
+        // The store caches what it found on disk (ids, probed names/versions) and only rescans
+        // when told to; without this the new card shows up as a bare id, or not at all until the
+        // user hits Refresh.
+        PluginStore.markDiskScanDirty();
+        dvui.log.info("settings watcher: discovered dropped-in plugin '{s}' (not loaded until the user says so)", .{id});
     }
 }
 
@@ -3467,6 +4232,11 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             editor.markWindowRatiosDirty();
         }
 
+        // `revealCenter`'s panel auto-hide is a collapsed-layout affordance only: once the window
+        // is wide enough to show both panes at once, give the bottom panel back at whatever ratio
+        // the user left it at.
+        if (!editor.explorer.paned.collapsed()) editor.panel_hidden_for_center = false;
+
         switch (sidebar_action) {
             .open => editor.explorer.open(),
             .close => editor.explorer.peekClose(),
@@ -3544,7 +4314,7 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
                 defer editor.panel.paned.deinit();
 
                 if (!editor.panel.paned.dragging) {
-                    const show_panel = editor.activeDoc() != null or editor.host.hasPersistentBottomView();
+                    const show_panel = (editor.activeDoc() != null or editor.host.hasPersistentBottomView()) and !editor.panel_hidden_for_center;
                     if (show_panel) {
                         if ((editor.panel.paned.split_ratio.* == 1.0 and !editor.panel.paned.collapsed()) and fizzy.editor.panel_ratio > 0.0) {
                             editor.panel.paned.animateSplit(1.0 - fizzy.editor.panel_ratio, dvui.easing.outQuint);
@@ -3555,6 +4325,9 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
                         }
                     }
                 } else {
+                    // Dragging the handle back up is the user overriding the collapsed-layout
+                    // auto-hide, so drop it rather than fighting them for the next frame.
+                    editor.panel_hidden_for_center = false;
                     fizzy.editor.panel_ratio = 1.0 - editor.panel.paned.split_ratio.*;
                     fizzy.editor.markWindowRatiosDirty();
                 }

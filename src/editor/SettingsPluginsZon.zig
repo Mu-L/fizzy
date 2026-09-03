@@ -313,25 +313,83 @@ pub fn upsertOne(gpa: Allocator, existing_full_source: ?[:0]const u8, entry: Ent
 pub const Reserved = struct {
     /// Load this plugin at startup. Absent means false: a dylib dropped into `plugins/` stays
     /// dormant until the user (or a store install) turns it on.
-    enabled: bool = false,
+    ///
+    /// **Tri-state, and the field's *presence* is load-bearing.** `null` (absent from disk) means
+    /// nobody has decided yet — a build that appeared in `plugins/` on its own; `false` (written
+    /// out explicitly, unlike every other default in this file) means the user deliberately
+    /// switched it off. Both are "do not load", but only the first is an open offer, and fizzy
+    /// distinguishes them everywhere it matters: the rail badge, the store's Load button, and
+    /// whether loading raises the file-type ownership prompt. Uninstall erases the field, which
+    /// is what makes a later reinstall ask again — see `Editor.clearPluginOwnershipRecord`.
+    enabled: ?bool = null,
     /// Whether this plugin takes store updates at all. Absent means **true** — the inverse of
     /// `enabled`'s default, so only a deliberate opt-out is ever written. *How* an update is
     /// applied (silently, or through the update window) is one app-wide choice, not a per-plugin
     /// one — see `Settings.plugin_update_mode`.
     auto_update: bool = true,
+    /// Extensions (each with its dot) this plugin is the user's chosen default owner for.
+    /// Written as a plain ZON tuple (`.extensions = .{ ".png", ".jpg" }`) — `&.{...}` is Zig
+    /// syntax that `std.zig.Zoir` will not parse, so `extractField` could never read it back.
+    /// Absent means "no explicit choice for anything" — routing then falls through to the
+    /// unique claimant, else the fallback editor (see `Host.pluginForExtension`).
+    ///
+    /// The plugin's identity is expressed *structurally*, by which `.plugins.<id>` block the
+    /// list sits in — a plugin id is never written as a value here. Only an explicit user
+    /// decision (the install-time dialog, or the File Types settings table) ever writes this;
+    /// no load or reconcile path does.
+    ///
+    /// May legitimately name an extension the plugin does not offer via `fileTypes` — that is
+    /// exactly what "keep Plain Text for `.foo`" records on the fallback editor's own block.
+    extensions: []const []const u8 = &.{},
 };
 
+/// Parses a `.extensions` value blob (`.{ ".png", ".jpg" }`) into owned
+/// strings. Tolerant by design: this reads a file the user is invited to hand-edit, so anything
+/// that does not parse as a list of strings yields an empty slice rather than an error. Free
+/// with `freeExtensions`.
+pub fn parseExtensions(gpa: Allocator, text: []const u8) ![]const []const u8 {
+    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (out.items) |e| gpa.free(e);
+        out.deinit(gpa);
+    }
+    var rest = text;
+    while (std.mem.indexOfScalar(u8, rest, '"')) |open_q| {
+        rest = rest[open_q + 1 ..];
+        const close_q = std.mem.indexOfScalar(u8, rest, '"') orelse break;
+        const ext = rest[0..close_q];
+        rest = rest[close_q + 1 ..];
+        if (ext.len == 0) continue;
+        try out.append(gpa, try gpa.dupe(u8, ext));
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+pub fn freeExtensions(gpa: Allocator, exts: []const []const u8) void {
+    for (exts) |e| gpa.free(e);
+    gpa.free(exts);
+}
+
 /// Composes one plugin id's on-disk block: `.{ .enabled = true, .settings = <text> }` with each
-/// half omitted when not applicable (`.enabled` only when `true`, `.auto_update` only when
-/// `false`; `.settings` only when present).
+/// half omitted when not applicable (`.enabled` only when a decision exists — see its tri-state
+/// note, so `false` *is* written; `.auto_update` only when `false`, `.extensions` only when
+/// non-empty; `.settings` only when present).
 /// Multi-line `settings_text` (as produced by `Schema(T).diffSerialize`) is re-indented under
 /// `.settings =` so the result is standard Zig-style 4-space nesting. Caller-owned.
 pub fn composePluginIdBlock(gpa: Allocator, reserved: Reserved, settings_text: ?[]const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     errdefer aw.deinit();
     try aw.writer.writeAll(".{\n");
-    if (reserved.enabled) try aw.writer.writeAll("    .enabled = true,\n");
+    if (reserved.enabled) |e| try aw.writer.print("    .enabled = {},\n", .{e});
     if (!reserved.auto_update) try aw.writer.writeAll("    .auto_update = false,\n");
+    if (reserved.extensions.len > 0) {
+        try aw.writer.writeAll("    .extensions = .{");
+        for (reserved.extensions, 0..) |ext, i| {
+            if (i > 0) try aw.writer.writeAll(",");
+            try aw.writer.print(" \"{f}\"", .{std.zig.fmtString(ext)});
+        }
+        try aw.writer.writeAll(" },\n");
+    }
     if (settings_text) |s| {
         try aw.writer.writeAll("    .settings = ");
         try writeNested(&aw.writer, s, 4);
@@ -519,6 +577,110 @@ test "composePluginIdBlock omits enabled when false and settings when absent" {
     const settings_only = try composePluginIdBlock(testing.allocator, .{}, ".{ .tab_size = 8 }");
     defer testing.allocator.free(settings_only);
     try testing.expectEqualStrings(".{\n    .settings = .{ .tab_size = 8 },\n}", settings_only);
+}
+
+test "composePluginIdBlock omits extensions when empty and writes them when set" {
+    const none = try composePluginIdBlock(testing.allocator, .{ .enabled = true }, null);
+    defer testing.allocator.free(none);
+    try testing.expectEqualStrings(".{\n    .enabled = true,\n}", none);
+
+    const one = try composePluginIdBlock(testing.allocator, .{ .enabled = true, .extensions = &.{".txt"} }, null);
+    defer testing.allocator.free(one);
+    try testing.expectEqualStrings(".{\n    .enabled = true,\n    .extensions = .{ \".txt\" },\n}", one);
+
+    const many = try composePluginIdBlock(testing.allocator, .{ .extensions = &.{ ".png", ".jpg" } }, null);
+    defer testing.allocator.free(many);
+    try testing.expectEqualStrings(".{\n    .extensions = .{ \".png\", \".jpg\" },\n}", many);
+}
+
+test "composed extensions survive extractField + parseExtensions" {
+    const block = try composePluginIdBlock(
+        testing.allocator,
+        .{ .enabled = true, .auto_update = false, .extensions = &.{ ".png", ".jpeg" } },
+        ".{ .zoom = 2 }",
+    );
+    defer testing.allocator.free(block);
+
+    const block_z = try testing.allocator.dupeZ(u8, block);
+    defer testing.allocator.free(block_z);
+
+    const exts_text = extractField(testing.allocator, block_z, "extensions").?;
+    defer testing.allocator.free(exts_text);
+    const exts = try parseExtensions(testing.allocator, exts_text);
+    defer freeExtensions(testing.allocator, exts);
+
+    try testing.expectEqual(@as(usize, 2), exts.len);
+    try testing.expectEqualStrings(".png", exts[0]);
+    try testing.expectEqualStrings(".jpeg", exts[1]);
+
+    // The other reserved fields and the author's settings still round-trip alongside it.
+    const settings = extractField(testing.allocator, block_z, "settings").?;
+    defer testing.allocator.free(settings);
+    try testing.expectEqualStrings(".{ .zoom = 2 }", settings);
+}
+
+test "parseExtensions tolerates a hand-edited or malformed list" {
+    const empty = try parseExtensions(testing.allocator, ".{}");
+    defer freeExtensions(testing.allocator, empty);
+    try testing.expectEqual(@as(usize, 0), empty.len);
+
+    // Unterminated string / trailing garbage must not error — this file is user-editable.
+    const ragged = try parseExtensions(testing.allocator, ".{ \".md\", \".mdx");
+    defer freeExtensions(testing.allocator, ragged);
+    try testing.expectEqual(@as(usize, 1), ragged.len);
+    try testing.expectEqualStrings(".md", ragged[0]);
+
+    const not_a_list = try parseExtensions(testing.allocator, "true");
+    defer freeExtensions(testing.allocator, not_a_list);
+    try testing.expectEqual(@as(usize, 0), not_a_list.len);
+}
+
+test "every Reserved field is discoverable by extractField" {
+    // `SettingsMigration.isAlreadyNested` decides whether a `.plugins.<id>` block is R12-shaped
+    // or a pre-R12 flat one by probing for each reserved field by name — and a block judged flat
+    // has its whole contents wrapped into `.settings` and stamped `.enabled = true`. So a
+    // reserved field that composes to something `extractField` cannot find back is silently
+    // destructive: it would be reinterpreted as a plugin-author setting. This asserts the two
+    // sides stay in step for every field, including ones added later.
+    inline for (@typeInfo(Reserved).@"struct".fields) |field| {
+        // Compose a block in which this field is guaranteed non-default, so it is actually
+        // emitted (fields are written only when they differ from their default).
+        var reserved: Reserved = .{};
+        switch (field.type) {
+            bool => @field(reserved, field.name) = !@field(reserved, field.name),
+            // Tri-state: absent is the default, so either concrete value is "non-default" and
+            // must be emitted. `false` is the interesting one — it used to be omitted.
+            ?bool => @field(reserved, field.name) = false,
+            []const []const u8 => @field(reserved, field.name) = &.{".probe"},
+            else => @compileError("extend this test for Reserved field type " ++ @typeName(field.type)),
+        }
+        const block = try composePluginIdBlock(testing.allocator, reserved, null);
+        defer testing.allocator.free(block);
+        const block_z = try testing.allocator.dupeZ(u8, block);
+        defer testing.allocator.free(block_z);
+
+        const found = extractField(testing.allocator, block_z, field.name);
+        try testing.expect(found != null);
+        testing.allocator.free(found.?);
+    }
+}
+
+test "composePluginIdBlock records enabled as a tri-state" {
+    // Absent means "never decided" (a build dropped into plugins/ that nobody has answered for);
+    // an explicit `false` is the user's decision to keep it off. Collapsing the two — which the
+    // non-default-only rule would otherwise do — silently demotes a disabled plugin back to an
+    // unanswered offer on the next launch.
+    const unset = try composePluginIdBlock(testing.allocator, .{}, ".{ .a = 1 }");
+    defer testing.allocator.free(unset);
+    try testing.expect(std.mem.indexOf(u8, unset, ".enabled") == null);
+
+    const off = try composePluginIdBlock(testing.allocator, .{ .enabled = false }, null);
+    defer testing.allocator.free(off);
+    try testing.expectEqualStrings(".{\n    .enabled = false,\n}", off);
+
+    const on = try composePluginIdBlock(testing.allocator, .{ .enabled = true }, null);
+    defer testing.allocator.free(on);
+    try testing.expectEqualStrings(".{\n    .enabled = true,\n}", on);
 }
 
 test "composePluginIdBlock writes auto_update only when opted out" {

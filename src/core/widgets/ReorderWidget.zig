@@ -375,7 +375,7 @@ pub const Reorderable = struct {
 
                     if (self.init_options.draw_target) {
                         rs.r.fill(
-                            self.data().options.cornersGet().scale(rs.s, dvui.CornerRect.Physical),
+                            self.data().options.cornersGet().finalize(self.data().options.theme).scale(rs.s, dvui.CornerRect.Physical),
                             .{ .color = dvui.themeGet().focus, .fade = 1.0 },
                         );
                     }

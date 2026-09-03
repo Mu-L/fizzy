@@ -11,6 +11,7 @@ pub const FileChangedOnDisk = @import("FileChangedOnDisk.zig");
 pub const AppQuitUnsaved = @import("AppQuitUnsaved.zig");
 pub const AboutFizzy = @import("AboutFizzy.zig");
 pub const PluginUpdates = @import("PluginUpdates.zig");
+pub const FileTypeDefaults = @import("FileTypeDefaults.zig");
 pub const WebFolderUnavailable = if (builtin.target.cpu.arch == .wasm32)
     @import("WebFolderUnavailable.zig")
 else

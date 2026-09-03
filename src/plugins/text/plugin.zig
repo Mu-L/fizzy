@@ -34,7 +34,6 @@ var plugin: sdk.Plugin = .{
 
 const vtable: sdk.Plugin.VTable = .{
     .deinit = deinit,
-    .fileTypePriority = fileTypePriority,
     // document staging buffer (fizzy allocates, plugin fills, then registers)
     .documentStackSize = documentStackSize,
     .documentStackAlign = documentStackAlign,
@@ -95,6 +94,11 @@ pub fn register(host: *sdk.Host) !void {
     // `&st.settings`, so fizzy's pane edits land straight on the live struct — no
     // `settingsChanged` sync hook needed.
     try st.registerSettings(host, &plugin);
+    // The fallback editor: opens anything no other plugin owns — including extensionless
+    // paths and renamed `.txt` → `.foo`. Deliberately does *not* implement `fileTypes`; its
+    // claim set is unbounded, so it can never appear as a specialized claimant in the File
+    // Types table, only as the implicit "Text (fallback)" option.
+    host.registerFallbackEditor(&plugin);
     try host.registerFileIcon(.{ .owner = &plugin, .draw = drawFileIcon });
     try host.registerCommand(.{
         .id = sdk.Plugin.commandId("text", "copy"),
@@ -157,16 +161,6 @@ fn deinit(state: *anyopaque) void {
     const gpa = sdk.allocator();
     st.deinit(gpa);
     gpa.destroy(st);
-}
-
-// ---- file type ownership -----------------------------------------------------
-
-/// Fallback text editor: opens any file when no other plugin claims the extension.
-/// Pixel-art wins for `.fiz`/`.pixi` (0) and flat images (10); everything else
-/// opens here — including extensionless paths and renamed `.txt` → `.foo`.
-fn fileTypePriority(_: *anyopaque, ext: []const u8) ?u8 {
-    _ = ext;
-    return sdk.Plugin.file_type_fallback_priority;
 }
 
 /// Source/text extensions this editor draws a code glyph for in the file tree. Anything else

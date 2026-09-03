@@ -1548,24 +1548,24 @@ pub fn drawEdgeShadow(container: dvui.RectScale, shadow: Shadow, opts: ShadowOpt
         .top => {
             rs.r.h = opts.thickness;
             rs.r = rs.r.plus(.cast(opts.offset));
-            drawGradientRect(rs.r, dvui.CornerRect.Physical.all(opts.radius), opts, .{ .axis = .y, .opaque_at_zero = true });
+            drawGradientRect(rs.r, dvui.CornerRect.Physical.round(opts.radius), opts, .{ .axis = .y, .opaque_at_zero = true });
         },
         .bottom => {
             rs.r.y += rs.r.h - opts.thickness;
             rs.r.h = opts.thickness;
             rs.r = rs.r.plus(.cast(opts.offset));
-            drawGradientRect(rs.r, dvui.CornerRect.Physical.all(opts.radius), opts, .{ .axis = .y, .opaque_at_zero = false });
+            drawGradientRect(rs.r, dvui.CornerRect.Physical.round(opts.radius), opts, .{ .axis = .y, .opaque_at_zero = false });
         },
         .right => {
             rs.r.x += rs.r.w - opts.thickness;
             rs.r.w = opts.thickness;
             rs.r = rs.r.plus(.cast(opts.offset));
-            drawGradientRect(rs.r, dvui.CornerRect.Physical.all(opts.radius), opts, .{ .axis = .x, .opaque_at_zero = false });
+            drawGradientRect(rs.r, dvui.CornerRect.Physical.round(opts.radius), opts, .{ .axis = .x, .opaque_at_zero = false });
         },
         .left => {
             rs.r.w = opts.thickness;
             rs.r = rs.r.plus(.cast(opts.offset));
-            drawGradientRect(rs.r, dvui.CornerRect.Physical.all(opts.radius), opts, .{ .axis = .x, .opaque_at_zero = true });
+            drawGradientRect(rs.r, dvui.CornerRect.Physical.round(opts.radius), opts, .{ .axis = .x, .opaque_at_zero = true });
         },
     }
 }

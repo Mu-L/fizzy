@@ -178,16 +178,31 @@ pub fn migrateToPerPluginEnabled(allocator: std.mem.Allocator, settings_zon_path
     dvui.log.info("settings: migrated plugin blocks to per-plugin .enabled/.settings (R12)", .{});
 }
 
+/// Whether `text` is already an R12-shaped block rather than a pre-R12 flat one.
+///
+/// A block counts as modern the moment it carries **any** fizzy-reserved field, or a nested
+/// `.settings`. Getting this wrong is destructive in a way that is easy to miss: a block judged
+/// "flat" has its entire contents wrapped into `.settings` and stamped `.enabled = true`, which
+/// would silently reinterpret fizzy-reserved data as plugin-author settings — an `.extensions`
+/// assignment would stop routing files and reappear as an unknown author field.
+///
+/// The reserved names come from `SettingsPluginsZon.Reserved` itself rather than a hand-kept
+/// list, so adding a field there can never leave this check behind. (It already had: only
+/// `enabled` was listed, so an `.auto_update = false`-only block — which the app itself can
+/// write for a disabled plugin — was being swallowed too.)
 fn isAlreadyNested(gpa: std.mem.Allocator, text: []const u8) bool {
     const z = gpa.dupeZ(u8, text) catch return false;
     defer gpa.free(z);
+
     if (SettingsPluginsZon.extractField(gpa, z, "settings")) |s| {
         gpa.free(s);
         return true;
     }
-    if (SettingsPluginsZon.extractField(gpa, z, "enabled")) |s| {
-        gpa.free(s);
-        return true;
+    inline for (@typeInfo(SettingsPluginsZon.Reserved).@"struct".fields) |field| {
+        if (SettingsPluginsZon.extractField(gpa, z, field.name)) |s| {
+            gpa.free(s);
+            return true;
+        }
     }
     return false;
 }

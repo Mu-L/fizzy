@@ -47,7 +47,7 @@ pub fn showOpenFileDialog(
     open_grouping = fizzy.editor.currentGroupingID();
     open_picker_id = dvui.Id.extendId(null, @src(), 0);
     // No accept filter — text is the fallback owner for any extension, and other plugins
-    // claim their own types via `fileTypePriority`.
+    // offer their own types via `fileTypes`.
     dvui.dialogWasmFileOpenMultiple(open_picker_id.?, .{});
 }
 

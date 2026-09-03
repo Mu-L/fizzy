@@ -582,7 +582,7 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
 
                 if (right_side.contains(e.evt.mouse.p) and runtime.workbench().workspaces.keys()[runtime.workbench().workspaces.keys().len - 1] == self.grouping) {
                     if (e.evt == .mouse and e.evt.mouse.action == .position) {
-                        right_side.fill(dvui.CornerRect.Physical.all(right_side.w / 8), .{
+                        right_side.fill(dvui.CornerRect.Physical.round(right_side.w / 8), .{
                             .color = dvui.themeGet().color(.highlight, .fill).opacity(0.5),
                         });
                     }
@@ -602,7 +602,7 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
                     }
                 } else if (data.rectScale().r.contains(e.evt.mouse.p)) {
                     if (e.evt == .mouse and e.evt.mouse.action == .position) {
-                        data.rectScale().r.fill(dvui.CornerRect.Physical.all(data.rectScale().r.w / 8), .{
+                        data.rectScale().r.fill(dvui.CornerRect.Physical.round(data.rectScale().r.w / 8), .{
                             .color = dvui.themeGet().color(.highlight, .fill).opacity(0.5),
                         });
                     }
@@ -629,7 +629,7 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
 
                 if (right_side.contains(e.evt.mouse.p) and runtime.workbench().workspaces.keys()[runtime.workbench().workspaces.keys().len - 1] == self.grouping) {
                     if (e.evt == .mouse and e.evt.mouse.action == .position) {
-                        right_side.fill(dvui.CornerRect.Physical.all(right_side.w / 8), .{
+                        right_side.fill(dvui.CornerRect.Physical.round(right_side.w / 8), .{
                             .color = dvui.themeGet().color(.highlight, .fill).opacity(0.5),
                         });
                     }
@@ -648,7 +648,7 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
                     }
                 } else if (data.rectScale().r.contains(e.evt.mouse.p)) {
                     if (e.evt == .mouse and e.evt.mouse.action == .position) {
-                        data.rectScale().r.fill(dvui.CornerRect.Physical.all(data.rectScale().r.w / 8), .{
+                        data.rectScale().r.fill(dvui.CornerRect.Physical.round(data.rectScale().r.w / 8), .{
                             .color = dvui.themeGet().color(.highlight, .fill).opacity(0.5),
                         });
                     }
@@ -674,7 +674,7 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
 
                 if (right_side.contains(e.evt.mouse.p) and runtime.workbench().workspaces.keys()[runtime.workbench().workspaces.keys().len - 1] == self.grouping) {
                     if (e.evt == .mouse and e.evt.mouse.action == .position) {
-                        right_side.fill(dvui.CornerRect.Physical.all(right_side.w / 8), .{
+                        right_side.fill(dvui.CornerRect.Physical.round(right_side.w / 8), .{
                             .color = dvui.themeGet().color(.highlight, .fill).opacity(0.5),
                         });
                     }
@@ -703,7 +703,7 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
                     }
                 } else if (data.rectScale().r.contains(e.evt.mouse.p)) {
                     if (e.evt == .mouse and e.evt.mouse.action == .position) {
-                        data.rectScale().r.fill(dvui.CornerRect.Physical.all(data.rectScale().r.w / 8), .{
+                        data.rectScale().r.fill(dvui.CornerRect.Physical.round(data.rectScale().r.w / 8), .{
                             .color = dvui.themeGet().color(.highlight, .fill).opacity(0.5),
                         });
                     }
@@ -1051,7 +1051,7 @@ pub fn drawBubble(rect: dvui.Rect, rs: dvui.RectScale, color: [4]u8, _: usize) !
     var path = dvui.Path.Builder.init(dvui.currentWindow().lifo());
     defer path.deinit();
 
-    path.addRect(base_phys, dvui.CornerRect.Physical.all(0));
+    path.addRect(base_phys, dvui.CornerRect.Physical.square);
 
     if (bubble_phys.h > 0) {
         const rad_x = rs.r.w / 2.0;

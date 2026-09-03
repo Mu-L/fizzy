@@ -15,11 +15,6 @@ const infobar = @import("infobar.zig");
 
 pub const Plugin = @This();
 
-/// Priority for a plugin that opens any file as plain text when no specialized plugin
-/// claims the extension. Must be higher (numerically larger) than every specialized
-/// claim so `Host.pluginForExtension` only picks it as a fallback.
-pub const file_type_fallback_priority: u8 = 100;
-
 /// One filesystem change under the open root folder, delivered via
 /// `VTable.folderPathsChanged`.
 pub const PathEvent = struct {
@@ -65,7 +60,7 @@ pub const SaveConfirmMode = enum { editor_save, save_and_close };
 
 // Every field below is an optional fn pointer, so the type system requires *nothing*. But to
 // function as an **editor** (open / draw / save files) a plugin must implement the document
-// cluster — `fileTypePriority`, the load+staging hooks (`documentStackSize`/`documentStackAlign`/
+// cluster — the load+staging hooks (`documentStackSize`/`documentStackAlign`/
 // `loadDocument`/`documentIdFromBuffer`/`registerOpenDocument`/`deinitDocumentBuffer`),
 // `drawDocument`, `saveDocument`, `isDirty`, and `documentPtr`. Everything else is genuinely
 // optional. Each hook's doc comment tags how fizzy invokes it:
@@ -80,12 +75,18 @@ pub const VTable = struct {
     /// One-time plugin setup (e.g. background worker threads).
     initPlugin: ?*const fn (state: *anyopaque) anyerror!void = null,
 
-    /// Priority for opening files with extension `ext` (including the dot, e.g.
-    /// ".fiz", or `""` when the basename has no extension); lower value wins.
-    /// `null` = this plugin does not handle `ext`. A plugin may claim many extensions.
-    /// A text editor may return `file_type_fallback_priority` for every `ext` so it
-    /// opens anything no other plugin claims.
-    fileTypePriority: ?*const fn (state: *anyopaque, ext: []const u8) ?u8 = null,
+    /// The static, enumerable set of file extensions (each including the dot, e.g. ".fiz")
+    /// this plugin can own. Absent or empty = the plugin offers nothing to file-type routing
+    /// (`workbench`, `markdown`, language-support-only plugins).
+    ///
+    /// This is an *offer*, not a claim: which loaded plugin actually opens a given extension
+    /// is the user's persisted choice, resolved by `Host.pluginForExtension`. There is no
+    /// numeric priority — a plugin cannot outrank another by declaring a smaller number.
+    /// The returned slice must stay valid for the plugin's lifetime (a static array).
+    ///
+    /// A plugin that opens *anything* no one else claims does not enumerate extensions here;
+    /// it calls `Host.registerFallbackEditor` once from its `register` instead.
+    fileTypes: ?*const fn (state: *anyopaque) []const []const u8 = null,
 
     // ---- document lifecycle (operates on the plugin's own type via DocHandle) ----
     /// Load the document at `path`, constructing the plugin's own document value in
@@ -325,8 +326,8 @@ pub fn assertUtilityVTable(comptime vt: VTable) void {
 
 // Thin wrappers so callers don't repeat the optional-vtable dance.
 
-pub fn fileTypePriority(self: Plugin, ext: []const u8) ?u8 {
-    return if (self.vtable.fileTypePriority) |f| f(self.state, ext) else null;
+pub fn fileTypes(self: Plugin) []const []const u8 {
+    return if (self.vtable.fileTypes) |f| f(self.state) else &.{};
 }
 
 pub fn contributeKeybinds(self: Plugin, win: *dvui.Window) !void {

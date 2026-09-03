@@ -211,10 +211,24 @@ pub const VTable = struct {
     /// this vtable, always executes as fizzy's own compiled code regardless of which dylib
     /// holds the call site, so it always sees fizzy's real, initialized `dvui.io`.
     loadPluginSettingsFile: *const fn (ctx: *anyopaque, id: []const u8) ?[]u8,
+
+    /// The plugin id the user has assigned as the default owner of `ext` (with dot), or null
+    /// when they have made no explicit choice for it. Backed by fizzy's in-memory cache of the
+    /// per-plugin `.extensions` lists in `settings.zon`, so it never touches disk.
+    ///
+    /// The returned slice is owned by fizzy and valid only until the cache is next rebuilt
+    /// (a plugin install / update / unload, or a File Types settings edit) — copy it if you
+    /// need to keep it. `Host.pluginForExtension` consumes it immediately, which is the only
+    /// intended use.
+    extensionOwnerOverride: *const fn (ctx: *anyopaque, ext: []const u8) ?[]const u8,
 };
 
 pub fn arena(self: EditorAPI) std.mem.Allocator {
     return self.vtable.arena(self.ctx);
+}
+
+pub fn extensionOwnerOverride(self: EditorAPI, ext: []const u8) ?[]const u8 {
+    return self.vtable.extensionOwnerOverride(self.ctx, ext);
 }
 
 pub fn folder(self: EditorAPI) ?[]const u8 {

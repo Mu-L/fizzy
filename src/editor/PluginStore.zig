@@ -174,6 +174,14 @@ var disk_ids: std.ArrayListUnmanaged([]u8) = .empty;
 /// directory on every frame the tab is open.
 var disk_scan_dirty = true;
 
+/// Ask `draw` to re-list the plugins directory (and re-probe names/versions) on its next pass.
+/// Exposed for `Editor.reconcileDiscoveredPlugins`: the watcher discovering a dropped-in build is
+/// exactly a "the plugins dir changed" event, and without this its card would draw from the stale
+/// scan — bare id, or missing entirely until the user hit Refresh.
+pub fn markDiskScanDirty() void {
+    disk_scan_dirty = true;
+}
+
 fn freeDiskIds() void {
     for (disk_ids.items) |id| fizzy.app.allocator.free(id);
     disk_ids.clearRetainingCapacity();
@@ -1275,6 +1283,11 @@ fn toggleSelect(entry: StoreEntry) void {
     selected_detail_tab = .details;
     const src = readmeSource(entry) orelse RepoSource{ .repo = "" };
     Readme.select(entry.id, src.repo, src.subpath);
+
+    // On a collapsed (phone / narrow web) layout the detail page we just selected renders in the
+    // center, hidden behind the peeked-open explorer — so get out of its way: close the peek and
+    // swing the bottom panel shut. No-op on a desktop-width window (see `Editor.revealCenter`).
+    fizzy.editor.revealCenter();
 }
 
 /// Reconstruct the `StoreEntry` for whichever plugin is currently selected in the detail center
@@ -2609,7 +2622,7 @@ fn infoLine(buf: []u8, entry: StoreEntry) []const u8 {
     else
         null;
 
-    var parts: [3][]const u8 = undefined;
+    var parts: [4][]const u8 = undefined;
     var n: usize = 0;
     parts[n] = entry.id;
     n += 1;
@@ -2619,6 +2632,15 @@ fn infoLine(buf: []u8, entry: StoreEntry) []const u8 {
     }
     if (installed) |i| {
         parts[n] = i;
+        n += 1;
+    }
+    // A build that is present but has never been run reads as installed-and-working otherwise;
+    // say so, so the Load button beside it has a reason. Only for the never-decided case — a
+    // plugin the user switched off deliberately doesn't need telling.
+    if (!isBundled(entry.id) and fizzy.editor.host.pluginById(entry.id) == null and
+        fizzy.editor.isPluginUndecided(entry.id))
+    {
+        parts[n] = "not loaded";
         n += 1;
     }
     return joinParts(buf, parts[0..n]);
@@ -2822,6 +2844,13 @@ fn drawCardControls(entry: StoreEntry) void {
     // like any installed plugin, so it must stay actionable (reinstall / uninstall) rather than
     // dead-ending at a bare "Failed" label — or, worse, at no card at all.
     const broken = failed or untracked;
+    // On disk, never run, and nobody has decided about it: a local `zig build install` or a
+    // hand-dropped build. `untracked` is the same situation a frame or two earlier, before the
+    // watcher (or Refresh) classified it. This is an *offer*, not a fault, so it gets one primary
+    // "Load" button instead of the broken-build repair controls — and loading it goes through the
+    // same first-load path a store install does, file-association prompt included
+    // (`Editor.setPluginEnabled`).
+    const undecided = !loaded and !failed and (editor.isPluginUndecided(entry.id) or untracked);
 
     // Present on disk in some form: loaded, disabled-on-disk, sideloaded local, or a broken build.
     if (loaded or disabled or entry.kind == .local or entry.kind == .disabled or broken) {
@@ -2843,6 +2872,9 @@ fn drawCardControls(entry: StoreEntry) void {
                 if (dvui.button(@src(), "Update", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
                     startDownload(entry.id, rel, .{ .is_update = true });
             }
+        } else if (undecided) {
+            if (dvui.button(@src(), "Load", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
+                queueSetEnabled(entry.id, true);
         } else if (broken) {
             // A locally built plugin that lost its load has no registry release to reinstall
             // *from*, so Retry is the whole fix once the author rebuilds it in place: it re-runs
@@ -2988,6 +3020,11 @@ fn drawHeader() !void {
         .{ .gravity_x = 1.0, .corners = .all(1000000) },
     )) {
         if (catalog) |*c| c.refresh();
+        // Classify anything that appeared in the plugins dir since the last pass — same call the
+        // file watcher makes, so Refresh is a manual stand-in for it on a platform (or a mount)
+        // where the watcher never fired. It deliberately only *offers* a discovered build (it
+        // becomes an undecided "Load" card); Refresh never loads or executes a plugin.
+        if (comptime builtin.target.cpu.arch != .wasm32) fizzy.editor.reconcileDiscoveredPlugins();
         refreshLocalInfo();
     }
 }

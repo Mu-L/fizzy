@@ -411,7 +411,7 @@ id inside Fizzy's own `{config}/settings.zon`:
 ```
 .plugins = .{
     .text = .{ .enabled = true, .settings = .{ .tab_size = 8 } },
-    .pixi = .{ .settings = .{ .grid_size = 16 } }, // disabled (`.enabled` omitted = false)
+    .pixi = .{ .extensions = .{ ".pixi", ".png" }, .settings = .{ .grid_size = 16 } }, // disabled (`.enabled` omitted = false)
 }
 ```
 
@@ -428,7 +428,7 @@ scalars/enums. Don't free a string field yourself, and don't assign one directly
 persisted — go through the settings pane or `applyZon`, or you'll leak the schema's copy.
 
 Author fields live under `.settings` so they can never collide with the Fizzy-reserved
-`.enabled`. Only fields whose payload differs from the cell's declared default is written; an all-default
+`.enabled` / `.auto_update` / `.extensions`. Only fields whose payload differs from the cell's declared default is written; an all-default
 value removes that plugin's `.settings` (and if also disabled, the whole `.plugins.<id>` entry).
 `src/editor/SettingsPluginsZon.zig` locates/composes fields by source byte-span via the same
 `std.zig.Ast`/`ZonGen` machinery `std.zon.parse` uses, so nothing else in the file is
@@ -439,8 +439,37 @@ once, over the whole composed file.
 
 **Enabled state is per-plugin.** `.plugins.<id>.enabled` defaults to `false` (absent = disabled).
 Store installs write `.enabled = true` immediately (auto-load as before); a dylib dropped
-straight into `plugins/` shows up as a disabled entry with no settings.zon write until the user
-enables it from the UI.
+straight into `plugins/` is never auto-executed and triggers no settings.zon write until the user
+says so.
+
+`.enabled` is a **tri-state**, and its presence is load-bearing: absent means nobody has decided
+yet, `false` (written out explicitly, unlike every other default in this file) means the user
+switched the plugin off, `true` means it loads. Absence is its own state, distinct from an
+explicit `.enabled = false`: such a build is **undecided** — nobody has been asked yet. Fizzy discovers one either from the watcher
+(while running) or at startup, and then offers it rather than filing it as switched-off: the
+Plugins rail icon carries a count badge, and the installed card gets a **Load** button. Loading it
+is treated as a first install, so it also raises the file-type ownership prompt (§3.11) when the
+extensions it offers overlap something else. A plugin the user deliberately disabled has an
+explicit `.enabled = false`, is a settled decision, and stays quiet. A plugin the user
+deliberately disabled has an explicit `.enabled = false`, is a settled decision, and stays quiet.
+
+**Which events re-ask about file types.** The presence of `.enabled` is fizzy's record that it has
+asked about this plugin at all, and the rule is one sentence: *fizzy asks when a plugin arrives,
+and uninstall is what lets it arrive again.*
+
+| Event | Prompts? | Why |
+| --- | --- | --- |
+| Store install | yes | the plugin is arriving |
+| First load of a dropped-in build | yes | same arrival, just discovered rather than downloaded |
+| Enable / disable | no | a decision about loading, not about file types |
+| Update (store, or a local rebuild picked up by the watcher) | no | same plugin, already answered — see the note below |
+| Startup load | no | nothing has changed since the last answer |
+| Uninstall → reinstall | yes | uninstall erases `.enabled` and `.extensions`, so the plugin genuinely arrives again |
+
+Uninstall keeps the plugin's own `.settings` (its config, so reinstalling restores it) and drops
+only fizzy's decision record. One deliberate gap: an *update* that starts offering an extension the
+plugin never offered before does not prompt — it resolves through the normal order (unique
+claimant, else the fallback editor), and Settings > File Types is where to override it.
 
 **`settings.zon` is watched live.** A background watcher ([nightwatch](https://github.com/neurocyte/nightwatch),
 recursive over `<config>/`) picks up external changes — a hand edit, another tool, a newly
@@ -466,7 +495,7 @@ plugin gets an Enabled-toggle-only row instead of its fields.
 `state`, and none names a domain feature. Group by purpose:
 
 - **Lifecycle** — `deinit`, `initPlugin`.
-- **Document ownership** — `fileTypePriority(ext)` (claim file extensions), `loadDocument` /
+- **Document ownership** — `fileTypes()` (offer file extensions; see §3.11), `loadDocument` /
   `loadDocumentFromBytes` / `createDocument`, `saveDocument`, `reloadDocument` (optional — Fizzy's
   document watcher reloads clean open tabs when the file changes on disk), `closeDocument`,
   `isDirty`, `undo`/`redo`/`canUndo`/`canRedo`, plus opaque document-buffer management for the
@@ -498,7 +527,7 @@ like `pixi` implements the document + rendering hooks but contributes no file tr
 Every vtable field is an optional fn pointer, so the type system requires nothing. But to
 function *as an editor* (open/draw/save files) you must implement the document cluster:
 
-> `fileTypePriority` · `documentStackSize` · `documentStackAlign` · `loadDocument` ·
+> `documentStackSize` · `documentStackAlign` · `loadDocument` ·
 > `documentIdFromBuffer` · `registerOpenDocument` · `documentPtr` · `deinitDocumentBuffer` ·
 > `drawDocument` · `saveDocument` · `isDirty`
 
@@ -833,6 +862,72 @@ Resolution results are memoized by the caller against `wikilink.generation()`, w
 a link flip from broken to live when its target file appears — with no edit to the linking
 document, and so no re-parse of it.
 
+### 3.11 File-type ownership — `fileTypes` and the fallback editor
+
+**Which plugin opens a given extension is the user's decision, not the plugin author's.** There
+is no numeric priority: a plugin *offers* extensions, and Fizzy resolves ownership against a
+persisted user choice.
+
+```zig
+const vtable: sdk.Plugin.VTable = .{
+    .fileTypes = fileTypes,
+    // … the document cluster …
+};
+
+fn fileTypes(_: *anyopaque) []const []const u8 {
+    return &.{ ".pixi", ".fiz", ".png" };
+}
+```
+
+The returned slice must stay valid for the plugin's lifetime (a static array). Omitting
+`fileTypes` entirely — as `workbench`, `markdown`, and language-support-only plugins do — means
+the plugin offers nothing to routing, which is a perfectly normal thing to be.
+
+`Host.pluginForExtension` resolves in exactly this order:
+
+1. **The user's persisted assignment** for the extension, if that plugin is loaded and still
+   offers it.
+2. Otherwise the **unique plugin offering it**. Two or more offers with no assignment is a real
+   ambiguity that the install-time dialog should already have caught; as a safety net Fizzy picks
+   the alphabetically-first plugin id, so the result never depends on dylib load order.
+3. Otherwise the **fallback editor**.
+
+**The fallback editor** is the one plugin that opens anything nobody else owns. It is an opt-in
+registration rather than vtable or struct data, because the concept is meaningless to every
+plugin author except the one writing a general text editor:
+
+```zig
+pub fn register(host: *sdk.Host) !void {
+    host.registerFallbackEditor(&plugin);   // `text` does this; almost certainly you should not
+    try host.registerPlugin(&plugin);
+}
+```
+
+A fallback editor deliberately does *not* implement `fileTypes` — its claim set is unbounded, so
+it can never appear as a specialized claimant, only as the implicit "Text (fallback)" option. A
+second caller of `registerFallbackEditor` is a plugin-author bug (the last registration silently
+wins), not a user-facing conflict.
+
+**What the user sees.** When a newly installed plugin (or a dropped-in build on its first Load)
+offers an extension something else already opens — including one only the fallback editor was
+opening — Fizzy shows a table of those extensions: what opens each today, and a dropdown of every
+eligible owner. The arriving plugin is pre-selected for every row; built-in viewers (Image, Text
+(fallback), …) are grouped separately from loaded plugins. The answer is stored as `.extensions`
+on the chosen plugin's own `settings.zon` block, and can be changed any time under
+**Settings › File Types**. Dismissing the dialog writes nothing.
+
+**What this means for you as a plugin author:**
+
+- Offering an extension is not a promise you will get it. Never assume your plugin owns a type;
+  ask `host.pluginForExtension` if you need to know.
+- Offer only extensions you can genuinely open. If an update drops support for one, remove it
+  from `fileTypes` — a stale persisted assignment is then ignored (and surfaced to the user in
+  Settings › File Types) rather than routing files to a plugin that cannot open them.
+- Don't write `.extensions` yourself. It is Fizzy-reserved, and every write goes through a single
+  path driven by an explicit user action.
+
+---
+
 ---
 
 ## 4. Two plugins working together (`pixi` + `workbench`)
@@ -842,7 +937,7 @@ SDK — `grep` confirms zero cross-imports in either tree. This is the model to 
 editor plugin.
 
 `pixi.register`:
-- Claims its file types via `fileTypePriority` (`.fiz`, `.png`, …).
+- Offers its file types via `fileTypes` (`.pixi`, `.fiz`, `.png`, …) — an offer, not a claim; see §3.11.
 - `registerSidebarView` ×3 — Tools, Sprites, Project.
 - `registerBottomView` — the Sprites panel tab.
 - `sdk.settings.Schema(…).register`, `registerFileRowFillColor`.
@@ -860,7 +955,7 @@ editor plugin.
 user clicks foo.fiz in workbench's Files tree
         │
         ▼
-host.pluginForExtension(".fiz")  ──►  pixi  (highest fileTypePriority)
+host.pluginForExtension(".fiz")  ──►  pixi  (user's assignment, else sole claimant)
         │
         ▼
 pixi.loadDocument(path)          ──►  builds its File, returns an opaque buffer
