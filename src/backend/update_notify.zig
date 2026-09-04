@@ -18,6 +18,12 @@ const Phase = enum(u8) {
 var launched: bool = false;
 var phase: std.atomic.Value(u8) = .init(@intFromEnum(Phase.pending));
 
+/// Set by `startLaunchCheck` when the "update available" state is faked for UI work
+/// (`Constants.debug_simulate_update_available`). Nothing may act on it beyond drawing the
+/// toast: there is no real update to download, so a silent auto-install would spin forever and
+/// `appUpdateState` must not hold the plugin-update pass behind it.
+var simulated: bool = false;
+
 var remote_ver: [128]u8 = undefined;
 var remote_ver_len: usize = 0;
 
@@ -53,6 +59,7 @@ pub fn startLaunchCheck(io: std.Io, simulate_out_of_date: bool) void {
     launched = true;
 
     if (simulate_out_of_date) {
+        simulated = true;
         const fake = "9.9.9 (simulated)";
         @memcpy(remote_ver[0..fake.len], fake);
         remote_ver_len = fake.len;
@@ -101,6 +108,41 @@ fn worker(io: std.Io) void {
 
 pub fn badgeVisible() bool {
     return phase.load(.acquire) == @intFromEnum(Phase.done_yes);
+}
+
+/// Where the launch update check has got to, for anything that must sequence itself *behind* a
+/// Fizzy update — today that is `PluginStore`'s auto-update pass. A store plugin is built against
+/// one Fizzy SDK generation, so the plugin builds that match a pending Fizzy release only become
+/// visible to us once we are running it: Fizzy goes first (always by the user's own hand — see
+/// `tick`; nothing here ever installs the app update on its own), and plugins follow on the
+/// relaunch.
+pub const AppUpdateState = enum {
+    /// The launch check hasn't answered yet — callers that must sequence behind it should wait.
+    checking,
+    /// Up to date, no feed, unsupported install layout, or the check failed. Nothing to wait for.
+    none,
+    /// A newer Fizzy exists and hasn't been started.
+    available,
+    /// A download/apply is in flight; the process is expected to relaunch.
+    installing,
+};
+
+pub fn appUpdateState() AppUpdateState {
+    // A simulated update never installs, so treat it as "nothing pending" for sequencing —
+    // otherwise the debug flag would silently disable plugin updates.
+    if (simulated) return .none;
+    if (comptime auto_update.impl) {
+        if (update_install.currentJob()) |job| switch (job.currentPhase()) {
+            // Terminal: the install is not going to happen, so stop holding anything behind it.
+            .failed, .no_update => return .none,
+            else => return .installing,
+        };
+    }
+    return switch (@as(Phase, @enumFromInt(phase.load(.acquire)))) {
+        .pending => .checking,
+        .done_no => .none,
+        .done_yes => .available,
+    };
 }
 
 /// Arms the launch toast once an available update is detected. Must run on the

@@ -79,6 +79,22 @@ pub const ShardRelease = struct {
     pub fn downloadFor(self: ShardRelease, os_arch: []const u8) ?Download {
         return self.downloads.map.get(os_arch);
     }
+
+    /// The host SDK version this release needs, or null when it declares none.
+    ///
+    /// The shard being fingerprint-scoped is *not* on its own enough to prove a release is
+    /// loadable here: `sdk_version` also bumps for boundary changes the structural fingerprint
+    /// cannot see (a new host function, a behavior contract), so a plugin built against a newer
+    /// SDK can land in this very shard and still be rejected by `PluginLoader`'s
+    /// `min_sdk_version` check. Callers must gate on this before offering an install or update
+    /// (see `PluginStore.releaseSdkSatisfied`).
+    ///
+    /// An unparseable value reads as "no requirement" — the load-time check is still the
+    /// backstop, and a malformed field must not silently hide every build of a plugin.
+    pub fn minSdk(self: ShardRelease) ?std.SemanticVersion {
+        if (self.min_sdk_version.len == 0) return null;
+        return std.SemanticVersion.parse(self.min_sdk_version) catch null;
+    }
 };
 
 pub const ReleaseShard = struct {

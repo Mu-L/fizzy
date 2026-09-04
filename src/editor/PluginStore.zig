@@ -18,6 +18,7 @@ const store = @import("../backend/plugin_store/store.zig");
 const Dialogs = @import("dialogs/Dialogs.zig");
 const PluginLoader = @import("PluginLoader.zig");
 const Constants = @import("Constants.zig");
+const update_notify = @import("../backend/update_notify.zig");
 const core = @import("core");
 const fuzzy = core.fuzzy;
 
@@ -1009,6 +1010,24 @@ fn autoUpdateTick() void {
                 auto_phase = .done;
                 return;
             }
+            // Plugins go *after* Fizzy itself. Store builds are made against one SDK
+            // generation, so the plugin builds that match the Fizzy release we're about to
+            // install only become visible to us once we are running it — see
+            // `update_notify.AppUpdateState`.
+            switch (update_notify.appUpdateState()) {
+                // The launch check is still out. Wait: it costs a few frames of a pass nobody
+                // is watching, and answers whether these are even the right plugin builds.
+                .checking => return,
+                // A newer Fizzy exists. Say nothing about plugins yet, in either mode: the
+                // builds that pair with that Fizzy are in a shard we can't see from here, so
+                // anything we could offer now is the *older* build — or, without
+                // `releaseSdkSatisfied`, one that wouldn't load at all. The user takes the app
+                // update when they choose; this pass runs again on the relaunch, against the
+                // new SDK's shard, and only then is there a plugin story worth telling.
+                .available, .installing => return,
+                .none => {},
+            }
+
             // Nothing installed to update: don't touch the network at all.
             if (disk_scan_dirty) refreshDiskScan();
             if (!anyUpdatableInstalled()) {
@@ -1068,9 +1087,13 @@ fn collectPendingUpdates() void {
         if (jobs.get(id) != null) continue; // already installing/updating from the store tab
 
         const rel = snap.shard.releaseFor(id) orelse continue;
-        // The shard is this host's ABI fingerprint, so anything in it is by construction loadable
-        // here — but it still needs a build for this OS/arch.
+        // The shard is this host's ABI fingerprint, but that alone doesn't make a release
+        // loadable: it still needs a build for this OS/arch...
         const dl = rel.downloadFor(compat.hostKey()) orelse continue;
+        // ...and be loadable by this SDK version. Offering an update this Fizzy would reject at
+        // `dlopen` is worse than offering nothing: it replaces a working plugin with one that
+        // cannot load. The user updates Fizzy first; the plugin update follows on the next run.
+        if (!releaseSdkSatisfied(rel)) continue;
         const rel_ver = std.SemanticVersion.parse(rel.version) catch continue;
 
         const installed = currentVersion(id);
@@ -1135,6 +1158,13 @@ fn appendPendingUpdate(
 
 /// Apply whatever `collectPendingUpdates` found, the way the user asked for in settings:
 /// silently, or through the "Plugin updates" window.
+///
+/// Repairs (`PendingUpdate.repair`) are the exception to `.prompt`: the plugin is enabled but not
+/// running, which after a Fizzy update is the normal state of every plugin built against the old
+/// SDK. Prompting there offers the user a choice they don't have — declining leaves the plugin
+/// dead rather than merely older — so repairs always go through silently, and the common case
+/// (Fizzy updates, its plugins follow on the next launch) is seamless in both modes. Only genuine
+/// version upgrades of *working* plugins are worth asking about.
 fn offerPendingUpdates() void {
     if (pending_updates.items.len == 0) return;
     switch (fizzy.editor.settings.plugin_update_mode) {
@@ -1145,7 +1175,24 @@ fn offerPendingUpdates() void {
             applyAllPendingUpdates();
             clearPendingUpdates();
         },
-        .prompt => Dialogs.PluginUpdates.request(),
+        .prompt => {
+            var offer_window = false;
+            // Index rather than pointer iteration: `applyPendingUpdate` writes back into the list.
+            var i: usize = 0;
+            while (i < pending_updates.items.len) : (i += 1) {
+                const row = &pending_updates.items[i];
+                if (!row.repair) {
+                    offer_window = true;
+                    continue;
+                }
+                dvui.log.info("plugin updates: repairing {s} {s} (enabled but not loaded)", .{ row.title, row.to });
+                applyPendingUpdate(row.id);
+            }
+            // Repairs already in flight are left on the list so they show their progress if the
+            // window opens for something else, and drop themselves as they land (`tick`). With
+            // nothing but repairs there is nothing to decide, so no window opens at all.
+            if (offer_window) Dialogs.PluginUpdates.request();
+        },
     }
 }
 
@@ -2697,7 +2744,7 @@ const no_build_msg_max_w: f32 = 110;
 /// width just by which list it's in. Out-of-class hosts (see `host_optimize_matches_store`) get
 /// the optimize-mode wording plus the same alert icon a failed local load carries; the tooltip
 /// holds the long-form explanation in both cases.
-fn drawNoStoreBuild(opts: dvui.Options) void {
+fn drawNoStoreBuild(entry: StoreEntry, opts: dvui.Options) void {
     const theme = dvui.themeGet();
 
     var no_build_box = dvui.box(@src(), .{ .dir = .horizontal }, opts.override(.{ .gravity_y = 0.5 }));
@@ -2706,11 +2753,14 @@ fn drawNoStoreBuild(opts: dvui.Options) void {
     // Web has no plugin binaries at all, so the Debug/ReleaseSafe "Needs release" wording
     // would be a lie — same "No store build" the native ReleaseFast host shows.
     const optimize_mismatch = (comptime builtin.target.cpu.arch != .wasm32) and !host_optimize_matches_store;
+    // The store *does* have this host's build — it just needs a newer Fizzy. Nothing about the
+    // plugin is wrong, so point at the app update instead of at a missing build.
+    const needs_newer_fizzy = !optimize_mismatch and releaseNeedsNewerFizzy(entry);
 
-    if (optimize_mismatch) {
+    if (optimize_mismatch or needs_newer_fizzy) {
         dvui.icon(
             @src(),
-            "StoreOptimizeMismatchIcon",
+            "StoreNoBuildAlertIcon",
             icons.tvg.lucide.@"circle-alert",
             .{ .stroke_color = theme.color(.err, .fill), .fill_color = theme.color(.err, .fill) },
             .{ .gravity_y = 0.5, .margin = .{ .x = 2 }, .min_size_content = .{ .w = 14, .h = 14 } },
@@ -2719,7 +2769,7 @@ fn drawNoStoreBuild(opts: dvui.Options) void {
 
     dvui.labelNoFmt(
         @src(),
-        if (optimize_mismatch) "Needs release" else "No store build",
+        if (optimize_mismatch) "Needs release" else if (needs_newer_fizzy) "Update Fizzy" else "No store build",
         .{},
         .{
             .color_text = theme.color(.err, .text),
@@ -2729,7 +2779,23 @@ fn drawNoStoreBuild(opts: dvui.Options) void {
         },
     );
 
-    if (!optimize_mismatch) {
+    if (needs_newer_fizzy) {
+        const rel = entry.release orelse store.ShardRelease{};
+        dvui.tooltip(
+            @src(),
+            .{ .active_rect = no_build_box.data().borderRectScale().r },
+            "The store build of this plugin (v{s}) needs Fizzy SDK {s} — this Fizzy is {d}.{d}.{d}. " ++
+                "Update Fizzy (Help → Check for Updates) and it will install on the next run.",
+            .{
+                rel.version,
+                rel.min_sdk_version,
+                version.sdk_version.major,
+                version.sdk_version.minor,
+                version.sdk_version.patch,
+            },
+            .{},
+        );
+    } else if (!optimize_mismatch) {
         dvui.tooltip(
             @src(),
             .{ .active_rect = no_build_box.data().borderRectScale().r },
@@ -2775,14 +2841,38 @@ fn joinParts(buf: []u8, parts: []const []const u8) []const u8 {
     return buf[0..len];
 }
 
-/// The release that is compatible with this host, if `entry` has one in the fetched shard (the
-/// shard is already resolved to this host's exact `abi_fingerprint` server-side — see
-/// `store.Catalog` — so the only thing left to check here is whether it ships a binary for this
-/// `os-arch`).
+/// True when this host's SDK satisfies `rel`'s `min_sdk_version` — i.e. `PluginLoader` will
+/// actually accept the build rather than rejecting it with `error.SdkVersionMismatch`.
+///
+/// Being in this host's fingerprint shard is not sufficient. `sdk_version` bumps for every
+/// boundary change; the structural fingerprint only moves for those that change the *shape* of
+/// the SDK types, so an SDK release that adds a host function (or tightens a behavior contract)
+/// leaves the fingerprint alone. A plugin rebuilt against that SDK therefore lands in the exact
+/// shard an older Fizzy fetches, looks like a plain version bump, and fails to load once
+/// downloaded. `min_sdk_version` is the field that carries the difference — this is where it is
+/// checked, so an out-of-date Fizzy is never offered a build it cannot run.
+fn releaseSdkSatisfied(rel: store.ShardRelease) bool {
+    const min = rel.minSdk() orelse return true;
+    return version.sdkVersionSatisfies(version.sdk_version, min);
+}
+
+/// The release that is compatible with this host, if `entry` has one in the fetched shard: it
+/// must ship a binary for this `os-arch` *and* be loadable by this SDK version
+/// (see `releaseSdkSatisfied`).
 fn selectedRelease(entry: StoreEntry) ?store.ShardRelease {
     const r = entry.release orelse return null;
     if (r.downloadFor(compat.hostKey()) == null) return null;
+    if (!releaseSdkSatisfied(r)) return null;
     return r;
+}
+
+/// True when the store *does* have this host's build of `entry` but it needs a newer Fizzy than
+/// the one running. Distinguishes "the store has nothing for you" from "update Fizzy first",
+/// which are very different things for the user to read (see `drawNoStoreBuild`).
+fn releaseNeedsNewerFizzy(entry: StoreEntry) bool {
+    const r = entry.release orelse return false;
+    if (r.downloadFor(compat.hostKey()) == null) return false;
+    return !releaseSdkSatisfied(r);
 }
 
 /// The compatible registry release when it is a *newer* version than the one currently loaded —
@@ -2864,9 +2954,9 @@ fn drawCardControls(entry: StoreEntry) void {
         //     on disk and load it. Nothing is loaded to unload, so route through the install path
         //     (is_update = false → `installAndLoadPlugin`, which re-enables the plugin, loads the
         //     freshly downloaded file and clears the failure record). This is the way out of a
-        //     wrong-SDK build: the shard is resolved to *this* host's ABI fingerprint, so the
-        //     download is by construction the build this Fizzy can load — even when it carries the
-        //     same version number as the broken one already on disk.
+        //     wrong-SDK build: `selectedRelease` only ever hands back a release this Fizzy's ABI
+        //     fingerprint, os-arch and SDK version can all load — even when it carries the same
+        //     version number as the broken one already on disk.
         if (loaded) {
             if (updateRelease(entry)) |rel| {
                 if (dvui.button(@src(), "Update", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
@@ -2897,7 +2987,7 @@ fn drawCardControls(entry: StoreEntry) void {
                 // *from*. Say why (short form — this card also carries the wrapped failure text,
                 // and the controls row shares its width with it) instead of leaving a lone trash
                 // icon next to an unexplained "Failed to load".
-                drawNoStoreBuild(.{ .margin = .{ .x = 4 } });
+                drawNoStoreBuild(entry, .{ .margin = .{ .x = 4 } });
             }
         }
         if (dvui.buttonIcon(@src(), "Uninstall", icons.tvg.lucide.@"trash-2", .{}, .{ .stroke_color = theme.color(.err, .text) }, .{ .gravity_y = 0.5 }))
@@ -2920,7 +3010,7 @@ fn drawCardControls(entry: StoreEntry) void {
     // published a build for this exact Fizzy version/arch yet — nothing the user can fix
     // locally (unlike a failed local build, handled above), so the wording and the tooltip
     // both point at "the store doesn't have one" rather than "rebuild your plugin".
-    drawNoStoreBuild(.{});
+    drawNoStoreBuild(entry, .{});
 }
 
 /// Upper-pane (store) card controls: browse-only. Just an in-flight job status, an Install
@@ -2958,7 +3048,7 @@ fn drawStoreCardControls(entry: StoreEntry) void {
 
     // Registry row with no host-compatible release: the *store* hasn't published a build for
     // this exact Fizzy version/arch yet.
-    drawNoStoreBuild(.{});
+    drawNoStoreBuild(entry, .{});
 }
 
 /// A repo URL plus an optional path within it to look under for `README.md` / `ICON.png`.
