@@ -1183,20 +1183,32 @@ pub fn pluginForExtension(self: *Host, ext: []const u8) ?*Plugin {
     return self.fallback_editor;
 }
 
+/// Whether `plugin` should appear in the New File flow.
+///
+/// Two ways to qualify, because "can create a new document" and "owns documents" are not the
+/// same claim. A document owner (`createDocument`) creates one it will then own. A *utility*
+/// plugin (`assertUtilityVTable` forbids it `createDocument`) can still offer a New Document
+/// entry by implementing only `requestNewDocumentDialog` — atlas creating a `.md` note that the
+/// text plugin goes on to own is the case this exists for. Gating on `createDocument` alone shut
+/// those out of the chooser entirely.
+fn offersNewDocument(plugin: *const Plugin) bool {
+    return plugin.vtable.createDocument != null or plugin.vtable.requestNewDocumentDialog != null;
+}
+
 /// Open a "new document" flow. `parent_path` (when set) targets an on-disk folder; `id_extra`
 /// disambiguates launches from distinct explorer rows.
 ///
-/// With zero `createDocument`-capable plugins installed, this is a no-op (nothing can create a
-/// file). With exactly one, it's dispatched to directly — its own dialog if it has one (e.g.
+/// With no plugin offering one (`offersNewDocument`), this is a no-op — nothing can create a
+/// file. With exactly one, it's dispatched to directly — its own dialog if it has one (e.g.
 /// `pixi`), or straight to an untitled in-memory document if not (e.g. the bundled `text`
-/// fallback editor). With two or more, which plugin should own the new file is ambiguous, so a
-/// picker (`showNewDocumentChooser`) is shown first; the user's choice is then dispatched the
+/// fallback editor). With two or more, which plugin should handle the new file is ambiguous, so
+/// a picker (`showNewDocumentChooser`) is shown first; the user's choice is then dispatched the
 /// same way a lone candidate would be.
 pub fn requestNewDocument(self: *Host, parent_path: ?[]const u8, id_extra: usize) void {
     var candidate: ?*Plugin = null;
     var candidate_count: usize = 0;
     for (self.plugins.items) |plugin| {
-        if (plugin.vtable.createDocument != null) {
+        if (offersNewDocument(plugin)) {
             candidate_count += 1;
             if (candidate == null) candidate = plugin;
         }
@@ -1212,11 +1224,16 @@ pub fn requestNewDocument(self: *Host, parent_path: ?[]const u8, id_extra: usize
 }
 
 /// Hand the "new document" flow to a specific plugin: its own dialog if it has one, otherwise
-/// straight to an untitled in-memory document. `owner` must implement `createDocument` (the
+/// straight to an untitled in-memory document. `owner` must satisfy `offersNewDocument` (the
 /// only two callers — `requestNewDocument`'s single-candidate path and the chooser dialog's
 /// button handler — both filter on that already).
 fn dispatchNewDocumentToPlugin(self: *Host, owner: *Plugin, parent_path: ?[]const u8, id_extra: usize) void {
-    self.pending_new_document_owner = owner;
+    // Only claim the pending slot for a plugin that can actually take the document back: it
+    // exists to disambiguate a later `host.createDocument(path, grid)`, and a utility plugin
+    // never makes that call. Leaving a stale owner parked here would misroute the *next*
+    // create — the one a different plugin makes — to a plugin with no `createDocument` at all.
+    self.pending_new_document_owner = if (owner.vtable.createDocument != null) owner else null;
+
     if (owner.vtable.requestNewDocumentDialog) |f| {
         f(owner.state, parent_path, id_extra);
         return;
@@ -1275,7 +1292,7 @@ fn newDocumentChooserDisplay(id: dvui.Id) anyerror!bool {
 
     var index: usize = 0;
     for (host.plugins.items) |plugin| {
-        if (plugin.vtable.createDocument == null) continue;
+        if (!offersNewDocument(plugin)) continue;
         defer index += 1;
 
         var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = index, .margin = .all(6) });

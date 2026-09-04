@@ -1795,6 +1795,18 @@ pub fn pollPendingDialogResult() ?PendingDialogResult {
     return pending_dialog_results.orderedRemove(0);
 }
 
+/// Queuing a dialog result is not enough to get it processed: this runs from the Cocoa/Win32
+/// run loop that the event wait pumps *between* frames, so if the panel closes without any
+/// further input — Enter on the Save As sheet, mouse never moved — the loop goes straight back
+/// to sleep and `pollPendingDialogResult` is not reached until something unrelated wakes it.
+/// The user sees the file land on disk with the tab/title still saying "untitled".
+///
+/// `dvui.refresh` with an explicit window is the outside-`begin`/`end` form: it marks a frame
+/// needed *and* wakes the backend's event wait.
+fn wakeForDialogResult() void {
+    dvui.refresh(fizzy.app.window, @src(), null);
+}
+
 fn GenericDialogCallback(cb: ?*anyopaque, files: [*c]const [*c]const u8, mode: enum { save, open }) void {
     const callback: *const fn (?[][:0]const u8) void = @ptrCast(@alignCast(@constCast(cb)));
 
@@ -1805,7 +1817,9 @@ fn GenericDialogCallback(cb: ?*anyopaque, files: [*c]const [*c]const u8, mode: e
     if (path_count == 0) {
         pending_dialog_results.append(fizzy.app.allocator, .{ .callback = callback, .files = null }) catch {
             dvui.log.err("Failed to queue dialog result", .{});
+            return;
         };
+        wakeForDialogResult();
         return;
     }
 
@@ -1852,7 +1866,9 @@ fn GenericDialogCallback(cb: ?*anyopaque, files: [*c]const [*c]const u8, mode: e
         dvui.log.err("Failed to queue dialog result", .{});
         for (zig_files) |f| fizzy.app.allocator.free(f);
         fizzy.app.allocator.free(zig_files);
+        return;
     };
+    wakeForDialogResult();
 }
 
 // ----------------------------------------------------------------------------

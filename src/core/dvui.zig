@@ -14,10 +14,42 @@ pub const TreeSelection = @import("widgets/TreeSelection.zig");
 
 /// Core-owned dialog chrome state, set by the dialog framework and read by
 /// fizzy so core stays decoupled from the editor. When a modal is open fizzy
-/// dims the titlebar; the optional close-rect overrides the dialog's close
-/// animation origin (e.g. the New File flow animating from the tree row).
+/// dims the titlebar.
 pub var modal_dim_titlebar: bool = false;
-pub var dialog_close_rect_override: ?dvui.Rect.Physical = null;
+
+/// Key/id for the dialog close-rect handoff below. A fixed string rather than `@src()`
+/// because `Id.extendId` hashes the *module* pointer, which differs per copy.
+const dialog_close_rect_key = "fizzy_dialog_close_rect_override";
+
+fn dialogCloseRectId() dvui.Id {
+    return dvui.Id.zero.update(dialog_close_rect_key);
+}
+
+/// Re-aim an open dialog's close animation at `rect`, so it shrinks *into* a specific place on
+/// screen instead of collapsing to its own centre. The New File flow uses this to fly the dialog
+/// into the row the file tree just grew for the new document.
+///
+/// Deliberately **not** a module-level `var`: `core` is linked into fizzy and into every plugin
+/// dylib, so each has its own copy of any global. The module that knows the destination (the
+/// workbench's file tree) is never the module drawing the dialog (the plugin that owns the New
+/// Document dialog), and a global would leave each of them talking to itself. dvui's data store
+/// hangs off the one `Window` every module is handed through `dvui_context.zig`, which makes it
+/// the only state they all agree on.
+///
+/// Safe to call while the dialog is already shrinking: `FloatingWindowWidget` re-targets each
+/// axis in flight, preserving progress, so a row that only appears part-way through the close
+/// still gets flown into rather than snapped to.
+pub fn setDialogCloseRectOverride(rect: dvui.Rect.Physical) void {
+    dvui.dataSet(null, dialogCloseRectId(), dialog_close_rect_key, rect);
+}
+
+/// Consume a pending override, if any. One-shot, so the next dialog starts clean.
+pub fn takeDialogCloseRectOverride() ?dvui.Rect.Physical {
+    const id = dialogCloseRectId();
+    const rect = dvui.dataGet(null, id, dialog_close_rect_key, dvui.Rect.Physical) orelse return null;
+    dvui.dataRemove(null, id, dialog_close_rect_key);
+    return rect;
+}
 
 /// Hides a pane for the single frame dvui needs to lay out newly-swapped content, then fades it
 /// in — so switching store pages, document tabs or center providers reads as a quick cross-fade
@@ -619,15 +651,20 @@ pub fn dialogWindow(id: dvui.Id) anyerror!void {
     });
     defer win.deinit();
 
+    // Applied *before* the animation check, not as an `else if` to it: the OK handler below
+    // starts the shrink-to-centre close immediately (so a dialog can never wedge open waiting
+    // for a row that never arrives), which means by the time the tree has drawn the new row
+    // there is always an animation in flight. Writing `_close_rect` re-aims it mid-flight.
+    const close_override = takeDialogCloseRectOverride();
+    if (close_override) |close_rect| {
+        dvui.dataSet(null, win.data().id, "_close_rect", close_rect);
+    }
+
     if (dvui.animationGet(win.data().id, "_close_x")) |a| {
         if (a.done()) {
-            dialog_close_rect_override = null;
             dvui.dialogRemove(id);
         }
-    } else if (dialog_close_rect_override) |close_rect| {
-        dvui.dataSet(null, win.data().id, "_close_rect", close_rect);
-        dialog_close_rect_override = null;
-    } else {
+    } else if (close_override == null) {
         win.autoSize();
     }
 
@@ -756,12 +793,14 @@ pub fn dialogWindow(id: dvui.Id) anyerror!void {
                     return;
                 };
             }
-            // Always close on OK — including a "New File" dialog created inside an explorer
-            // folder (`_parent_path` set). This used to skip the close here for that case,
-            // relying on the explorer's own tree-scan to later spot the new file and set
-            // `dialog_close_rect_override` (a "fly to the new row" close animation instead of
-            // the default shrink-to-center) — but that scan reliably never fires again once
-            // this dialog is up, permanently wedging the dialog open with no fallback.
+            // Always close on OK, and always with a real destination — the dialog's own centre.
+            // An earlier version instead *withheld* the close for a "New File" dialog created
+            // inside an explorer folder, waiting for the tree to spot the new file and supply a
+            // row to fly into; when that row failed to appear the dialog wedged open with no
+            // fallback. Starting the close unconditionally removes the failure mode: if the row
+            // does show up mid-animation it re-aims the close through
+            // `setDialogCloseRectOverride` (handled at the top of this function), and if it never
+            // does, this shrink-to-centre is what the user sees.
             var close_rect_ok = win.data().rectScale().r;
             close_rect_ok.x = close_rect_ok.center().x;
             close_rect_ok.y = close_rect_ok.center().y;

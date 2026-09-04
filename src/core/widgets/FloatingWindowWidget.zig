@@ -131,6 +131,9 @@ pub const DragPart = enum {
 };
 
 prev_rendering: bool = undefined,
+/// Window alpha before the close-flight fade replaced it, restored in `deinit`. Null while no
+/// close animation is running, which is every frame of a window's normal life.
+prev_alpha: ?f32 = null,
 wd: WidgetData,
 init_options: InitOptions,
 /// options is for our embedded BoxWidget
@@ -476,6 +479,33 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
     // - gives us all mouse events
     self.prevClip = dvui.clipGet();
     dvui.clipSet(dvui.windowRectPixels());
+
+    // Fade the window out along its close flight, so it is gone by the time it lands instead of
+    // arriving intact and blinking out. Applies to every close: a shrink-to-centre gets the same
+    // treatment, where it just reads as a slightly softer collapse.
+    //
+    // Keyed off `_close_x`'s *time* fraction rather than its eased value, because the fly-to
+    // re-targets `end_val` mid-flight (see the `_close_rect` block above) — progress derived from
+    // the value would jump backwards on every re-aim and the fade would stutter.
+    if (dvui.animationGet(self.data().id, "_close_x")) |a| {
+        const span = a.end_time - a.start_time;
+        if (span > 0) {
+            const frac = @as(f32, @floatFromInt(-a.start_time)) / @as(f32, @floatFromInt(span));
+            // Fade against *distance covered*, not against the clock. The close runs on
+            // `easing.inBack`, which is negative until t≈0.63 — the window eases backwards away
+            // from its destination first and then covers the whole distance in the last third of
+            // its time. A clock-driven fade therefore does most of its work while the window has
+            // barely moved, which is not what "fades as it arrives" looks like.
+            //
+            // Re-aim safe: this is the easing curve's own progress, independent of the endpoints
+            // the fly-to rewrites mid-flight.
+            const travelled = std.math.clamp(dvui.easing.inBack(std.math.clamp(frac, 0, 1)), 0, 1);
+            // Opaque for the first half of the travel, then an ease-in that puts most of the
+            // opacity loss in the final moments and lands on zero exactly at the destination.
+            const t = std.math.clamp((travelled - 0.55) / 0.45, 0, 1);
+            self.prev_alpha = dvui.alpha(1 - t * t);
+        }
+    }
 
     if (self.data().accesskit_node()) |ak_node| {
         if (self.init_options.modal)
@@ -847,6 +877,7 @@ pub fn deinit(self: *FloatingWindowWidget) void {
     dvui.currentWindow().last_focused_id_this_frame = self.prev_last_focus;
     _ = dvui.subwindowCurrentSet(self.prev_windowInfo.id, self.prev_windowInfo.rect);
     dvui.clipSet(self.prevClip);
+    if (self.prev_alpha) |pa| dvui.alphaSet(pa);
     _ = dvui.renderingSet(self.prev_rendering);
 }
 

@@ -45,11 +45,49 @@ api: Api = undefined,
 /// callback for this.
 pending_reveals: std.ArrayListUnmanaged(PendingReveal) = .empty,
 
+/// A path that has just appeared on disk and should be revealed: parents expanded, row selected,
+/// inline rename opened, and the rect handed to any dialog still closing over the top of it.
+///
+/// Lives on this **instance** rather than as a `files.zig` global on purpose. `files.zig` is
+/// compiled twice — once into fizzy, once into the workbench dylib — so its module-level `var`s
+/// are two separate objects, and a write from fizzy lands in the copy nobody draws. Instance
+/// state does cross that boundary: fizzy passes `&editor.workbench` into the dylib as `arg_c`
+/// (`Editor.loadWorkbenchDylib`), so both copies see this exact field. `pending_reveals` above
+/// already relies on the same property.
+pending_new_file_path: ?[]u8 = null,
+
+/// Bumped whenever something changes the contents of a watched directory. `files.zig` keeps a
+/// per-copy directory listing cache; comparing this counter against its own last-seen value is
+/// how the copy that actually draws learns to drop that cache, including when the change was
+/// made by the copy that doesn't. Wrapping is harmless — only inequality is ever tested.
+disk_generation: u32 = 0,
+
 const PendingReveal = struct {
     path: []u8,
     line: u32,
     character: u32,
 };
+
+/// Queue `path` to be revealed by the file tree on an upcoming frame, replacing any path already
+/// queued. Safe from either copy of the module; the tree consumes it when the row exists.
+pub fn setPendingNewFilePath(self: *Workbench, path: []const u8) !void {
+    const dup = try self.allocator.dupe(u8, path);
+    if (self.pending_new_file_path) |old| self.allocator.free(old);
+    self.pending_new_file_path = dup;
+}
+
+/// Drop the queued reveal, if any.
+pub fn clearPendingNewFilePath(self: *Workbench) void {
+    if (self.pending_new_file_path) |old| self.allocator.free(old);
+    self.pending_new_file_path = null;
+}
+
+/// Announce that something on disk changed under an open folder, so every copy of `files.zig`
+/// drops its listing cache on its next draw. Cheap and idempotent — call it on any create,
+/// delete, rename or move, including ones performed by a plugin's own save routine.
+pub fn noteDiskChanged(self: *Workbench) void {
+    self.disk_generation +%= 1;
+}
 
 pub fn init(allocator: std.mem.Allocator) Workbench {
     return .{ .allocator = allocator };
@@ -60,6 +98,7 @@ pub fn deinit(self: *Workbench) void {
     self.decorators.deinit(self.allocator);
     for (self.pending_reveals.items) |pr| self.allocator.free(pr.path);
     self.pending_reveals.deinit(self.allocator);
+    self.clearPendingNewFilePath();
 }
 
 /// Called once per frame from `drawWorkspaces`. Applies and clears any pending reveal whose

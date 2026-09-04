@@ -31,8 +31,35 @@ var pending_file_shift_range: ?struct {
     clicked_path: []const u8,
 } = null;
 
-/// Set from New File dialog when creating on disk; tree uses this to expand parents, focus rename, and set the dialog close-rect override.
-pub var new_file_path: ?[]const u8 = null;
+/// The path a New Document flow just created and wants revealed, or null.
+///
+/// Reads through to `Workbench.pending_new_file_path` rather than being a `var` here, because
+/// this module is compiled twice — into fizzy and into the workbench dylib — and a global would
+/// give each copy its own. Whichever copy draws the tree must see what fizzy wrote; the
+/// `Workbench` instance is shared across both, so it is the one place that holds. See that
+/// field's doc comment for the full story.
+fn newFilePath() ?[]const u8 {
+    return runtime.workbench().pending_new_file_path;
+}
+
+fn clearNewFilePath() void {
+    runtime.workbench().clearPendingNewFilePath();
+}
+
+/// This copy's last-seen `Workbench.disk_generation`. When it falls behind, something (possibly
+/// the *other* copy of this module, or a plugin saving through its own routine) changed the
+/// contents of a directory we have cached, and the caches below are stale.
+var seen_disk_generation: u32 = 0;
+
+/// Drop this copy's caches if any copy has announced a disk change since the last check. Called
+/// once at the top of the tree draw, before anything consults `dir_cache`.
+fn syncDiskGeneration() void {
+    const current = runtime.workbench().disk_generation;
+    if (current == seen_disk_generation) return;
+    seen_disk_generation = current;
+    invalidateFilterIndex();
+    invalidateDirCache();
+}
 
 const open_message = if (builtin.os.tag == .macos) "Reveal in Finder" else "Reveal in File Browser";
 
@@ -61,6 +88,10 @@ pub fn draw() !void {
         try drawWeb();
         return;
     }
+
+    // Before anything reads `dir_cache`: adopt any disk change announced by the other copy of
+    // this module (or by a plugin that saved through its own routine).
+    syncDiskGeneration();
 
     // `tab_drag` matches workspace tab strips so file rows can drop on the canvas like tabs (DVUI reorder_tree cross-widget pattern).
     var tree = wdvui.TreeWidget.tree(@src(), .{ .enable_reordering = true, .drag_name = "tab_drag" }, .{ .background = false, .expand = .both });
@@ -379,12 +410,19 @@ pub fn invalidateFilterIndex() void {
     filter_cache_valid = false;
 }
 
-/// Both caches, for the disk-mutating helpers below. Deliberately *not* folded into
-/// `invalidateFilterIndex`: that one also fires every frame the filter box is empty, which would
-/// drop the listing cache continuously and undo the whole point of having it.
-fn invalidateAfterDiskChange() void {
+/// Both caches, for the disk-mutating helpers below — and for fizzy, when a plugin wrote to
+/// disk through its own save routine rather than through one of them. Deliberately *not* folded
+/// into `invalidateFilterIndex`: that one also fires every frame the filter box is empty, which
+/// would drop the listing cache continuously and undo the whole point of having it.
+pub fn invalidateAfterDiskChange() void {
     invalidateFilterIndex();
     invalidateDirCache();
+    // Tell the *other* copy of this module too — its `dir_cache` is a different object and just
+    // went stale. Recording the new value here as already-seen keeps `syncDiskGeneration` from
+    // immediately re-invalidating what this call has just cleared.
+    const wb = runtime.workbench();
+    wb.noteDiskChanged();
+    seen_disk_generation = wb.disk_generation;
 }
 
 fn freeFilterIndex() void {
@@ -569,10 +607,31 @@ fn nowMs() i64 {
     return @intCast(@divTrunc(std.Io.Clock.boot.now(dvui.io).nanoseconds, std.time.ns_per_ms));
 }
 
+/// Display order for two names: case-insensitive, so `README.md`, `docs/` and `zig-out/` sort
+/// where a reader expects rather than splitting into an uppercase run followed by a lowercase one
+/// (`std.mem.order` compares raw bytes, and every uppercase ASCII letter sorts below every
+/// lowercase one).
+///
+/// Falls back to an exact byte comparison when two names differ only in case. That keeps the
+/// order *total* — without it `README` and `readme`, which can coexist on a case-sensitive
+/// filesystem, would compare equal and their relative position would depend on the sort's
+/// internals. `listingHasFile` binary-searches with this same function, so the tiebreak is load
+/// bearing, not cosmetic.
+fn nameOrder(a: []const u8, b: []const u8) std.math.Order {
+    const n = @min(a.len, b.len);
+    for (a[0..n], b[0..n]) |ca, cb| {
+        const la = std.ascii.toLower(ca);
+        const lb = std.ascii.toLower(cb);
+        if (la != lb) return if (la < lb) .lt else .gt;
+    }
+    if (a.len != b.len) return if (a.len < b.len) .lt else .gt;
+    return std.mem.order(u8, a, b);
+}
+
 fn cachedLessThan(_: void, lhs: CachedEntry, rhs: CachedEntry) bool {
     if (lhs.kind == .directory and rhs.kind != .directory) return true;
     if (lhs.kind != .directory and rhs.kind == .directory) return false;
-    return std.mem.order(u8, lhs.name, rhs.name) == .lt;
+    return nameOrder(lhs.name, rhs.name) == .lt;
 }
 
 fn freeListing(listing: *CachedListing) void {
@@ -627,8 +686,8 @@ pub fn noteFileModified(path: []const u8) void {
     retireCachedListingAt(idx);
 }
 
-/// Binary search of the file half of a listing (`entries[dir_count..]`, sorted by name — see
-/// `cachedLessThan`). A per-save lookup must not walk a listing that can be hundreds of
+/// Binary search of the file half of a listing (`entries[dir_count..]`, sorted by `nameOrder` —
+/// see `cachedLessThan`; this must use the *same* comparator or the search silently misses). A per-save lookup must not walk a listing that can be hundreds of
 /// thousands of entries long.
 fn listingHasFile(listing: *const CachedListing, name: []const u8) bool {
     const files_only = listing.entries[listing.dir_count..];
@@ -636,7 +695,7 @@ fn listingHasFile(listing: *const CachedListing, name: []const u8) bool {
     var hi: usize = files_only.len;
     while (lo < hi) {
         const mid = lo + (hi - lo) / 2;
-        switch (std.mem.order(u8, files_only[mid].name, name)) {
+        switch (nameOrder(files_only[mid].name, name)) {
             .lt => lo = mid + 1,
             .gt => hi = mid,
             .eq => return true,
@@ -1145,7 +1204,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *wdvui.TreeWidget, u
                     expanded = true;
                 }
 
-                if (new_file_path) |path| {
+                if (newFilePath()) |path| {
                     if (std.fs.path.dirname(path)) |d| {
                         if (std.mem.containsAtLeast(u8, d, 1, abs_path)) {
                             expanded = true;
@@ -1176,13 +1235,18 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *wdvui.TreeWidget, u
 
                 row_y = branch.data().borderRectScale().r.y;
 
-                if (new_file_path) |path| {
+                if (newFilePath()) |path| {
                     if (std.mem.eql(u8, path, abs_path)) {
                         if (!dvui.firstFrame(branch.data().id)) {
                             if ((parent_branch != null and !parent_branch.?.expanding()) or branch.button.data().rect.h > 10.0) {
                                 edit_id = inner_id_extra.*;
                                 selected_id = inner_id_extra.*;
-                                new_file_path = null;
+                                // The dialog that created this file is still shrinking towards its
+                                // own centre; now that the row it produced has a rect, re-aim the
+                                // close at it so the user's eye is carried from the dialog to the
+                                // name they are about to type over.
+                                wdvui.setDialogCloseRectOverride(branch.data().borderRectScale().r);
+                                clearNewFilePath();
                             }
                         }
                     }
@@ -1990,19 +2054,12 @@ pub fn createDirPath(path: []const u8) !void {
     try std.Io.Dir.createDirAbsolute(dvui.io, path, .default_dir);
 }
 
-/// Backing store for `new_file_path` when the tree creates the path itself.
-///
-/// Deliberately *not* `EditorAPI.setExplorerNewFilePath`: that writes fizzy's own statically
-/// linked copy of this module (`Explorer.files`), which is a different global from the one this
-/// draw code reads once workbench is loaded as a dylib. A path produced here therefore has to
-/// be kept here. A fixed buffer rather than an allocation because the consumer only nulls the
-/// pointer, it never frees it.
-var new_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-
 /// "New Folder..." from either context menu (the project row and a folder row run the same
 /// code): create the folder, then hand the tree its path so the row that appears next frame
-/// opens its inline rename editor with the name selected — the same handoff the New File dialog
-/// makes through `new_file_path`. A folder that could not be created focuses nothing.
+/// opens its inline rename editor with the name selected — the same handoff a New Document
+/// dialog makes through `EditorAPI.setExplorerNewFilePath`. Both now land on the shared
+/// `Workbench` instance, so it no longer matters which copy of this module makes the call.
+/// A folder that could not be created focuses nothing.
 pub fn createFolderInteractive(parent: []const u8) void {
     const arena = dvui.currentWindow().arena();
     // "New Folder", then "New Folder 2", "New Folder 3"… — creating a second one must not fail
@@ -2022,7 +2079,9 @@ pub fn createFolderInteractive(parent: []const u8) void {
         dvui.log.err("Failed to create folder: {s}", .{path});
         return;
     };
-    new_file_path = std.fmt.bufPrint(&new_path_buf, "{s}", .{path}) catch null;
+    runtime.workbench().setPendingNewFilePath(path) catch |err| {
+        dvui.log.err("Failed to queue new folder reveal: {any}", .{err});
+    };
 }
 
 /// Remove stale selections whose underlying file no longer exists (e.g. moved by a multi-drag).

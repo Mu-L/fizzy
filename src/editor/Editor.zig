@@ -2850,12 +2850,19 @@ fn fizzyCreateDocument(ctx: *anyopaque, path: []const u8, grid: sdk.EditorAPI.Ne
     return fizzyCtx(ctx).newFile(path, grid);
 }
 fn fizzySetExplorerNewFilePath(ctx: *anyopaque, path: []const u8) anyerror!void {
-    const Files = fizzy.Explorer.files;
-    if (Files.new_file_path) |old| {
-        fizzy.app.allocator.free(old);
-    }
-    Files.new_file_path = try fizzy.app.allocator.dupe(u8, path);
-    _ = ctx;
+    const wb = &fizzyCtx(ctx).workbench;
+    try wb.setPendingNewFilePath(path);
+    // A plugin reaching this has just written `path` with its own save routine, not through
+    // `files.createFilePath`, so nothing has dropped the tree's directory listing cache and that
+    // cache still predates the file. Left stale, the row never appears on the next frame: the
+    // match in `files.zig` never runs, no inline rename opens, and the dialog still closing over
+    // the top of it has no row to fly into. This is the only thing standing between "the file
+    // exists" and "the user can see and rename it".
+    //
+    // Both calls go to the shared `Workbench` instance rather than to `fizzy.Explorer.files`.
+    // That module is linked into fizzy *and* into the workbench dylib, so its globals are two
+    // separate objects and everything written here used to land in the copy that never draws.
+    wb.noteDiskChanged();
 }
 fn fizzyRequestSaveAs(ctx: *anyopaque) void {
     fizzyCtx(ctx).requestSaveAs();
@@ -5460,6 +5467,10 @@ fn processPendingSaveAs(editor: *Editor) void {
         return;
     };
     if (editor.document_watcher) |*w| w.retarget(editor, doc);
+    // The document's path and dirty flag both just changed, part-way through a frame that
+    // several consumers (menu enablement, titlebar) have already drawn with the old values.
+    // Ask for one more frame so the new name lands without waiting for the next input event.
+    dvui.refresh(null, @src(), null);
 
     if (editor.pending_close_file_id) |cid| {
         if (doc.id == cid) {
