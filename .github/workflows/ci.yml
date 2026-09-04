@@ -42,13 +42,18 @@ jobs:
       # directory across runs. Do NOT override those vars: pointing them elsewhere
       # leaves the action's cache empty, so every run re-downloads every dependency
       # from codeload.github.com — which is where `HttpConnectionClosing` comes from.
+      # (Zig 0.16 caches the downloaded *tarballs* under $ZIG_GLOBAL_CACHE_DIR/p and
+      # unpacks them into the project-local zig-pkg/; only the tarballs are cached,
+      # so a cache hit still costs an unpack but no network.)
       - name: Pre-create Zig cache tmp/
         shell: bash
         run: mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp" "$ZIG_LOCAL_CACHE_DIR/tmp"
       # Zig 0.16's HTTP client doesn't retry on `HttpConnectionClosing` from
       # GitHub. Pre-fetch all deps in a retry loop, separate from the build, so
       # the loop only re-runs the network step. After this step `zig build` runs
-      # offline against the populated global cache.
+      # offline against the populated global cache. Note `--fetch=all` is NOT
+      # usable here: it walks lazy deps of deps that this build never reaches
+      # (old-format hashes, freetype's savannah tarball), and fails on them.
       - name: Fetch dependencies (with retries)
         shell: bash
         run: |
