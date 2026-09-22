@@ -551,7 +551,12 @@
       // the file, so it is answered here rather than by making every author publish somewhere
       // else: try the URL as given, and on failure ask fizzy's own origin to fetch it. A host
       // that does send CORS is read directly and never touches the proxy.
-      const pluginProxy = "https://fizzyed.it/dl/";
+      //
+      // On workers.dev rather than `fizzyed.it/dl/` because the zone is not on the Cloudflare
+      // account that deploys the Worker. The hostname is the only difference: the page checks
+      // the sha256 the registry published before it compiles anything, so this is a pipe, never
+      // something trusted. `web/wrangler.toml` has the two lines to flip when the zone moves.
+      const pluginProxy = "https://fizzy-plugin-dl.foxnne.workers.dev/dl/";
       // Set once at startup by the host (`PluginLoader_web.init`): the ABI fingerprint whose
       // catalog shard this build installs from. The proxy checks the URL against that shard.
       let pluginFingerprint = "";

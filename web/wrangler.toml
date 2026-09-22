@@ -2,12 +2,20 @@
 #
 #   npx wrangler deploy --config web/wrangler.toml
 #
-# The route has to be on a zone Cloudflare serves for you — fizzyed.it already is. Nothing else
-# is needed: no KV, no secrets, no build step.
+# Nothing else is needed: no KV, no secrets, no build step.
 name = "fizzy-plugin-dl"
 main = "dl-worker.js"
 compatibility_date = "2026-09-01"
 
-routes = [
-  { pattern = "fizzyed.it/dl/*", zone_name = "fizzyed.it" },
-]
+# Served from `<name>.<subdomain>.workers.dev`, because the `fizzyed.it` zone is not on the
+# account this deploys from — `wrangler deploy` fails the route with "Could not find zone" and
+# uploads the script with nothing pointing at it. The hostname is Cloudflare's rather than ours,
+# which costs nothing here: the page checks the sha256 the registry published before it compiles
+# anything, so the proxy is never trusted either way.
+workers_dev = true
+
+# When the zone does land on this account, delete `workers_dev` above, uncomment this, redeploy,
+# and put `https://fizzyed.it/dl/` back in `pluginProxy` (web/index.html). Nothing else moves.
+# routes = [
+#   { pattern = "fizzyed.it/dl/*", zone_name = "fizzyed.it" },
+# ]

@@ -21,3 +21,6 @@ tools/msvcup-bin/
 tools/msvc-libc*.ini
 .zig-cache/
 .env.local
+
+# wrangler writes its account cache beside the config it is given.
+.wrangler/
