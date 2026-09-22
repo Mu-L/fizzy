@@ -1347,9 +1347,21 @@ pub fn loadWebPlugin(editor: *Editor, id: []const u8, url: []const u8, sha256: [
         // that is an update, not a duplicate: hand the id to the new module (`updateWebPlugin`).
         for (editor.app.loaded_plugin_libs.items) |loaded| {
             if (!std.mem.eql(u8, loaded.plugin_id, id)) continue;
-            if (std.mem.eql(u8, loaded.path, url)) return; // the very same build
+            if (std.mem.eql(u8, loaded.path, url)) {
+                // The very same build: nothing to do, and *saying so matters*. The store marks
+                // an install in flight before calling in here and clears it only on one of
+                // these two reports; a silent return left the card spinning "Installing…"
+                // forever, and every other control on that row (Uninstall included) drew the
+                // same stuck state.
+                PluginStore.webLoadSucceeded(id);
+                return;
+            }
             return editor.updateWebPlugin(id, url, sha256);
         }
+        // Running, but not from a loadable library — a bundled built-in with this id. There is
+        // no build to swap in and no error worth a dialog; report it so the card settles.
+        dvui.log.info("web plugin '{s}': already provided by this build; not loading {s}", .{ id, url });
+        PluginStore.webLoadSucceeded(id);
         return;
     }
     return editor.beginWebPluginLoad(id, url, sha256, false);
@@ -1361,6 +1373,7 @@ pub fn loadWebPlugin(editor: *Editor, id: []const u8, url: []const u8, sha256: [
 fn beginWebPluginLoad(editor: *Editor, id: []const u8, url: []const u8, sha256: []const u8, replace: bool) WebLoadError!void {
     // Two requests for one id before the first lands (the page's remembered list and a
     // `?plugin=` of the same id, say) would register it twice; the second one waits for nothing.
+    // The first one's `arrived` reports for both, so the store's spinner still ends.
     if (web_loads_in_flight.contains(id)) return;
     const gpa = editor.app.gpa;
     try web_loads_in_flight.put(gpa, try gpa.dupe(u8, id), {});

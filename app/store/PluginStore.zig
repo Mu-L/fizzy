@@ -224,11 +224,15 @@ pub fn queueInstall(id: []const u8) void {
     if (comptime builtin.target.cpu.arch == .wasm32) {
         // No plugins directory in a browser: the page fetches and links the side module
         // straight from its release URL, and the app registers it when it lands.
+        // Marked *before* the call: `installFromUrl` can finish inside it (a build already
+        // running under this id reports success straight away), and marking afterwards would
+        // set a flag the report had already cleared — a card spinning with nothing behind it.
+        markWebInFlight(id);
         app.installFromUrl(id, dl.url, dl.sha256) catch |err| {
+            clearWebInFlight(id);
             reportError("could not load '{s}': {s}", .{ id, @errorName(err) });
             return;
         };
-        markWebInFlight(id);
         return;
     }
     startDownload(id, rel, .{ .is_update = false });
@@ -3364,6 +3368,10 @@ fn applySetEnabled(id: []const u8, enabled: bool) void {
 }
 
 fn applyUninstall(id: []const u8) void {
+    // Whatever the state of a web load for this id, the user has just asked for the plugin to
+    // be gone: a spinner left over from it would sit on the card describing an install of
+    // something no longer wanted.
+    clearWebInFlight(id);
     app.uninstall(id, false) catch |err| switch (err) {
         error.DirtyDocuments => reportError("'{s}' has unsaved changes — save or close them first", .{id}),
         else => reportError("'{s}' could not be uninstalled: {s}", .{ id, @errorName(err) }),
