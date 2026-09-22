@@ -2851,9 +2851,12 @@ fn drawNoStoreBuild(entry: StoreEntry, opts: dvui.Options) void {
     var no_build_box = dvui.box(@src(), .{ .dir = .horizontal }, opts.override(.{ .gravity_y = 0.5 }));
     defer no_build_box.deinit();
 
-    // Web has no plugin binaries at all, so the Debug/ReleaseSafe "Needs release" wording
-    // would be a lie — same "No store build" the native ReleaseFast host shows.
-    const optimize_mismatch = (comptime builtin.target.cpu.arch != .wasm32) and !host_optimize_matches_store;
+    // Web included: it once had no plugin binaries at all, which made the "Needs release"
+    // wording a lie there, but a web build installs wasm side modules now and a `ReleaseSafe`
+    // one is out of class exactly like a native `ReleaseSafe` one. Exempting wasm only hid the
+    // reason — a ReleaseSafe web app reported "No store build" against every plugin in a healthy
+    // registry, which reads as the store being empty rather than as this build being unservable.
+    const optimize_mismatch = !host_optimize_matches_store;
     // The store *does* have this host's build — it just needs a newer Fizzy. Nothing about the
     // plugin is wrong, so point at the app update instead of at a missing build.
     const needs_newer_fizzy = !optimize_mismatch and releaseNeedsNewerFizzy(entry);
@@ -2909,10 +2912,14 @@ fn drawNoStoreBuild(entry: StoreEntry, opts: dvui.Options) void {
             @src(),
             .{ .active_rect = no_build_box.data().borderRectScale().r },
             "This Fizzy is a {s} build. Store plugins are published ReleaseFast only, so the " ++
-                "optimize mode does not match even when the SDK version does. Run zig build run -Doptimize=ReleaseFast, or build the plugin from source in {s}. " ++
+                "optimize mode does not match even when the SDK version does. {s}, or build the plugin from source in {s}. " ++
                 "(SDK {d}.{d}.{d} · ABI 0x{x} · {s})",
             .{
                 @tagName(builtin.mode),
+                if (comptime builtin.target.cpu.arch == .wasm32)
+                    "Build the web app with zig build web -Doptimize=ReleaseSmall"
+                else
+                    "Run zig build run -Doptimize=ReleaseFast",
                 @tagName(builtin.mode),
                 version.sdk_version.major,
                 version.sdk_version.minor,
