@@ -1867,6 +1867,36 @@ fn GenericDialogCallback(cb: ?*anyopaque, files: [*c]const [*c]const u8, mode: D
 // touching `dvui.currentWindow()` (TLS-only, frame-only).
 var captured_sdl_window: ?*sdl3.SDL_Window = null;
 
+/// Bring the window forward and make the app active, for a flow that had to leave it: signing
+/// into a cloud provider, or picking a folder, both of which happen in the system browser and
+/// leave fizzy behind whatever the user was sent to. Google (and every other provider worth
+/// naming) refuses OAuth in an embedded webview, so "do it in-app" is not on the table — the
+/// most an app can do is take focus back when the browser is finished with it.
+///
+/// `SDL_RaiseWindow` alone is enough on Windows and most Linux WMs. On macOS raising a window
+/// does not make the *application* active, so the app has to ask as well; the ask is rejected
+/// while another app is genuinely in the foreground for user input, which is the OS protecting
+/// the user and not something to work around.
+pub fn raiseWindow() void {
+    if (captured_sdl_window) |w| _ = sdl3.SDL_RaiseWindow(w);
+    if (builtin.os.tag == .macos) activateApp();
+}
+
+/// macOS only: make fizzy the active application. `activate(ignoringOtherApps:)` is deprecated
+/// on 14+ in favour of `activate`, so try the new selector first and fall back — the old one
+/// still works and is the only one on earlier systems.
+fn activateApp() void {
+    if (builtin.os.tag != .macos) return;
+    const NSApplication = objc.getClass("NSApplication") orelse return;
+    const app = NSApplication.msgSend(objc.Object, "sharedApplication", .{});
+    if (app.value == null) return;
+    if (app.respondsToSelector(objc.sel("activate"))) {
+        app.msgSend(void, "activate", .{});
+    } else {
+        app.msgSend(void, "activateIgnoringOtherApps:", .{@as(u8, 1)});
+    }
+}
+
 fn handleSdlFileEvent(event: ?*sdl3.SDL_Event) void {
     const e = event orelse return;
     if (e.type != sdl3.SDL_EVENT_DROP_FILE) return;

@@ -61,6 +61,10 @@ pub fn isMaximized(_: *dvui.Window) bool {
 
 pub fn setWindowStyle(_: *dvui.Window) void {}
 
+/// Symmetric with the native API: a browser tab cannot take focus for itself, and the OAuth
+/// popup already returns to the page that opened it.
+pub fn raiseWindow() void {}
+
 /// Symmetric with the native API: no window state to restore on web.
 pub fn restoreWindowState(_: *dvui.Window) void {}
 

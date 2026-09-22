@@ -91,6 +91,10 @@ var fizzy_plugin: sdk.Plugin = .{
 
 const fizzy_vtable: sdk.Plugin.VTable = .{};
 
+fn cmdFocusWindow(_: *anyopaque) anyerror!void {
+    fizzy.backend.raiseWindow();
+}
+
 fn editorFromState(state: *anyopaque) *Editor {
     return @ptrCast(@alignCast(state));
 }
