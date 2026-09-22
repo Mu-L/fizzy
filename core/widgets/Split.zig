@@ -223,6 +223,12 @@ pub fn isClosed(id: dvui.Id) bool {
 }
 
 /// Shut it, remembering how big it was so `open` can put it back.
+///
+/// The remembered extent is *retained*: dvui frees a value nothing touched during a frame, and
+/// while the region is shut nothing does — the layout reads `_size` and `_shown` every frame but
+/// has no reason to read `_open`. Without the retain the memory of how wide the explorer was
+/// evaporated a frame after it closed, and reopening fell back to `default_extent`, which is why
+/// it always came back the same width.
 /// Seeds `_shown` from the current extent so `eased` has somewhere to travel
 /// from — the same trick `takeSlideOpen` uses the other way. Without that, a
 /// missing or leftover-zero `_shown` makes the next frame treat target 0 as
@@ -231,6 +237,7 @@ pub fn close(id: dvui.Id) void {
     const cur = sizeOf(id);
     if (cur <= 0) return;
     dvui.dataSet(null, id, "_open", cur);
+    dvui.dataRetain(null, id, "_open", .zero);
     const shown = dvui.dataGet(null, id, "_shown", f32) orelse cur;
     dvui.dataSet(null, id, "_shown", if (shown > 0) shown else cur);
     dvui.dataSet(null, id, "_size", @as(f32, 0));
@@ -1040,4 +1047,28 @@ test "a max below the min does not panic in the clamp" {
     const c: Constraint = .{ .extent = 1000, .base_min = 100, .handles = 10, .others = &.{only} };
     const got = resolve(only, 500, c, .{ .min = 200, .max = 50 });
     try testing.expectApproxEqAbs(@as(f32, 200), got, 0.001);
+}
+
+test "reopening a shut region restores the extent it was shut at" {
+    // The regression: `close` wrote the remembered extent and nothing read it again, so dvui —
+    // which frees any value a frame did not touch — threw it away, and `open` fell back to the
+    // caller's default. Shutting and reopening the explorer always reopened it at one width,
+    // whatever the user had dragged it to.
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 400, .h = 300 } });
+    defer t.deinit();
+
+    try dvui.testing.settle(twoPaneFrame);
+    dvui.dataSet(null, t_target, "_size", @as(f32, 220));
+    _ = try dvui.testing.step(twoPaneFrame);
+    try testing.expectApproxEqAbs(@as(f32, 220), t_size, 1.0);
+
+    close(t_target);
+    // Several frames shut: one is not enough to show it, because the value survives the frame it
+    // was written in.
+    for (0..5) |_| _ = try dvui.testing.step(twoPaneFrame);
+    try testing.expectApproxEqAbs(@as(f32, 0), t_size, 0.5);
+
+    open(t_target, 100);
+    _ = try dvui.testing.step(twoPaneFrame);
+    try testing.expectApproxEqAbs(@as(f32, 220), t_size, 1.0);
 }
