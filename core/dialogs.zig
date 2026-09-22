@@ -113,6 +113,50 @@ pub fn frostPane(id: dvui.Id, rect: dvui.Rect.Physical, corners: dvui.CornerRect
     return true;
 }
 
+// ---- one floating surface, everywhere ---------------------------------------------------------
+//
+// A dialog, the command palette, the account flyout, a menu dropdown and a store card's hover
+// panel are all the same object: something floating over the app, frosted, rounded, shadowed,
+// holding rows that light up under the pointer. They looked like four different objects because
+// each one wrote its own numbers. These are those numbers, in one place, taken from the command
+// palette — the surface the rest are measured against.
+//
+// A surface: `surface_corners` + `surface_padding` + `surfaceShadow()` + `dialogFill()`, frosted
+// with `dialogFrost()`. A row inside it: `row_corners`, `rowHover()`, `rowPress()`.
+
+/// The radius a floating surface is cut with. `all` rather than `round`: it carries the theme's
+/// corner *kind* at this size, so a square-cornered theme gets square surfaces.
+pub const surface_corners: dvui.CornerRect = .all(8);
+/// A row inside one — tighter, so a hovered row reads as sitting *in* the surface.
+pub const row_radius: f32 = 4;
+pub const row_corners: dvui.CornerRect = .all(row_radius);
+/// The gap between a surface's edge and its rows.
+pub const surface_padding: dvui.Rect = .all(6);
+
+/// The drop shadow under a floating surface.
+pub fn surfaceShadow() dvui.Options.BoxShadow {
+    return .{ .color = .black, .fade = 8, .corners = surface_corners, .alpha = 0.25 };
+}
+
+/// The wash under the pointer, and under the palette's selected row — the same colour, so a
+/// keyboard selection and a hover are one idea.
+///
+/// Asked of the theme rather than stated here: dvui derives `fill_hover` from a style's fill
+/// (`Theme.adjustColorForState`, ±10% by `dark`) unless the theme names one, so a theme that
+/// wants a stronger hover says so once and every surface follows — this, the palette, the
+/// flyouts, and the rows a menu draws.
+pub fn rowHover() dvui.Color {
+    return dvui.themeGet().color(row_style, .fill_hover);
+}
+
+/// A row being activated.
+pub fn rowPress() dvui.Color {
+    return dvui.themeGet().color(row_style, .fill_press);
+}
+
+/// The style a row inside a floating surface takes its colours from.
+pub const row_style: dvui.Theme.Style.Name = .control;
+
 /// The fill a dialog paints when there is no frost to composite with: the chrome at the
 /// dialog's opacity, lifted the same amount.
 pub fn dialogFill() dvui.Color {

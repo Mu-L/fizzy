@@ -6,6 +6,7 @@ const Editor = fizzy.Editor;
 const settings = fizzy.settings;
 const builtin = @import("builtin");
 const model = @import("menu_model.zig");
+const widgets = fizzy.core.widgets;
 
 pub var mouse_distance: f32 = std.math.floatMax(f32);
 
@@ -19,15 +20,28 @@ pub fn draw(editor: *Editor) !dvui.App.Result {
     const bg_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .color_fill = .{ .color = dvui.themeGet().color(.control, .fill) } });
     defer bg_box.deinit();
 
-    var m = dvui.menu(@src(), .horizontal, .{});
+    var m = widgets.menu(@src(), .horizontal, .{});
     defer m.deinit();
 
-    const current_highlight_style = dvui.themeGet().highlight;
+    // The menu's own palette, for as long as it draws. Two overrides, both about the same thing:
+    // a menu row should read as "the pointer is here", not as "this is selected".
+    //
+    //   * `highlight.fill` is the accent green, which dvui paints under an open submenu's title.
+    //   * `focus` is that same green, stroked 2px around whichever row has keyboard focus — and a
+    //     menu leaves focus on the row the pointer last crossed, so with a mouse it was a green
+    //     ring hopping down the menu ahead of the hover wash.
+    //
+    // The wash they both become is the one the flyout rows and the command palette use.
+    const prev_highlight = dvui.themeGet().highlight;
+    const prev_focus = dvui.themeGet().focus;
     var theme = dvui.themeGet();
-    theme.highlight.fill = theme.color(.control, .fill_hover);
+    const wash = chrome.rowHover();
+    theme.highlight.fill = wash;
+    theme.focus = wash;
     dvui.themeSet(theme);
     defer {
-        theme.highlight = current_highlight_style;
+        theme.highlight = prev_highlight;
+        theme.focus = prev_focus;
         dvui.themeSet(theme);
     }
 
@@ -41,6 +55,62 @@ pub fn draw(editor: *Editor) !dvui.App.Result {
     }
 
     return .ok;
+}
+
+// ---- chrome: a menu popup is the same surface as a flyout or a dialog ------------------------
+
+/// The one description of a floating surface and its rows (`core.dialogs`): the same fill,
+/// corners, padding, shadow and hover the command palette, the dialogs and the flyouts use.
+const chrome = fizzy.core.dialogs;
+
+/// One menu dropdown, drawn like every other floating surface in fizzy: frosted, rounded,
+/// shadowed, no border — `core.dialogs`' description of a surface, the same one the command
+/// palette, the dialogs and the flyouts are built from.
+///
+/// Through `core.widgets`' menu chain rather than dvui's: a frosted surface has to paint shadow,
+/// then blur, then its own translucent fill, and dvui's floating menu paints its background
+/// inside `init` where nothing outside can get in front of it. See
+/// `core/widgets/menu/FloatingMenu.zig`.
+fn menuPopup(src: std.builtin.SourceLocation, from: dvui.Rect.Natural, id_extra: usize) *widgets.FloatingMenuWidget {
+    return widgets.floatingMenu(src, .{ .from = from, .frost = frostPane() }, .{
+        .id_extra = id_extra,
+        .background = true,
+        .color_fill = .{ .color = chrome.dialogFill() },
+        .border = .all(0),
+        .corners = chrome.surface_corners,
+        .padding = chrome.surface_padding,
+        .box_shadow = chrome.surfaceShadow(),
+    });
+}
+
+/// The blur behind a menu, as `core.dialogs` describes it for every floating surface. Null when
+/// the style has the blur off, which the panel then simply draws without.
+fn frostPane() ?fizzy.core.widgets.BlurBackdrop.Pane {
+    const f = chrome.dialogFrost() orelse return null;
+    return .{ .radius = f.radius, .refresh_ms = f.refresh_ms, .tint = f.tint, .mix = f.mix, .lift = f.lift };
+}
+
+/// A menu row, drawn the way the command palette draws its rows: `row_corners`, and `rowHover`
+/// under the pointer.
+///
+/// The rest fill is that same hover colour at zero alpha, not a transparent background colour.
+/// dvui fades a row by lerping `color_fill` → `color_fill_hover` across all four channels, so
+/// starting from a different hue made the fade travel through it — a row darkening on the way
+/// in, and again on the way out after the pointer had left. From the hover colour itself, the
+/// fade is alpha alone.
+///
+/// It also stops the row the pointer *last* crossed from sitting there filled: dvui paints a
+/// menu row when it is hovered **or focused**, and a menu leaves focus behind it.
+pub fn rowOptions(opts: dvui.Options) dvui.Options {
+    const hover = chrome.rowHover();
+    return opts.override(.{
+        .corners = chrome.row_corners,
+        .color_fill = .{ .color = hover.opacity(0) },
+        .color_fill_hover = .{ .color = hover },
+        // The label does not change colour under the pointer: a row that both lights up and
+        // rewrites its text reads as two things happening.
+        .color_text_hover = opts.color_text orelse .{ .color = dvui.themeGet().color(.window, .text) },
+    });
 }
 
 /// File menu (workbench contribution).
@@ -76,16 +146,7 @@ pub fn drawModelMenu(ctx: ?*anyopaque) anyerror!void {
         .id_extra = extra,
         .color_text = .{ .color = dvui.themeGet().color(.control, .text) },
     })) |r| {
-        var animator = dvui.animate(@src(), .{
-            .kind = .alpha,
-            .duration = 250_000,
-        }, .{
-            .expand = .both,
-            .id_extra = extra,
-        });
-        defer animator.deinit();
-
-        var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{ .id_extra = extra });
+        const fw = menuPopup(@src(), r, extra);
         defer fw.deinit();
 
         for (sub.items, 0..) |item, i| {
@@ -98,7 +159,7 @@ fn drawModelItem(
     editor: *Editor,
     item: model.Item,
     id_extra: usize,
-    fw: *dvui.FloatingMenuWidget,
+    fw: *widgets.FloatingMenuWidget,
 ) !void {
     switch (item) {
         .separator => _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = id_extra }),
@@ -126,7 +187,7 @@ fn drawModelItem(
                 .id_extra = id_extra,
                 .color_text = .{ .color = dvui.themeGet().color(.window, .text) },
             })) |r| {
-                var nested_fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
+                const nested_fw = menuPopup(@src(), r, id_extra);
                 defer nested_fw.deinit();
                 for (nested.items, 0..) |nested_item, j| {
                     try drawModelItem(editor, nested_item, j, nested_fw);
@@ -180,7 +241,7 @@ fn drawRecentFolders(editor: *Editor, id_extra: usize) !void {
         }, .{ .expand = .both });
         defer recents_anim.deinit();
 
-        var recents_fw = dvui.floatingMenu(@src(), .{ .from = recents_item }, .{});
+        const recents_fw = menuPopup(@src(), recents_item, id_extra);
         defer recents_fw.deinit();
 
         var vert_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .none });
@@ -211,8 +272,8 @@ fn drawRecentFolders(editor: *Editor, id_extra: usize) !void {
 /// `treeRowGlyph`-sized slot ahead of the label — reserved even when a particular row has no
 /// icon, so rows with and without one still line up in the same column rather than the label
 /// shifting left to fill the gap.
-pub fn menuItemWithHotkey(src: std.builtin.SourceLocation, label_str: []const u8, icon: ?[]const u8, hotkey: dvui.enums.Keybind, enabled: bool, init_opts: dvui.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
-    var mi = dvui.menuItem(src, init_opts, opts);
+pub fn menuItemWithHotkey(src: std.builtin.SourceLocation, label_str: []const u8, icon: ?[]const u8, hotkey: dvui.enums.Keybind, enabled: bool, init_opts: widgets.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
+    var mi = widgets.menuItem(src, init_opts, rowOptions(opts));
 
     var ret: ?dvui.Rect.Natural = null;
     if (enabled) {
@@ -235,8 +296,8 @@ pub fn menuItemWithHotkey(src: std.builtin.SourceLocation, label_str: []const u8
     return ret;
 }
 
-pub fn menuItem(src: std.builtin.SourceLocation, label_str: []const u8, init_opts: dvui.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
-    var mi = dvui.menuItem(src, init_opts, opts);
+pub fn menuItem(src: std.builtin.SourceLocation, label_str: []const u8, init_opts: widgets.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
+    var mi = widgets.menuItem(src, init_opts, rowOptions(opts));
 
     var ret: ?dvui.Rect.Natural = null;
     if (mi.activeRect()) |r| {
@@ -267,8 +328,8 @@ pub fn menuItem(src: std.builtin.SourceLocation, label_str: []const u8, init_opt
     return ret;
 }
 
-pub fn menuItemWithChevron(src: std.builtin.SourceLocation, label_str: []const u8, init_opts: dvui.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
-    var mi = dvui.menuItem(src, init_opts, opts);
+pub fn menuItemWithChevron(src: std.builtin.SourceLocation, label_str: []const u8, init_opts: widgets.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
+    var mi = widgets.menuItem(src, init_opts, rowOptions(opts));
 
     var ret: ?dvui.Rect.Natural = null;
     if (mi.activeRect()) |r| {
