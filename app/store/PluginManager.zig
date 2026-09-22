@@ -97,10 +97,10 @@ pub const VTable = struct {
     /// The web's install: fetch and link a plugin's wasm side module straight from its release
     /// URL (there is no plugins directory to download into). Null for an app that does not
     /// load web plugins.
-    installFromUrl: ?*const fn (ctx: *anyopaque, id: []const u8, url: []const u8) anyerror!void = null,
+    installFromUrl: ?*const fn (ctx: *anyopaque, id: []const u8, url: []const u8, sha256: []const u8) anyerror!void = null,
     /// The web's update: link the build at `url` alongside the running one and hand the id over,
     /// within the session. Null for an app that does not load web plugins.
-    updateFromUrl: ?*const fn (ctx: *anyopaque, id: []const u8, url: []const u8) anyerror!void = null,
+    updateFromUrl: ?*const fn (ctx: *anyopaque, id: []const u8, url: []const u8, sha256: []const u8) anyerror!void = null,
     update: *const fn (ctx: *anyopaque, id: []const u8, force: bool) anyerror!void,
     uninstall: *const fn (ctx: *anyopaque, id: []const u8, force: bool) anyerror!void,
     setEnabled: *const fn (ctx: *anyopaque, id: []const u8, enabled: bool, force: bool) anyerror!void,
@@ -147,13 +147,16 @@ pub fn builtinManifest(self: PluginManager, id: []const u8) ?sdk.Manifest {
 pub fn install(self: PluginManager, id: []const u8) anyerror!void {
     return self.vtable.install(self.ctx, id);
 }
-pub fn installFromUrl(self: PluginManager, id: []const u8, url: []const u8) anyerror!void {
+/// `sha256` is the hash the registry published for this download; the page checks the bytes
+/// against it before anything is linked. Empty means "unverified", which a local `?plugin=`
+/// load is and a store install never is.
+pub fn installFromUrl(self: PluginManager, id: []const u8, url: []const u8, sha256: []const u8) anyerror!void {
     const f = self.vtable.installFromUrl orelse return error.Unsupported;
-    return f(self.ctx, id, url);
+    return f(self.ctx, id, url, sha256);
 }
-pub fn updateFromUrl(self: PluginManager, id: []const u8, url: []const u8) anyerror!void {
+pub fn updateFromUrl(self: PluginManager, id: []const u8, url: []const u8, sha256: []const u8) anyerror!void {
     const f = self.vtable.updateFromUrl orelse return error.Unsupported;
-    return f(self.ctx, id, url);
+    return f(self.ctx, id, url, sha256);
 }
 pub fn update(self: PluginManager, id: []const u8, force: bool) anyerror!void {
     return self.vtable.update(self.ctx, id, force);

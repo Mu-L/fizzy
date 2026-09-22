@@ -1,0 +1,13 @@
+# Deploy fizzy's plugin download proxy (see `dl-worker.js` for what it is and why).
+#
+#   npx wrangler deploy --config web/wrangler.toml
+#
+# The route has to be on a zone Cloudflare serves for you — fizzyed.it already is. Nothing else
+# is needed: no KV, no secrets, no build step.
+name = "fizzy-plugin-dl"
+main = "dl-worker.js"
+compatibility_date = "2026-09-01"
+
+routes = [
+  { pattern = "fizzyed.it/dl/*", zone_name = "fizzyed.it" },
+]

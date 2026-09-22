@@ -224,7 +224,7 @@ pub fn queueInstall(id: []const u8) void {
     if (comptime builtin.target.cpu.arch == .wasm32) {
         // No plugins directory in a browser: the page fetches and links the side module
         // straight from its release URL, and the app registers it when it lands.
-        app.installFromUrl(id, dl.url) catch |err| {
+        app.installFromUrl(id, dl.url, dl.sha256) catch |err| {
             reportError("could not load '{s}': {s}", .{ id, @errorName(err) });
             return;
         };
@@ -999,8 +999,8 @@ pub fn webLoadFailed(id: []const u8) void {
 /// The web's update: the new build is fetched and checked while the running one keeps working,
 /// and only takes the id over once it has passed (`Editor.updateWebPlugin`). The old module
 /// stays linked in the page — nothing can unlink it — but it owns nothing after the swap.
-fn applyWebUpdate(id: []const u8, url: []const u8) void {
-    app.updateFromUrl(id, url) catch |err| {
+fn applyWebUpdate(id: []const u8, url: []const u8, sha256: []const u8) void {
+    app.updateFromUrl(id, url, sha256) catch |err| {
         reportError("could not update '{s}': {s}", .{ id, @errorName(err) });
         if (pendingRowFor(id)) |row| row.failed = true;
         return;
@@ -1017,7 +1017,7 @@ fn applyWebUpdate(id: []const u8, url: []const u8) void {
 pub fn applyPendingUpdate(id: []const u8) void {
     const row = pendingRowFor(id) orelse return;
     if (comptime builtin.target.cpu.arch == .wasm32) {
-        applyWebUpdate(row.id, row.url);
+        applyWebUpdate(row.id, row.url, row.sha256);
         return;
     }
     // Whether this is an unload-and-reload or a fresh install is decided by what is *running*
@@ -2988,7 +2988,7 @@ fn updateRelease(entry: StoreEntry) ?store.ShardRelease {
 
 /// Right-justified controls whose shape depends on install state (see plan Phase 1R-c):
 ///   * available in store → a single install button (down-to-line arrow);
-///   * installed → an Enabled checkbox + a trash uninstall button;
+///   * installed → an Enabled checkbox + an Uninstall button;
 ///   * protected bundled fallback (workbench/text/markdown) → no controls;
 ///   * bundled built-in → not store-manageable (no uninstall).
 fn drawCardControls(entry: StoreEntry) void {
@@ -3001,12 +3001,12 @@ fn drawCardControls(entry: StoreEntry) void {
     // An in-flight / failed install job preempts the normal controls.
     if (jobs.get(entry.id)) |job| switch (@as(JobStatus, @enumFromInt(job.status.load(.acquire)))) {
         .downloading => {
-            dvui.labelNoFmt(@src(), if (job.is_update) "Updating…" else "Installing…", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = muted }, .font = dvui.Font.theme(.mono) });
+            drawInstalling(if (job.is_update) "Updating…" else "Installing…", muted);
             return;
         },
         .failed => {
             if (selectedRelease(entry)) |rel| {
-                if (dvui.buttonIcon(@src(), "Retry", icons.tvg.lucide.@"rotate-ccw", .{}, .{ .stroke_color = .{ .color = theme.color(.err, .text) } }, .{ .gravity_y = 0.5 }))
+                if (dvui.button(@src(), "Retry", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = theme.color(.err, .text) } }))
                     startDownload(entry.id, rel, .{ .is_update = job.is_update });
             }
             return;
@@ -3062,7 +3062,7 @@ fn drawCardControls(entry: StoreEntry) void {
                 if (updateRelease(entry)) |rel| {
                     if (rel.downloadFor(compat.hostKey())) |dl| {
                         if (dvui.button(@src(), "Update", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
-                            applyWebUpdate(entry.id, dl.url);
+                            applyWebUpdate(entry.id, dl.url, dl.sha256);
                     }
                 }
             } else if (updateRelease(entry)) |rel| {
@@ -3097,15 +3097,21 @@ fn drawCardControls(entry: StoreEntry) void {
                 drawNoStoreBuild(entry, .{ .margin = .{ .x = 4 } });
             }
         }
-        if (dvui.buttonIcon(@src(), "Uninstall", icons.tvg.lucide.@"trash-2", .{}, .{ .stroke_color = .{ .color = theme.color(.err, .text) } }, .{ .gravity_y = 0.5 }))
+        // Named, like every other action on this row. A lone trash can asks the user to
+        // recognise a glyph for the one control here that destroys something.
+        if (dvui.button(@src(), "Uninstall", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = theme.color(.err, .text) } }))
             queueUninstall(entry.id);
         return;
     }
 
     // Available in the store but not installed.
-    if (selectedRelease(entry)) |rel| {
-        if (dvui.buttonIcon(@src(), "Install", icons.tvg.lucide.@"arrow-down-to-line", .{}, .{ .stroke_color = .{ .color = theme.color(.control, .text) } }, .{ .gravity_y = 0.5 }))
-            startDownload(entry.id, rel, .{ .is_update = false });
+    if (isInstalling(entry.id)) {
+        drawInstalling("Installing…", theme.color(.window, .text).opacity(0.7));
+        return;
+    }
+    if (selectedRelease(entry) != null) {
+        if (dvui.button(@src(), "Install", .{}, .{ .gravity_y = 0.5 }))
+            queueInstall(entry.id);
         return;
     }
 
@@ -3134,12 +3140,12 @@ fn drawStoreCardControls(entry: StoreEntry) void {
     // An in-flight / failed install job preempts the normal controls.
     if (jobs.get(entry.id)) |job| switch (@as(JobStatus, @enumFromInt(job.status.load(.acquire)))) {
         .downloading => {
-            dvui.labelNoFmt(@src(), if (job.is_update) "Updating…" else "Installing…", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = muted }, .font = dvui.Font.theme(.mono) });
+            drawInstalling(if (job.is_update) "Updating…" else "Installing…", muted);
             return;
         },
         .failed => {
             if (selectedRelease(entry)) |rel| {
-                if (dvui.buttonIcon(@src(), "Retry", icons.tvg.lucide.@"rotate-ccw", .{}, .{ .stroke_color = .{ .color = theme.color(.err, .text) } }, .{ .gravity_y = 0.5 }))
+                if (dvui.button(@src(), "Retry", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = theme.color(.err, .text) } }))
                     startDownload(entry.id, rel, .{ .is_update = job.is_update });
             }
             return;
@@ -3147,15 +3153,44 @@ fn drawStoreCardControls(entry: StoreEntry) void {
         .downloaded => {}, // about to complete in tick(); fall through
     };
 
-    if (selectedRelease(entry)) |rel| {
-        if (dvui.buttonIcon(@src(), "Install", icons.tvg.lucide.@"arrow-down-to-line", .{}, .{ .stroke_color = .{ .color = theme.color(.control, .text) } }, .{ .gravity_y = 0.5 }))
-            startDownload(entry.id, rel, .{ .is_update = false });
+    // The web has no download queue — its install is the page fetching and linking a module
+    // (`queueInstall` → `installFromUrl`) — so the in-flight state lives in `web_in_flight`
+    // rather than in `jobs`, and asking `isInstalling` is what covers both. Without this the
+    // button simply sat there during a web install, which reads as a button that does nothing.
+    if (isInstalling(entry.id)) {
+        drawInstalling("Installing…", muted);
+        return;
+    }
+
+    if (selectedRelease(entry) != null) {
+        // A word, not an arrow: this is the one control on the card that commits to something,
+        // and "Install" is the only label it could carry. (The icon it replaced was a
+        // down-to-line arrow, which read as "download" — a file landing somewhere — when what
+        // happens is a plugin arriving in the app.) `queueInstall` rather than `startDownload`
+        // so the web takes its own path, which has no download queue at all.
+        if (dvui.button(@src(), "Install", .{}, .{ .gravity_y = 0.5 }))
+            queueInstall(entry.id);
         return;
     }
 
     // Registry row with no host-compatible release: the *store* hasn't published a build for
     // this exact Fizzy version/arch yet.
     drawNoStoreBuild(entry, .{});
+}
+
+/// A spinner and a word, for a card whose plugin is on its way in.
+fn drawInstalling(label: []const u8, color: dvui.Color) void {
+    core.dialogs.bubbleSpinner(@src(), .{
+        .min_size_content = .{ .w = 14, .h = 14 },
+        .gravity_y = 0.5,
+        .padding = .{ .w = 6 },
+        .color_text = .{ .color = color },
+    }, .{});
+    dvui.labelNoFmt(@src(), label, .{}, .{
+        .gravity_y = 0.5,
+        .color_text = .{ .color = color },
+        .font = dvui.Font.theme(.mono),
+    });
 }
 
 /// A repo URL plus an optional path within it to look under for `README.md` / `ICON.png`.

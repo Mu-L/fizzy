@@ -331,13 +331,14 @@
           },
           // Load a plugin built for the web (see `loadPlugin` below) and report back through
           // `FizzyWebPluginReady` / `FizzyWebPluginFailed` on the host.
-          fizzy_web_plugin_load(req, idPtr, idLen, urlPtr, urlLen) {
+          fizzy_web_plugin_load(req, idPtr, idLen, urlPtr, urlLen, shaPtr, shaLen) {
             const inst = wasmInstance;
             if (!inst) return;
             const mem = wasmInstance.exports.memory.buffer;
             const id = utf8.decode(new Uint8Array(mem, idPtr, idLen));
             const url = utf8.decode(new Uint8Array(mem, urlPtr, urlLen));
-            loadPlugin(req, url, id).then(() => {
+            const sha256 = shaLen ? utf8.decode(new Uint8Array(mem, shaPtr, shaLen)) : "";
+            loadPlugin(req, url, id, sha256).then(() => {
               if (dvuiApp) dvuiApp.requestRender();
             }).catch((err) => {
               console.error("fizzy: plugin load failed:", url, err);
@@ -369,6 +370,10 @@
           // What the page remembers for an id, so the host can load it again after a disable
           // without a round trip through the store. Same copy-into-buffer shape as the storage
           // shims: returns the length needed, or `max` when there is nothing.
+          // Which catalog shard this build installs from, for the download proxy's allowlist.
+          fizzy_web_plugin_fingerprint(fpPtr, fpLen) {
+            pluginFingerprint = utf8.decode(new Uint8Array(wasmInstance.exports.memory.buffer, fpPtr, fpLen));
+          },
           fizzy_web_plugin_remembered_url(idPtr, idLen, bufPtr, bufLen) {
             const mem = wasmInstance.exports.memory.buffer;
             const id = utf8.decode(new Uint8Array(mem, idPtr, idLen));
@@ -539,9 +544,50 @@
         return needs;
       }
 
-      async function loadPlugin(req, url, id) {
+      // Where a plugin's bytes come from when its own host will not let a browser have them.
+      //
+      // A release asset — the way every plugin publishes — carries no `access-control-allow-origin`,
+      // so `fetch()` fails on it before a byte moves. That is a browser rule, not a property of
+      // the file, so it is answered here rather than by making every author publish somewhere
+      // else: try the URL as given, and on failure ask fizzy's own origin to fetch it. A host
+      // that does send CORS is read directly and never touches the proxy.
+      const pluginProxy = "https://fizzyed.it/dl/";
+      // Set once at startup by the host (`PluginLoader_web.init`): the ABI fingerprint whose
+      // catalog shard this build installs from. The proxy checks the URL against that shard.
+      let pluginFingerprint = "";
+
+      async function fetchPluginBytes(url) {
+        try {
+          const direct = await fetch(url, { cache: "no-store" });
+          if (direct.ok) return await direct.arrayBuffer();
+          // A real 404 is worth reporting as itself; anything else is worth a second try.
+          if (direct.status === 404) throw new Error("not found: " + url);
+        } catch (err) {
+          if (String(err).includes("not found")) throw err;
+        }
+        if (!pluginFingerprint) throw new Error("cannot reach " + url + " and no catalog shard to ask the proxy for");
+        const viaProxy = await fetch(pluginProxy + pluginFingerprint + "/" + encodeURIComponent(url), { cache: "no-store" });
+        if (!viaProxy.ok) throw new Error("could not fetch " + url + " (proxy said " + viaProxy.status + ")");
+        return await viaProxy.arrayBuffer();
+      }
+
+      // Lowercase hex of the bytes' SHA-256, for comparing against what the registry published.
+      async function sha256Hex(bytes) {
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+      }
+
+      async function loadPlugin(req, url, id, sha256) {
         const host = wasmInstance;
-        const bytes = await (await fetch(url, { cache: "no-store" })).arrayBuffer();
+        const bytes = await fetchPluginBytes(url);
+        // The check the desktop downloader has always done. Before `compile`, so a tampered or
+        // truncated module is never handed to the engine, let alone registered.
+        if (sha256) {
+          const got = await sha256Hex(bytes);
+          if (got !== sha256.toLowerCase()) {
+            throw new Error("sha256 mismatch for " + id + ": expected " + sha256 + ", got " + got);
+          }
+        }
         const module = await WebAssembly.compile(bytes);
         const needs = readDylinkNeeds(module);
         const memoryBase = host.exports.FizzyWebPluginAlloc(needs.memorySize, 1 << needs.memoryAlign);

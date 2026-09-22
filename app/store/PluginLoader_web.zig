@@ -100,10 +100,11 @@ pub fn pluginExtension() []const u8 {
 // ---- the asynchronous half ------------------------------------------------------------------
 
 const wasm = struct {
-    extern "fizzy" fn fizzy_web_plugin_load(req: u32, id_ptr: [*]const u8, id_len: usize, url_ptr: [*]const u8, url_len: usize) void;
+    extern "fizzy" fn fizzy_web_plugin_load(req: u32, id_ptr: [*]const u8, id_len: usize, url_ptr: [*]const u8, url_len: usize, sha_ptr: [*]const u8, sha_len: usize) void;
     extern "fizzy" fn fizzy_web_plugin_forget(id_ptr: [*]const u8, id_len: usize) void;
     extern "fizzy" fn fizzy_web_plugin_remember(id_ptr: [*]const u8, id_len: usize, url_ptr: [*]const u8, url_len: usize) void;
     extern "fizzy" fn fizzy_web_plugin_remembered_url(id_ptr: [*]const u8, id_len: usize, buf: [*]u8, buf_len: usize) usize;
+    extern "fizzy" fn fizzy_web_plugin_fingerprint(fp_ptr: [*]const u8, fp_len: usize) void;
 };
 
 /// The URL the page has for `id`, copied into `buf`, or null when it remembers none or the URL
@@ -152,18 +153,31 @@ var next_req: u32 = 1;
 /// ask for anything.
 pub fn init(gpa: std.mem.Allocator) void {
     pending_gpa = gpa;
+    // Tell the page which catalog shard this build installs from. It needs it to ask fizzy's
+    // download proxy for a plugin whose own host refuses a browser (`web/dl-worker.js`): the
+    // proxy will only serve a URL that shard actually publishes, so the fingerprint is what
+    // makes "anything the registry offers this build" an exact allowlist rather than a
+    // list of hosts to keep adding to.
+    var buf: [32]u8 = undefined;
+    const fp = std.fmt.bufPrint(&buf, "0x{x}", .{dylib_api.abi_fingerprint}) catch return;
+    wasm.fizzy_web_plugin_fingerprint(fp.ptr, fp.len);
 }
 
 /// Ask the page to fetch and link `url`. `cb` is called from `pump` when it has, with the entry
 /// points or null. `id` is the plugin this is meant to be: the page remembers a linked plugin
 /// under it, so that what comes back next visit is keyed by the plugin's real id rather than by
 /// whatever its file happens to be called.
-pub fn begin(gpa: std.mem.Allocator, id: []const u8, url: []const u8, cb: ArrivedFn, ctx: ?*anyopaque) error{OutOfMemory}!u32 {
+///
+/// `sha256` is the hash the registry published for this download, as lowercase hex. The page
+/// checks the bytes against it before compiling anything, and refuses the module on a mismatch —
+/// the check the desktop downloader has always done, which a web install skipped entirely. Empty
+/// skips it, which is right for a file served beside the app and wrong for anything else.
+pub fn begin(gpa: std.mem.Allocator, id: []const u8, url: []const u8, sha256: []const u8, cb: ArrivedFn, ctx: ?*anyopaque) error{OutOfMemory}!u32 {
     pending_gpa = gpa;
     const req = next_req;
     next_req += 1;
     try pending.append(gpa, .{ .req = req, .cb = cb, .ctx = ctx });
-    wasm.fizzy_web_plugin_load(req, id.ptr, id.len, url.ptr, url.len);
+    wasm.fizzy_web_plugin_load(req, id.ptr, id.len, url.ptr, url.len, sha256.ptr, sha256.len);
     return req;
 }
 

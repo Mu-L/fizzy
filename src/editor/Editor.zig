@@ -1340,7 +1340,7 @@ pub const WebLoadError = UnloadError || error{ OutOfMemory, NotUnloadable };
 /// Web: fetch and link a plugin built as a wasm side module from `url`, then register it
 /// exactly as `loadUserPluginById` would — on the frame the page reports it linked. `id` is
 /// what the plugin must declare. The URL is kept for the loaded-libs list.
-pub fn loadWebPlugin(editor: *Editor, id: []const u8, url: []const u8) WebLoadError!void {
+pub fn loadWebPlugin(editor: *Editor, id: []const u8, url: []const u8, sha256: []const u8) WebLoadError!void {
     if (comptime builtin.target.cpu.arch != .wasm32) return error.NotUnloadable;
     if (editor.app.host.pluginById(id) != null) {
         // Already running. Asked for from somewhere else — a different build of the same id —
@@ -1348,17 +1348,17 @@ pub fn loadWebPlugin(editor: *Editor, id: []const u8, url: []const u8) WebLoadEr
         for (editor.app.loaded_plugin_libs.items) |loaded| {
             if (!std.mem.eql(u8, loaded.plugin_id, id)) continue;
             if (std.mem.eql(u8, loaded.path, url)) return; // the very same build
-            return editor.updateWebPlugin(id, url);
+            return editor.updateWebPlugin(id, url, sha256);
         }
         return;
     }
-    return editor.beginWebPluginLoad(id, url, false);
+    return editor.beginWebPluginLoad(id, url, sha256, false);
 }
 
 /// The half of `loadWebPlugin` after the "is it already running" question, so an update can ask
 /// for a build of an id that *is* running. `replace` says the plugin under this id is to be
 /// handed over once the new module has passed every check (`WebPluginRequest.arrived`).
-fn beginWebPluginLoad(editor: *Editor, id: []const u8, url: []const u8, replace: bool) WebLoadError!void {
+fn beginWebPluginLoad(editor: *Editor, id: []const u8, url: []const u8, sha256: []const u8, replace: bool) WebLoadError!void {
     // Two requests for one id before the first lands (the page's remembered list and a
     // `?plugin=` of the same id, say) would register it twice; the second one waits for nothing.
     if (web_loads_in_flight.contains(id)) return;
@@ -1367,7 +1367,7 @@ fn beginWebPluginLoad(editor: *Editor, id: []const u8, url: []const u8, replace:
     const req = try gpa.create(WebPluginRequest);
     errdefer gpa.destroy(req);
     req.* = .{ .editor = editor, .id = try gpa.dupe(u8, id), .url = try gpa.dupe(u8, url), .replace = replace };
-    _ = try PluginLoader.begin(gpa, req.id, req.url, WebPluginRequest.arrived, req);
+    _ = try PluginLoader.begin(gpa, req.id, req.url, sha256, WebPluginRequest.arrived, req);
 }
 
 const WebPluginRequest = struct {
@@ -1466,7 +1466,9 @@ export fn FizzyWebPluginRequest(id_ptr: [*]const u8, id_len: usize, url_ptr: [*]
     if (editor.app.isPluginDisabled(id)) return;
     var buf: [512]u8 = undefined;
     const url = if (url_len != 0) url_ptr[0..url_len] else std.fmt.bufPrint(&buf, "plugins/{s}/{s}.wasm", .{ id, id }) catch return;
-    editor.loadWebPlugin(id, url) catch |err| dvui.log.err("web plugin '{s}': {s}", .{ id, @errorName(err) });
+    // No hash: this is either a local `plugins/<id>/<id>.wasm` beside the app or a URL the page
+    // remembered from an install it already verified. A store install always carries one.
+    editor.loadWebPlugin(id, url, "") catch |err| dvui.log.err("web plugin '{s}': {s}", .{ id, @errorName(err) });
 }
 /// The page opens a file it fetched (`?open=<url>` — a zip vault for a demo, say) exactly as
 /// an upload: by name and bytes, through the plugin that owns the extension.
@@ -1633,7 +1635,7 @@ pub fn setPluginEnabled(editor: *Editor, id: []const u8, enabled: bool, force: b
                 // path, as does one the user turns back on after a reload.
                 var buf: [1024]u8 = undefined;
                 const url = PluginLoader.rememberedUrl(id, &buf) orelse return error.NotUnloadable;
-                try editor.loadWebPlugin(id, url);
+                try editor.loadWebPlugin(id, url, "");
             } else {
                 try editor.loadUserPluginById(id);
             }
@@ -1667,7 +1669,7 @@ pub fn setPluginEnabled(editor: *Editor, id: []const u8, enabled: bool, force: b
 /// the user reload. The new URL is remembered only once the new module has actually registered
 /// (`WebPluginRequest.arrived`), so a build this host refuses leaves the next visit pointed at
 /// the one that worked.
-pub fn updateWebPlugin(editor: *Editor, id: []const u8, url: []const u8) WebLoadError!void {
+pub fn updateWebPlugin(editor: *Editor, id: []const u8, url: []const u8, sha256: []const u8) WebLoadError!void {
     if (comptime builtin.target.cpu.arch != .wasm32) return error.NotUnloadable;
     if (editor.app.host.pluginById(id)) |plugin| {
         // Asked here, before anything is fetched, so the answer is a refusal the store can show
@@ -1675,7 +1677,7 @@ pub fn updateWebPlugin(editor: *Editor, id: []const u8, url: []const u8) WebLoad
         // already gone. Asked again at the swap, where the documents are actually closed.
         if (editor.app.pluginHasDirtyDocs(plugin)) return error.DirtyDocuments;
     }
-    try editor.beginWebPluginLoad(id, url, true);
+    try editor.beginWebPluginLoad(id, url, sha256, true);
 }
 
 pub fn updatePlugin(editor: *Editor, id: []const u8, force: bool) !void {
@@ -5415,13 +5417,13 @@ const plugin_manager_vtable: PluginManager.VTable = .{
         }
     }.f,
     .installFromUrl = struct {
-        fn f(ctx: *anyopaque, id: []const u8, url: []const u8) anyerror!void {
-            return pmSelf(ctx).loadWebPlugin(id, url);
+        fn f(ctx: *anyopaque, id: []const u8, url: []const u8, sha256: []const u8) anyerror!void {
+            return pmSelf(ctx).loadWebPlugin(id, url, sha256);
         }
     }.f,
     .updateFromUrl = struct {
-        fn f(ctx: *anyopaque, id: []const u8, url: []const u8) anyerror!void {
-            return pmSelf(ctx).updateWebPlugin(id, url);
+        fn f(ctx: *anyopaque, id: []const u8, url: []const u8, sha256: []const u8) anyerror!void {
+            return pmSelf(ctx).updateWebPlugin(id, url, sha256);
         }
     }.f,
     .update = struct {
