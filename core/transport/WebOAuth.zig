@@ -71,7 +71,8 @@ pub fn pump() void {
     p.cb(p.ctx, p.result);
 }
 
-/// `<origin>/oauth-callback.html`. Caller owns.
+/// `oauth-callback.html` beside the app page — *not* at the origin root, which is wrong
+/// wherever the app is served from a subdirectory. Caller owns.
 pub fn callbackUrl(allocator: std.mem.Allocator) ![]u8 {
     var buf: [512]u8 = undefined;
     const n = wasm.fizzy_web_oauth_callback_url(&buf, buf.len);

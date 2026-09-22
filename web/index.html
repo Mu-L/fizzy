@@ -399,7 +399,12 @@
           fizzy_web_oauth_callback_url(bufPtr, bufLen) {
             const inst = target();
             if (!inst) return 0;
-            const bytes = utf8encode(location.origin + "/oauth-callback.html");
+            // Resolved against the document, not the origin: the app is not always at the
+            // root — fizzyed.it serves it from /app/ — and an origin-rooted guess names a page
+            // that is not there, which Google rejects as redirect_uri_mismatch before anything
+            // else happens. `pageUrl` takes this URL's directory for plugin pages too, so both
+            // follow wherever the app is deployed.
+            const bytes = utf8encode(new URL("oauth-callback.html", document.baseURI).href);
             if (bytes.length <= bufLen) new Uint8Array(wasmInstance.exports.memory.buffer, bufPtr, bytes.length).set(bytes);
             return bytes.length;
           },
