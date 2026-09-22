@@ -13,7 +13,16 @@ on:
   push:
     branches: [main]
     paths:
+      # Everything the web app is built from, not just fizzy's own source: `app/`, `core/`,
+      # `sdk/` and the bundled `plugins/` all compile into it, and a change confined to one of
+      # them used to leave fizzyed.it/app serving the previous build with no sign anything was
+      # missing.
       - "src/**"
+      - "app/**"
+      - "core/**"
+      - "sdk/**"
+      - "plugins/**"
+      - "build/**"
       - "build.zig"
       - "build.zig.zon"
       - "web/**"
