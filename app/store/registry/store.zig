@@ -248,9 +248,17 @@ pub const Catalog = struct {
     }
 };
 
+/// Counted, not clocked. `Clock.boot` reads zero on the web, so every "refresh" built the
+/// identical `?_=0` URL — which the in-page fetch cache (`web_fetch`, keyed by URL) then
+/// answered from memory forever. Refresh appeared to do nothing until the page was reloaded,
+/// which was the only thing that cleared that map. The clock is still mixed in so two runs of
+/// the app do not start from the same number on a platform where it works.
+var bust_counter: u64 = 0;
+
 fn cacheBust(allocator: std.mem.Allocator, io: std.Io, url: []const u8) ?[]u8 {
     const sep: u8 = if (std.mem.indexOfScalar(u8, url, '?') != null) '&' else '?';
-    const nonce = std.Io.Clock.boot.now(io).nanoseconds;
+    bust_counter += 1;
+    const nonce = @as(u64, @truncate(@as(u96, @bitCast(std.Io.Clock.boot.now(io).nanoseconds)))) +% bust_counter;
     return std.fmt.allocPrint(allocator, "{s}{c}_={d}", .{ url, sep, nonce }) catch null;
 }
 
