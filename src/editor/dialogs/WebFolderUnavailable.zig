@@ -6,7 +6,7 @@ const fizzy = @import("../../fizzy.zig");
 
 pub fn request() void {
     if (active(dvui.currentWindow())) return;
-    var mutex = fizzy.dvui.dialog(@src(), .{
+    var mutex = fizzy.core.dialogs.dialog(@src(), .{
         .displayFn = dialog,
         .callafterFn = callAfter,
         .title = "Open Folder",
@@ -23,7 +23,7 @@ pub fn request() void {
 pub fn active(win: *dvui.Window) bool {
     var it = win.dialogs.iterator(null);
     while (it.next()) |d| {
-        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.dvui.DisplayFn) orelse continue;
+        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.core.dialogs.DisplayFn) orelse continue;
         if (df == dialog) return true;
     }
     return false;
@@ -58,14 +58,14 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
         @src(),
         "The file explorer is not available in the browser.\n\nUse Open Files to load files from your device.",
         .{},
-        .{ .color_text = dvui.themeGet().color(.window, .text), .margin = .{ .h = 12 } },
+        .{ .color_text = .{ .color = dvui.themeGet().color(.window, .text) }, .margin = .{ .h = 12 } },
     );
 
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
     defer row.deinit();
 
     if (dialogButton(@src(), "Cancel")) {
-        fizzy.dvui.closeFloatingDialogAnchored();
+        fizzy.core.dialogs.closeFloatingDialogAnchored();
     }
 
     return true;

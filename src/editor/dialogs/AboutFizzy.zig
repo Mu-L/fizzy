@@ -3,8 +3,8 @@ const builtin = @import("builtin");
 const fizzy = @import("../../fizzy.zig");
 const dvui = @import("dvui");
 const build_opts = @import("build_opts");
-const auto_update = @import("../../backend/auto_update.zig");
-const update_notify = @import("../../backend/update_notify.zig");
+const auto_update = @import("app").update.auto_update;
+const update_notify = @import("app").update.update_notify;
 const assets = @import("assets");
 
 fn dialogButton(src: std.builtin.SourceLocation, label_text: []const u8, style: dvui.Theme.Style.Name, tab_idx: u16, id_extra: usize) bool {
@@ -33,7 +33,7 @@ fn dialogButton(src: std.builtin.SourceLocation, label_text: []const u8, style: 
 pub fn active(win: *dvui.Window) bool {
     var it = win.dialogs.iterator(null);
     while (it.next()) |d| {
-        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.dvui.DisplayFn) orelse continue;
+        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.core.dialogs.DisplayFn) orelse continue;
         if (df == dialog) return true;
     }
     return false;
@@ -43,7 +43,7 @@ pub fn request() void {
     if (active(dvui.currentWindow())) return;
     status_line = " ";
     update_ready_after_check = false;
-    var mutex = fizzy.dvui.dialog(@src(), .{
+    var mutex = fizzy.core.dialogs.dialog(@src(), .{
         .displayFn = dialog,
         .callafterFn = callAfter,
         .title = "About Fizzy",
@@ -170,7 +170,7 @@ fn consumeCheckResult() void {
         .failed, .oom, .spawn_failed, .none => false,
     };
     if (success) {
-        check_complete_at_ns = fizzy.perf.nanoTimestamp();
+        check_complete_at_ns = fizzy.core.perf.nanoTimestamp();
     } else {
         check_complete_at_ns = null;
     }
@@ -222,12 +222,18 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
 
     // Fox at the top, centered. Use a fixed natural size (96×96) so it
     // doesn't blow out the dialog regardless of the source PNG's resolution.
-    if (fizzy.image.fromImageFileBytes("fox.png", assets.files.@"fox.png", .ptr)) |fox_src| {
-        _ = dvui.image(@src(), .{ .source = fox_src, .shrink = .ratio }, .{
-            .gravity_x = 0.5,
-            .min_size_content = .{ .w = 96, .h = 96 },
-        });
-    } else |_| {}
+    // `.imageFile` so dvui decodes once and caches the texture — `fromImageFileBytes`
+    // re-decoded the PNG and leaked the pixels every frame, which halved the frame rate
+    // for as long as this dialog was open.
+    const fox_src: dvui.ImageSource = .{ .imageFile = .{
+        .bytes = assets.files.@"fox.png",
+        .name = "fox.png",
+        .interpolation = .nearest,
+    } };
+    _ = dvui.image(@src(), .{ .source = fox_src, .shrink = .ratio }, .{
+        .gravity_x = 0.5,
+        .min_size_content = .{ .w = 96, .h = 96 },
+    });
 
     // Website link.
     {
@@ -235,7 +241,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
         defer link_row.deinit();
         dvui.link(@src(), .{ .url = "https://fizzyed.it", .label = "fizzyed.it" }, .{
             .font = heading,
-            .color_text = dvui.themeGet().color(.highlight, .fill),
+            .color_text = .{ .color = dvui.themeGet().color(.highlight, .fill) },
         });
     }
 
@@ -293,7 +299,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
     const finish_elapsed: ?i128 = blk: {
         if (comptime !auto_update.impl) break :blk null;
         const start = check_complete_at_ns orelse break :blk null;
-        const elapsed = fizzy.perf.nanoTimestamp() - start;
+        const elapsed = fizzy.core.perf.nanoTimestamp() - start;
         if (elapsed >= check_done_flash_duration_ns) {
             check_complete_at_ns = null;
             break :blk null;
@@ -310,18 +316,18 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
         defer spinner_slot.deinit();
 
         if (checking or finish_elapsed != null) {
-            fizzy.dvui.bubbleSpinner(@src(), .{
+            fizzy.core.dialogs.bubbleSpinner(@src(), .{
                 .expand = .none,
                 .min_size_content = .{ .w = 24, .h = 24 },
                 .gravity_x = 0.5,
-                .color_text = dvui.themeGet().color(.control, .text),
+                .color_text = .{ .color = dvui.themeGet().color(.control, .text) },
             }, .{ .complete_elapsed_ns = finish_elapsed });
             dvui.refresh(null, @src(), null);
         }
     }
 
     if (!checking) {
-        dvui.labelNoFmt(@src(), status_line, .{}, .{ .font = body_small, .gravity_x = 0.5, .color_text = dvui.themeGet().color(.control, .text) });
+        dvui.labelNoFmt(@src(), status_line, .{}, .{ .font = body_small, .gravity_x = 0.5, .color_text = .{ .color = dvui.themeGet().color(.control, .text) } });
     }
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 12 } });
@@ -356,7 +362,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
                 update_ready_after_check = false;
                 setStatus(" ");
                 update_notify.kickInstall();
-                fizzy.dvui.closeFloatingDialogAnchored();
+                fizzy.core.dialogs.closeFloatingDialogAnchored();
             }
         }
     }
@@ -364,7 +370,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 1 } });
 
     if (dialogButton(@src(), "Close", .control, 10, 2)) {
-        fizzy.dvui.closeFloatingDialogAnchored();
+        fizzy.core.dialogs.closeFloatingDialogAnchored();
     }
 
     return true;

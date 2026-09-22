@@ -7,7 +7,7 @@
 pub const titlebar_height: f32 = 26.0;
 
 // The infobar's height is not a constant: it scales with the body font. The one
-// definition is `sdk.infobar` (`src/sdk/infobar.zig`). Plugins contribute `Entry`
+// definition is `sdk.infobar` (`sdk/src/infobar.zig`). Plugins contribute `Entry`
 // values (icon + text); fizzy draws them.
 
 /// Empty strip below the top window edge (non-macOS), above the main title row (in-window menu, etc.).
@@ -26,8 +26,3 @@ pub const perf_logging: bool = false;
 /// Pretend an app update is available (badge + launch toast) — a build-time debug flag now;
 /// flip and rebuild to test the update-available UI.
 pub const debug_simulate_update_available: bool = false;
-
-/// Pretend two installed plugins have store updates waiting, so the "Plugin updates" window (or,
-/// with `plugin_update_mode = .silent`, the silent path's logging) can be exercised without an
-/// actually out-of-date plugin. Same build-time-flag shape as `debug_simulate_update_available`.
-pub const debug_simulate_plugin_updates: bool = false;

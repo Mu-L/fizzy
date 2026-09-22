@@ -6,9 +6,8 @@
 //! matches `KeybindSettings` so the two panes read as one table style.
 //!
 //! **This is the permanent home of a decision the install-time dialog only asks about once.**
-//! Ownership is an explicit, persisted user choice (`.plugins.<id>.extensions` in `settings.zon`)
-//! rather than the numeric contest between plugin authors it used to be, and every route to
-//! changing it — this pane's dropdown and `Dialogs.FileTypeDefaults`' Confirm — goes through the
+//! Ownership is an explicit, persisted user choice (`.plugins.<id>.extensions` in `settings.zon`),
+//! and every route to changing it — this pane's dropdown and `Dialogs.FileTypeDefaults`' Confirm — goes through the
 //! single writer, `Editor.resolveExtensionConflict`.
 //!
 //! **Conflicts are surfaced, not silently resolved.** `Editor.rebuildExtensionOwnerCache` is
@@ -26,7 +25,6 @@ const dvui = @import("dvui");
 const core = @import("core");
 const fizzy = @import("../fizzy.zig");
 
-const wdvui = core.dvui;
 const fuzzy = core.fuzzy;
 
 /// Shown in place of a plugin name for the fallback editor, which owns everything nothing else
@@ -36,8 +34,8 @@ const fallback_label = "Text (fallback)";
 /// Terms that name the *table itself* rather than any one extension, so searching "file types"
 /// finds the whole list. Scored one term at a time, for the reason `KeybindSettings` explains.
 const table_keywords = [_][]const u8{
-    "file",      "files",   "filetype", "filetypes", "file type",
-    "extension", "default", "defaults", "opens",     "associate",
+    "file",         "files",   "filetype", "filetypes", "file type",
+    "extension",    "default", "defaults", "opens",     "associate",
     "associations",
 };
 
@@ -72,15 +70,15 @@ fn collectRows(arena: std.mem.Allocator, query: *const fuzzy.Query) std.ArrayLis
     var rows: std.ArrayListUnmanaged(Row) = .empty;
     if (comptime builtin.target.cpu.arch == .wasm32) return rows;
 
-    const editor = fizzy.editor;
+    const editor = fizzy.editor();
     const table_hit = fuzzy.scoreBest(&table_keywords, query, .{ .plain = true });
 
     var exts: std.StringArrayHashMapUnmanaged(void) = .empty;
-    for (editor.host.plugins.items) |plugin| {
+    for (editor.app.host.plugins.items) |plugin| {
         for (plugin.fileTypes()) |e| exts.put(arena, e, {}) catch return rows;
     }
-    for (editor.extension_owner.keys()) |e| exts.put(arena, e, {}) catch return rows;
-    for (editor.extension_conflicts.items) |c| exts.put(arena, c.ext, {}) catch return rows;
+    for (editor.app.extension_owner.keys()) |e| exts.put(arena, e, {}) catch return rows;
+    for (editor.app.extension_conflicts.items) |c| exts.put(arena, c.ext, {}) catch return rows;
 
     const keys = arena.dupe([]const u8, exts.keys()) catch return rows;
     std.mem.sort([]const u8, keys, {}, struct {
@@ -90,15 +88,15 @@ fn collectRows(arena: std.mem.Allocator, query: *const fuzzy.Query) std.ArrayLis
     }.lt);
 
     for (keys, 0..) |ext, i| {
-        const owner = editor.host.pluginForExtension(ext);
+        const owner = editor.app.host.pluginForExtension(ext);
         const owner_name = if (owner) |o|
-            (if (o == editor.host.fallback_editor) fallback_label else o.display_name)
+            (if (o == editor.app.host.fallback_editor) fallback_label else o.display_name)
         else
             "—";
 
         var candidates: std.ArrayListUnmanaged(*fizzy.sdk.Plugin) = .empty;
-        for (editor.host.plugins.items) |plugin| {
-            if (plugin == editor.host.fallback_editor) continue;
+        for (editor.app.host.plugins.items) |plugin| {
+            if (plugin == editor.app.host.fallback_editor) continue;
             for (plugin.fileTypes()) |e| {
                 if (std.mem.eql(u8, e, ext)) {
                     candidates.append(arena, plugin) catch {};
@@ -113,7 +111,7 @@ fn collectRows(arena: std.mem.Allocator, query: *const fuzzy.Query) std.ArrayLis
         }.lt);
 
         var flagged = false;
-        for (editor.extension_conflicts.items) |c| {
+        for (editor.app.extension_conflicts.items) |c| {
             if (std.mem.eql(u8, c.ext, ext)) {
                 flagged = true;
                 break;
@@ -165,7 +163,7 @@ pub fn score(query: *const fuzzy.Query) ?f64 {
 pub fn draw(query: *const fuzzy.Query) void {
     if (comptime builtin.target.cpu.arch == .wasm32) {
         dvui.label(@src(), "Plugins are not installable on the web build, so there is nothing to assign.", .{}, .{
-            .color_text = dvui.themeGet().color(.window, .text).opacity(0.6),
+            .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) },
         });
         return;
     }
@@ -182,13 +180,13 @@ pub fn draw(query: *const fuzzy.Query) void {
 }
 
 fn drawConflicts(theme: dvui.Theme) void {
-    const conflicts = fizzy.editor.extension_conflicts.items;
+    const conflicts = fizzy.editor().app.extension_conflicts.items;
     if (conflicts.len == 0) return;
 
     var box = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
         .background = true,
-        .color_fill = theme.color(.err, .fill).opacity(0.25),
+        .color_fill = .{ .color = theme.color(.err, .fill).opacity(0.25) },
         .corners = .all(6),
         .padding = dvui.Rect.all(6),
         .margin = .{ .h = 8 },
@@ -207,7 +205,7 @@ fn drawConflicts(theme: dvui.Theme) void {
         defer tl.deinit();
         tl.addText(
             "settings.zon was edited by hand. Fizzy left the file alone — pick an owner below to repair it.",
-            .{ .color_text = theme.color(.window, .text).opacity(0.7) },
+            .{ .color_text = .{ .color = theme.color(.window, .text).opacity(0.7) } },
         );
     }
     for (conflicts, 0..) |c, i| {
@@ -217,14 +215,14 @@ fn drawConflicts(theme: dvui.Theme) void {
             }, .{
                 .id_extra = i,
                 .expand = .horizontal,
-                .color_text = theme.color(.window, .text).opacity(0.85),
+                .color_text = .{ .color = theme.color(.window, .text).opacity(0.85) },
             }),
             .stale => dvui.label(@src(), "{s}: assigned to {s}, which no longer opens it — ignored.", .{
                 c.ext, c.loser,
             }, .{
                 .id_extra = i,
                 .expand = .horizontal,
-                .color_text = theme.color(.window, .text).opacity(0.85),
+                .color_text = .{ .color = theme.color(.window, .text).opacity(0.85) },
             }),
         }
     }
@@ -239,7 +237,7 @@ const Banded = struct {
         return .{
             .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
             .background = true,
-            .color_fill = if (row % 2 == 1) self.theme.color(.control, .fill).opacity(0.22) else null,
+            .color_fill = if (row % 2 == 1) .{ .color = self.theme.color(.control, .fill).opacity(0.22) } else null,
         };
     }
 };
@@ -254,13 +252,12 @@ fn drawGrid(rows: []Row, query: *const fuzzy.Query, theme: dvui.Theme) void {
         },
         // Opens in and Reopen stay at the width their contents need; Extension absorbs the
         // leftover — same division of labour as Command / Shortcut / Reset.
-        .cols_rigid = &.{ 1, 2 },
     }, .{
         .expand = .horizontal,
         .max_size_content = .width(0),
         .padding = .all(0),
         .background = true,
-        .color_fill = theme.color(.window, .fill).opacity(0.25),
+        .color_fill = .{ .color = theme.color(.window, .fill).opacity(0.25) },
         .corners = .all(4),
         .border = .{},
     });
@@ -278,7 +275,7 @@ fn drawGrid(rows: []Row, query: *const fuzzy.Query, theme: dvui.Theme) void {
     const key_id = "__fizzy_content_key";
     if (dvui.dataGet(null, grid.data().id, key_id, u64) != content_key) {
         dvui.dataSet(null, grid.data().id, key_id, content_key);
-        grid.autoSize(.{ .auto = .both });
+        grid.autoSize(.both);
     }
 
     // Alphabetical by extension until the user clicks a heading. `.unsorted` is only ever the
@@ -294,7 +291,7 @@ fn drawGrid(rows: []Row, query: *const fuzzy.Query, theme: dvui.Theme) void {
     const heading_cell_opts: dvui.Options = .{
         .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
         .background = true,
-        .color_fill = theme.color(.control, .fill).opacity(0.35),
+        .color_fill = .{ .color = theme.color(.control, .fill).opacity(0.35) },
     };
     const heading_label_opts: dvui.Options = .{
         .expand = .horizontal,
@@ -302,11 +299,11 @@ fn drawGrid(rows: []Row, query: *const fuzzy.Query, theme: dvui.Theme) void {
         .background = false,
         .corners = .{},
         .font = dvui.Font.theme(.body).withWeight(.bold),
-        .color_text = theme.color(.window, .text).opacity(0.7),
+        .color_text = .{ .color = theme.color(.window, .text).opacity(0.7) },
     };
 
     inline for (.{ .{ 0, "Extension" }, .{ 1, "Opens in" } }) |heading| {
-        const cell = grid.colHeader(heading[0], heading_cell_opts);
+        const cell = grid.colHeader(.{ .col = heading[0] }, heading_cell_opts);
         defer cell.deinit();
         _ = cell.headerSortable(heading[1], heading_label_opts);
     }
@@ -322,13 +319,13 @@ fn drawGrid(rows: []Row, query: *const fuzzy.Query, theme: dvui.Theme) void {
     const grid_rs = grid.data().borderRectScale();
     const si = grid.msi.*;
     grid.deinit();
-    wdvui.drawScrollEdgeShadows(null, grid_rs, &si, .{});
+    core.draw.drawScrollEdgeShadows(null, grid_rs, &si, .{});
 }
 
 /// Last-column heading. Not sortable — there is nothing to order by — so it stays a plain label
 /// rather than dvui's sortable heading button, same as `KeybindSettings.drawResetHeading`.
 fn drawReopenHeading(grid: *dvui.GridWidget, cell_opts: dvui.Options, label_opts: dvui.Options) void {
-    const cell = grid.colHeader(2, cell_opts);
+    const cell = grid.colHeader(.{ .col = 2 }, cell_opts);
     defer cell.deinit();
 
     dvui.labelNoFmt(@src(), "Reopen", .{}, label_opts.override(.{
@@ -372,13 +369,13 @@ fn drawRow(
         defer left.deinit();
 
         if (row.flagged) {
-            dvui.icon(@src(), "file_type_conflict", dvui.entypo.warning, .{
-                .stroke_color = theme.color(.err, .fill),
-                .fill_color = theme.color(.err, .fill),
+            core.icon.icon(@src(), "file_type_conflict", dvui.entypo.warning, .{
+                .stroke_color = .{ .color = theme.color(.err, .fill) },
+                .fill_color = .{ .color = theme.color(.err, .fill) },
             }, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 12, .h = 12 } });
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 4, .h = 1 } });
         }
-        wdvui.labelHighlighted(@src(), row.ext, query, true, .{
+        core.draw.labelHighlighted(@src(), row.ext, query, true, .{
             .expand = .horizontal,
             .font = dvui.Font.theme(.mono),
             .gravity_y = 0.5,
@@ -405,7 +402,7 @@ fn drawRow(
 /// the entry to the chosen plugin *and* strips it from every other block, so picking anything
 /// here also repairs a flagged row.
 fn drawOwnerDropdown(row: Row, ri: usize) void {
-    const editor = fizzy.editor;
+    const editor = fizzy.editor();
 
     var dropdown: dvui.DropdownWidget = undefined;
     dropdown.init(@src(), .{}, .{
@@ -432,7 +429,7 @@ fn drawOwnerDropdown(row: Row, ri: usize) void {
             .margin = .all(0),
             .padding = .all(0),
         });
-        dvui.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_y = 0.5 });
+        core.icon.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_y = 0.5 });
     }
 
     if (!dropdown.dropped()) return;
@@ -443,7 +440,7 @@ fn drawOwnerDropdown(row: Row, ri: usize) void {
             return;
         }
     }
-    if (editor.host.fallback_editor) |text| {
+    if (editor.app.host.fallback_editor) |text| {
         if (dropdown.addChoiceLabel(fallback_label)) {
             assign(editor, row.ext, text.id);
             return;
@@ -466,9 +463,9 @@ fn assign(editor: *fizzy.Editor, ext: []const u8, id: []const u8) void {
 /// documents behind, this offers to reopen them, and says so per row instead of hoping the user
 /// notices that the setting only applies to the next file they open.
 fn drawReopenAction(row: Row, ri: usize) void {
-    const editor = fizzy.editor;
+    const editor = fizzy.editor();
     const arena = dvui.currentWindow().arena();
-    const stale = editor.staleOpenDocsForExtension(arena, row.ext) catch &.{};
+    const stale = editor.app.staleOpenDocsForExtension(arena, row.ext) catch &.{};
 
     // Always occupy the column so showing/hiding a button never shifts widths — same as Reset.
     if (stale.len == 0) {

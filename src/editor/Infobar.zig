@@ -1,9 +1,10 @@
 const std = @import("std");
 const fizzy = @import("../fizzy.zig");
+const AppInfo = @import("app").AppInfo;
 const dvui = @import("dvui");
 const icons = @import("icons");
 const assets = @import("assets");
-const update_notify = @import("../backend/update_notify.zig");
+const update_notify = @import("app").update.update_notify;
 const Dialogs = fizzy.Editor.Dialogs;
 /// Font, height, icon side and spacing — fizzy draws every item with these, including
 /// plugin `Entry` chips, so the bar stays uniform as the font setting changes.
@@ -25,7 +26,7 @@ pub fn deinit() void {
     // TODO: Free memory
 }
 
-pub fn draw(_: Infobar) !void {
+pub fn draw(_: Infobar, editor: *fizzy.Editor) !void {
     const font = infobar.font();
     const bar_h = infobar.height();
 
@@ -52,9 +53,9 @@ pub fn draw(_: Infobar) !void {
             .gravity_y = 0.5,
             .margin = .all(0),
             .padding = .all(0),
-            .color_fill = fizzy.dvui.hoverRestFill(dvui.themeGet().color(.control, .fill_hover)),
-            .color_fill_hover = dvui.themeGet().color(.control, .fill_hover),
-            .color_fill_press = dvui.themeGet().color(.control, .fill_press),
+            .color_fill = .{ .color = fizzy.core.widgets.hoverRestFill(dvui.themeGet().color(.control, .fill_hover)) },
+            .color_fill_hover = .{ .color = dvui.themeGet().color(.control, .fill_hover) },
+            .color_fill_press = .{ .color = dvui.themeGet().color(.control, .fill_press) },
         });
         defer button.deinit();
         button.processEvents();
@@ -96,7 +97,7 @@ pub fn draw(_: Infobar) !void {
                 .background = false,
             });
         }
-        dvui.label(@src(), "fizzy", .{}, .{ .font = font, .gravity_y = 0.5, .margin = .all(0) });
+        dvui.label(@src(), AppInfo.current.name, .{}, .{ .font = font, .gravity_y = 0.5, .margin = .all(0) });
 
         if (button.clicked()) {
             Dialogs.AboutFizzy.request();
@@ -111,7 +112,7 @@ pub fn draw(_: Infobar) !void {
             dot.x -= 4.5 * brs.s;
             dot.y -= 4.5 * brs.s;
             dot.fill(dvui.CornerRect.Physical.round(4.5 * brs.s), .{
-                .color = dvui.themeGet().color(.highlight, .fill),
+                .color = .{ .color = dvui.themeGet().color(.highlight, .fill) },
                 .fade = 0,
             });
         }
@@ -119,12 +120,12 @@ pub fn draw(_: Infobar) !void {
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = infobar.item_spacing } });
 
-    if (fizzy.editor.folder) |folder| {
-        dvui.icon(
+    if (editor.app.folder) |folder| {
+        fizzy.core.icon.icon(
             @src(),
             "project_icon",
             icons.tvg.entypo.folder,
-            .{ .stroke_color = dvui.themeGet().color(.window, .text), .fill_color = dvui.themeGet().color(.window, .text) },
+            .{ .stroke_color = .{ .color = dvui.themeGet().color(.window, .text) }, .fill_color = .{ .color = dvui.themeGet().color(.window, .text) } },
             // Same square every other glyph in the bar gets, rather than the icon's own natural
             // size — that is what keeps it aligned with the label at any font size.
             .{
@@ -176,12 +177,12 @@ fn drawPluginEntries(bar_h: f32) void {
 }
 
 fn collectedEntries() []const infobar.Entry {
-    const arena = fizzy.editor.host.arena();
+    const arena = fizzy.editor().app.host.arena();
     var list: std.ArrayList(infobar.Entry) = .empty;
-    const active = fizzy.editor.activeDoc();
+    const active = fizzy.editor().activeDoc();
     const owner: ?*fizzy.sdk.Plugin = if (active) |doc| doc.owner else null;
     if (owner) |o| appendFrom(&list, arena, o, active);
-    for (fizzy.editor.host.plugins.items) |p| {
+    for (fizzy.editor().app.host.plugins.items) |p| {
         if (p == owner) continue;
         appendFrom(&list, arena, p, active);
     }
@@ -204,11 +205,11 @@ fn drawEntry(id_extra: usize, entry: infobar.Entry) void {
     const color = dvui.themeGet().color(.window, .text);
     const side = infobar.iconSide();
     if (entry.icon.len > 0) {
-        dvui.icon(
+        fizzy.core.icon.icon(
             @src(),
             "plugin_infobar_icon",
             entry.icon,
-            .{ .stroke_color = color, .fill_color = color },
+            .{ .stroke_color = .{ .color = color }, .fill_color = .{ .color = color } },
             .{
                 .id_extra = id_extra,
                 .gravity_y = 0.5,

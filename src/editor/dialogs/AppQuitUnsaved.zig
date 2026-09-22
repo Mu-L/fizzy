@@ -6,7 +6,7 @@ const dvui = @import("dvui");
 pub fn active(win: *dvui.Window) bool {
     var it = win.dialogs.iterator(null);
     while (it.next()) |d| {
-        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.dvui.DisplayFn) orelse continue;
+        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.core.dialogs.DisplayFn) orelse continue;
         if (df == dialog) return true;
     }
     return false;
@@ -14,7 +14,7 @@ pub fn active(win: *dvui.Window) bool {
 
 pub fn request() void {
     if (active(dvui.currentWindow())) return;
-    var mutex = fizzy.dvui.dialog(@src(), .{
+    var mutex = fizzy.core.dialogs.dialog(@src(), .{
         .displayFn = dialog,
         .callafterFn = callAfter,
         .title = "Quit Fizzy?",
@@ -31,7 +31,7 @@ pub fn request() void {
 
 fn dirtyCount() usize {
     var n: usize = 0;
-    for (fizzy.editor.open_files.values()) |doc| {
+    for (fizzy.editor().app.open_files.values()) |doc| {
         if (doc.owner.isDirty(doc)) n += 1;
     }
     return n;
@@ -96,42 +96,42 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
 }
 
 fn onQuitWithoutSaving() !void {
-    fizzy.dvui.closeFloatingDialogAnchored();
+    fizzy.core.dialogs.closeFloatingDialogAnchored();
 
-    const alloc = fizzy.app.allocator;
-    const keys = try alloc.alloc(u64, fizzy.editor.open_files.count());
+    const alloc = fizzy.entry().allocator;
+    const keys = try alloc.alloc(u64, fizzy.editor().app.open_files.count());
     defer alloc.free(keys);
-    for (fizzy.editor.open_files.keys(), 0..) |k, i| keys[i] = k;
+    for (fizzy.editor().app.open_files.keys(), 0..) |k, i| keys[i] = k;
     for (keys) |id| {
-        try fizzy.editor.rawCloseFileID(id);
+        try fizzy.editor().rawCloseFileID(id);
     }
-    fizzy.editor.pending_app_close = true;
+    fizzy.editor().app.pending_app_close = true;
 }
 
 fn onSaveAllAndQuit() !void {
-    fizzy.dvui.closeFloatingDialogAnchored();
+    fizzy.core.dialogs.closeFloatingDialogAnchored();
 
-    fizzy.editor.quit_save_all_ids.clearRetainingCapacity();
-    for (fizzy.editor.open_files.values()) |doc| {
-        if (doc.owner.isDirty(doc)) try fizzy.editor.quit_save_all_ids.append(fizzy.app.allocator, doc.id);
+    fizzy.editor().app.quit_save_all_ids.clearRetainingCapacity();
+    for (fizzy.editor().app.open_files.values()) |doc| {
+        if (doc.owner.isDirty(doc)) try fizzy.editor().app.quit_save_all_ids.append(fizzy.entry().allocator, doc.id);
     }
-    if (fizzy.editor.quit_save_all_ids.items.len == 0) {
-        fizzy.editor.pending_app_close = true;
+    if (fizzy.editor().app.quit_save_all_ids.items.len == 0) {
+        fizzy.editor().app.pending_app_close = true;
         return;
     }
-    fizzy.editor.quit_in_progress = true;
-    fizzy.editor.pending_quit_continue = true;
+    fizzy.editor().app.quit_in_progress = true;
+    fizzy.editor().app.pending_quit_continue = true;
 }
 
 fn onCancel() void {
-    fizzy.editor.quit_in_progress = false;
-    fizzy.dvui.closeFloatingDialogAnchored();
+    fizzy.editor().app.quit_in_progress = false;
+    fizzy.core.dialogs.closeFloatingDialogAnchored();
 }
 
 pub fn callAfter(_: dvui.Id, response: dvui.enums.DialogResponse) !void {
     switch (response) {
         .cancel => {
-            fizzy.editor.quit_in_progress = false;
+            fizzy.editor().app.quit_in_progress = false;
         },
         else => {},
     }

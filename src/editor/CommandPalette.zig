@@ -12,13 +12,13 @@
 //! straight back to file search, as it does in VSCode.
 
 const std = @import("std");
+const core = @import("core");
 const builtin = @import("builtin");
 const dvui = @import("dvui");
 const icons = @import("icons");
 const fizzy = @import("../fizzy.zig");
 const fuzzy = @import("core").fuzzy;
-const wdvui = @import("core").dvui;
-const keymap = @import("keymap/keymap.zig");
+const Keymap = @import("app").keymap.Keymap;
 const Keybinds = @import("Keybinds.zig");
 
 const Editor = @import("Editor.zig");
@@ -67,6 +67,9 @@ anim: f32 = 0,
 /// under its content makes the scrollbar appear permanently (`virtual_size.h > viewport.h`).
 /// Sizing the viewport from the same number the container measured makes them agree exactly.
 list_content_h: f32 = 0,
+/// One row's pitch as it measured last frame — `row_height` plus the row box's padding. What
+/// the rows outside the viewport stand in as: a spacer of this many times their count.
+row_pitch: f32 = row_height + 4,
 /// Playing the outro. `open` stays true throughout so the palette keeps drawing — this is also
 /// what lets an activated row hold its pressed highlight instead of vanishing on click.
 closing: bool = false,
@@ -100,9 +103,17 @@ index_root: []u8 = &.{},
 /// `index.items.len` because a legitimately empty result (unreadable folder, every entry
 /// ignored) would otherwise re-walk the whole tree on every frame the palette is open.
 index_built: bool = false,
+/// The file ranking for `file_hits_query`, as indices into `index`, best first. Ranking is the
+/// palette's whole per-frame cost when nothing else is happening — scoring every indexed path
+/// again for a query that has not changed — so it is done once per query and reused until the
+/// text or the index changes. Owned.
+file_hits: std.ArrayList(usize) = .empty,
+file_hits_query: [256]u8 = @splat(0),
+file_hits_valid: bool = false,
 
 pub fn deinit(self: *CommandPalette, gpa: std.mem.Allocator) void {
     self.freeIndex(gpa);
+    self.file_hits.deinit(gpa);
     if (self.index_root.len > 0) gpa.free(self.index_root);
     self.* = .{};
 }
@@ -110,6 +121,8 @@ pub fn deinit(self: *CommandPalette, gpa: std.mem.Allocator) void {
 fn freeIndex(self: *CommandPalette, gpa: std.mem.Allocator) void {
     for (self.index.items) |p| gpa.free(p);
     self.index.clearRetainingCapacity();
+    self.file_hits.clearRetainingCapacity();
+    self.file_hits_valid = false;
 }
 
 fn queryText(self: *const CommandPalette) []const u8 {
@@ -154,7 +167,7 @@ pub fn close(self: *CommandPalette) void {
 
 /// Whether the panel's height is still moving — either auto-sizing to a new content height or
 /// collapsing on close.
-fn animatingGeometry(self: *const CommandPalette, win: *fizzy.dvui.FloatingWindowWidget) bool {
+fn animatingGeometry(self: *const CommandPalette, win: *fizzy.core.widgets.FloatingWindowWidget) bool {
     if (self.closing) return true;
     return dvui.animationGet(win.data().id, "_auto_height") != null;
 }
@@ -189,10 +202,10 @@ fn modeAndQuery(text: []const u8) struct { mode: Mode, query: []const u8 } {
 
 fn ensureIndex(self: *CommandPalette, editor: *Editor) void {
     if (comptime builtin.target.cpu.arch == .wasm32) return;
-    const root = editor.folder orelse return;
+    const root = editor.app.folder orelse return;
     if (self.index_built and std.mem.eql(u8, self.index_root, root)) return;
 
-    const gpa = fizzy.app.allocator;
+    const gpa = editor.app.gpa;
     self.freeIndex(gpa);
     if (!std.mem.eql(u8, self.index_root, root)) {
         if (self.index_root.len > 0) gpa.free(self.index_root);
@@ -210,14 +223,14 @@ fn indexDir(self: *CommandPalette, editor: *Editor, directory: []const u8, depth
     if (depth > max_index_depth or self.index.items.len >= max_index_files) return;
 
     const io = dvui.io;
-    const gpa = fizzy.app.allocator;
+    const gpa = editor.app.gpa;
     var dir = std.Io.Dir.cwd().openDir(io, directory, .{
         .access_sub_paths = true,
         .iterate = true,
     }) catch return;
     defer dir.close(io);
 
-    const root = editor.folder orelse return;
+    const root = editor.app.folder orelse return;
 
     var iter = dir.iterate();
     while (iter.next(io) catch null) |entry| {
@@ -227,7 +240,7 @@ fn indexDir(self: *CommandPalette, editor: *Editor, directory: []const u8, depth
         var keep = false;
         defer if (!keep) gpa.free(abs_path);
 
-        if (editor.host.isPathIgnored(root, abs_path, entry.name, entry.kind)) continue;
+        if (editor.app.host.isPathIgnored(root, abs_path, entry.name, entry.kind)) continue;
 
         switch (entry.kind) {
             .file => {
@@ -242,7 +255,7 @@ fn indexDir(self: *CommandPalette, editor: *Editor, directory: []const u8, depth
 
 /// Invalidate the index — call when the project folder changes or the tree is known stale.
 pub fn invalidate(self: *CommandPalette) void {
-    self.freeIndex(fizzy.app.allocator);
+    self.freeIndex(fizzy.entry().allocator);
     self.index_built = false;
 }
 
@@ -265,13 +278,22 @@ const Row = union(Mode) {
     },
 };
 
-fn collectFileRows(self: *CommandPalette, editor: *Editor, query: *const fuzzy.Query) []Row {
-    const arena = dvui.currentWindow().arena();
-    const root = editor.folder orelse return &.{};
+/// `abs` relative to the project root. Every indexed path was joined onto the root by
+/// `indexDir`, so this is a slice, not `relativePosix` — which resolved and re-tokenised both
+/// paths, and did so for every file on every frame.
+fn relativeToRoot(root: []const u8, abs: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, abs, root)) return abs;
+    return std.mem.trimStart(u8, abs[root.len..], &.{ '/', '\\' });
+}
 
+fn rankFiles(self: *CommandPalette, gpa: std.mem.Allocator, root: []const u8, query: *const fuzzy.Query, query_text: []const u8) void {
+    self.file_hits.clearRetainingCapacity();
+    self.file_hits_valid = false;
+
+    const arena = dvui.currentWindow().arena();
     var hits: std.ArrayListUnmanaged(fuzzy.Ranked(usize)) = .empty;
     for (self.index.items, 0..) |abs, i| {
-        const rel = std.fs.path.relativePosix(arena, ".", root, abs) catch continue;
+        const rel = relativeToRoot(root, abs);
         // `plain = false`: these are real paths, so zf's basename weighting is what makes
         // `filz` rank `src/files.zig` above a path that merely contains those letters.
         const score = if (query.isEmpty()) @as(f64, 0) else (fuzzy.score(rel, query, .{ .plain = false }) orelse continue);
@@ -280,12 +302,24 @@ fn collectFileRows(self: *CommandPalette, editor: *Editor, query: *const fuzzy.Q
     }
     fuzzy.sort(usize, hits.items);
 
-    var rows: std.ArrayListUnmanaged(Row) = .empty;
-    for (hits.items) |h| {
-        if (rows.items.len >= max_rows) break;
-        rows.append(arena, .{ .files = self.index.items[h.item] }) catch break;
+    for (hits.items[0..@min(hits.items.len, max_rows)]) |h| {
+        self.file_hits.append(gpa, h.item) catch return;
     }
-    return rows.items;
+    @memcpy(self.file_hits_query[0..query_text.len], query_text);
+    @memset(self.file_hits_query[query_text.len..], 0);
+    self.file_hits_valid = true;
+}
+
+fn collectFileRows(self: *CommandPalette, editor: *Editor, query: *const fuzzy.Query, query_text: []const u8) []Row {
+    const arena = dvui.currentWindow().arena();
+    const root = editor.app.folder orelse return &.{};
+
+    const cached = self.file_hits_valid and std.mem.eql(u8, query_text, std.mem.sliceTo(&self.file_hits_query, 0));
+    if (!cached) self.rankFiles(editor.app.gpa, root, query, query_text);
+
+    const rows = arena.alloc(Row, self.file_hits.items.len) catch return &.{};
+    for (self.file_hits.items, rows) |i, *row| row.* = .{ .files = self.index.items[i] };
+    return rows;
 }
 
 const document_verbs = Keybinds.document_verbs;
@@ -316,7 +350,7 @@ fn collectCommandRows(editor: *Editor, query: *const fuzzy.Query) []Row {
     const arena = dvui.currentWindow().arena();
 
     var hits: std.ArrayListUnmanaged(fuzzy.Ranked(usize)) = .empty;
-    for (editor.host.commands.items, 0..) |c, i| {
+    for (editor.app.host.commands.items, 0..) |c, i| {
         if (!shouldShowCommand(editor, c.id)) continue;
         // Match against the title, the id, *and* the owning plugin's name, so "Save All",
         // "fizzy.saveAll" and "pixi" (to list everything pixi contributes) all find rows.
@@ -335,12 +369,12 @@ fn collectCommandRows(editor: *Editor, query: *const fuzzy.Query) []Row {
     var rows: std.ArrayListUnmanaged(Row) = .empty;
     for (hits.items) |h| {
         if (rows.items.len >= max_rows) break;
-        const c = editor.host.commands.items[h.item];
+        const c = editor.app.host.commands.items[h.item];
         rows.append(arena, .{ .commands = .{
             .id = c.id,
             .title = c.title,
             .source = if (c.owner) |o| o.display_name else null,
-            .enabled = editor.host.commandEnabled(c.id),
+            .enabled = editor.app.host.commandEnabled(c.id),
             .icon = c.icon,
         } }) catch break;
     }
@@ -350,10 +384,10 @@ fn collectCommandRows(editor: *Editor, query: *const fuzzy.Query) []Row {
 /// Shortcut hint for a command, or null when it has none.
 fn shortcutFor(editor: *Editor, id: []const u8) ?[]const u8 {
     const arena = dvui.currentWindow().arena();
-    const found = editor.keymap.bindingsFor(arena, id) catch return null;
+    const found = editor.app.keymap.bindingsFor(arena, id) catch return null;
     if (found.len == 0) return null;
-    const platform: keymap.Platform = if (fizzy.platform.isMacOS()) .mac else .other;
-    return keymap.formatKeys(arena, found[0].stroke, platform) catch null;
+    const platform: Keymap.Platform = if (fizzy.core.platform.isMacOS()) .mac else .other;
+    return Keymap.formatKeys(arena, found[0].stroke, platform) catch null;
 }
 
 // ---- activation ---------------------------------------------------------------------------
@@ -370,7 +404,7 @@ fn activate(self: *CommandPalette, editor: *Editor, rows: []const Row) void {
         .files => |abs| {
             self.activated = idx;
             self.close();
-            _ = editor.openFilePath(abs, editor.currentGroupingID()) catch {
+            _ = editor.openFilePath(abs, editor.workbench.currentGroupingID()) catch {
                 dvui.log.err("palette: failed to open {s}", .{abs});
             };
         },
@@ -378,7 +412,7 @@ fn activate(self: *CommandPalette, editor: *Editor, rows: []const Row) void {
             if (!c.enabled) return;
             self.activated = idx;
             self.close();
-            editor.host.runCommand(c.id) catch |err| {
+            editor.app.host.runCommand(c.id) catch |err| {
                 dvui.log.err("palette: command '{s}' failed: {s}", .{ c.id, @errorName(err) });
             };
         },
@@ -434,14 +468,13 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
 
     // Same fizzy as Grid Layout / other dialogs: modal floating window focuses its subwindow
     // (so the text entry can receive keys) and paints a black scrim via `color_text = .black`.
-    fizzy.dvui.modal_dim_titlebar = true;
+    fizzy.core.dialogs.modal_dim_titlebar = true;
     // Scrim tracks the reveal, so the dim arrives and leaves with the panel instead of snapping
-    // to full black on frame one and popping off at the end of the outro. Same base values dvui
-    // picks per theme (60 dark / 80 light), scaled.
-    const dim_base: f32 = if (theme.dark) 60 else 80;
-    const dim_alpha: u8 = @intFromFloat(@round(dim_base * std.math.clamp(self.anim, 0, 1)));
+    // to full black on frame one and popping off at the end of the outro. Strength is the
+    // `modal_dim` setting, shared with every dialog.
+    const dim_alpha = fizzy.core.dialogs.modalDimAlpha(self.anim);
 
-    var win = fizzy.dvui.floatingWindow(@src(), .{
+    var win = fizzy.core.widgets.floatingWindow(@src(), .{
         .modal = true,
         .modal_alpha = dim_alpha,
         .open_flag = &self.fw_open,
@@ -454,11 +487,12 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
         .size_anchor = .top,
         .auto_size_axes = .vertical,
         .process_events_in_deinit = true,
+        .frost = fizzy.core.dialogs.dialogFrost(),
     }, .{
         // Drives the modal dim fill (`options.color(.text)` + alpha) — must be black like dialogs,
         // not theme text (which is light on dark themes and looked wrong).
         .color_text = .black,
-        .color_fill = theme.color(.content, .fill).opacity(0.95),
+        .color_fill = .{ .color = fizzy.core.dialogs.dialogFill() },
         .corners = dvui.CornerRect.all(8),
         .padding = dvui.Rect.all(6),
         .border = .all(0),
@@ -494,7 +528,7 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
 
     if (parsed.mode == .files) self.ensureIndex(editor);
     const rows = switch (parsed.mode) {
-        .files => self.collectFileRows(editor, &query),
+        .files => self.collectFileRows(editor, &query, parsed.query),
         .commands => collectCommandRows(editor, &query),
     };
     if (self.selected >= rows.len) self.selected = if (rows.len == 0) 0 else rows.len - 1;
@@ -507,15 +541,15 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
     { // query row
         var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
-            .color_text = text_color,
+            .color_text = .{ .color = text_color },
         });
         defer hbox.deinit();
 
-        _ = dvui.icon(
+        _ = core.icon.icon(
             @src(),
             "palette-icon",
             if (parsed.mode == .commands) icons.tvg.lucide.terminal else icons.tvg.lucide.search,
-            .{ .stroke_color = text_color },
+            .{ .stroke_color = .{ .color = text_color } },
             .{ .gravity_y = 0.5, .padding = dvui.Rect.all(4) },
         );
 
@@ -525,7 +559,7 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
         }, .{
             .expand = .horizontal,
             .background = false,
-            .color_text = text_color,
+            .color_text = .{ .color = text_color },
             .id_extra = 1,
         });
         // FloatingWindow focuses its subwindow on first frame (size 0); claim the entry for a
@@ -548,12 +582,12 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
         // No scroll area, so the label's own min size is the panel's — auto-size shrinks to it.
         self.list_content_h = 0;
         dvui.label(@src(), "{s}", .{switch (parsed.mode) {
-            .files => if (editor.folder == null) "No folder open" else "No matching files",
+            .files => if (editor.app.folder == null) "No folder open" else "No matching files",
             .commands => "No matching commands",
         }}, .{
             .expand = .horizontal,
             .padding = dvui.Rect.all(8),
-            .color_text = text_color.opacity(0.6),
+            .color_text = .{ .color = text_color.opacity(0.6) },
         });
     } else {
         // Viewport is last frame's measured content, capped. Below the cap it equals the content
@@ -569,14 +603,43 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
             .min_size_content = .{ .w = 0, .h = viewport_h },
             .max_size_content = .height(viewport_h),
             .background = false,
-            .color_text = text_color,
+            .color_text = .{ .color = text_color },
         });
         // `si` lives in dvui's data store, not in the widget, so it outlives `deinit` — which is
         // where `ScrollContainerWidget` finalises `virtual_size` from the rows just laid out.
         const si = scroll.si;
 
-        for (rows, 0..) |row, i| {
+        // Only the rows in the viewport are built. With no query every command is a row —
+        // hundreds of boxes, icons and labels for the ten that are visible, and the palette
+        // was costing more than the frame under it. The rest is a spacer of their height, so
+        // the scrollbar and the offsets are what they would be with every row laid out.
+        const pitch = @max(1, self.row_pitch);
+        var first: usize = 0;
+        var end: usize = rows.len;
+        if (si.viewport.h > 0) {
+            // A pending keyboard move lands its row in the viewport before the range is cut,
+            // or the row would be skipped and never get to ask for the scroll itself.
+            if (self.scroll_to_selected and self.selected < rows.len) {
+                const top = @as(f32, @floatFromInt(self.selected)) * pitch;
+                if (top < si.viewport.y) {
+                    si.scrollToOffset(.vertical, top);
+                } else if (top + pitch > si.viewport.y + si.viewport.h) {
+                    si.scrollToOffset(.vertical, top + pitch - si.viewport.h);
+                }
+            }
+            first = @intFromFloat(@max(0, @floor(si.viewport.y / pitch)));
+            end = @intFromFloat(@ceil((si.viewport.y + si.viewport.h) / pitch) + 1);
+            first = @min(first, rows.len);
+            end = @min(end, rows.len);
+        }
+        if (first > 0) {
+            _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = @as(f32, @floatFromInt(first)) * pitch }, .expand = .horizontal, .id_extra = 0 });
+        }
+        for (rows[first..end], first..) |row, i| {
             self.drawRow(editor, row, i, parsed.mode, &query, rows);
+        }
+        if (end < rows.len) {
+            _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = @as(f32, @floatFromInt(rows.len - end)) * pitch }, .expand = .horizontal, .id_extra = 1 });
         }
         scroll.deinit();
 
@@ -620,6 +683,7 @@ fn drawRow(
         .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 },
     });
     defer rb.deinit();
+    if (i == 0) self.row_pitch = rb.data().rect.h;
 
     const row_r = rb.data().borderRectScale().r;
     const mouse_pt = dvui.currentWindow().mouse_pt;
@@ -649,15 +713,14 @@ fn drawRow(
         }
     }
 
-    // The activated row reads as pressed for the whole outro. Before this the palette closed on
-    // the same frame as the click, so the row you picked disappeared out from under the cursor
-    // with no acknowledgement that it was the one that ran.
+    // The activated row reads as pressed for the whole outro, so the row you picked does not
+    // disappear from under the cursor with no acknowledgement that it was the one that ran.
     const is_activated = if (self.activated) |a| a == i else false;
     const is_selected = i == self.selected;
     if (is_activated) {
-        row_r.fill(.all(4), .{ .color = theme.color(.control, .fill_press) });
+        row_r.fill(.all(4), .{ .color = .{ .color = theme.color(.control, .fill_press) } });
     } else if (is_selected) {
-        row_r.fill(.all(4), .{ .color = theme.color(.control, .fill_hover) });
+        row_r.fill(.all(4), .{ .color = .{ .color = theme.color(.control, .fill_hover) } });
     }
 
     if (is_selected and self.scroll_to_selected) {
@@ -677,33 +740,31 @@ fn drawRow(
             // Same fixed glyph slot as the file tree / tabs — `drawFileIcon` drawers use
             // `expand = .ratio` and must not size against the whole palette row.
             {
-                var icon_slot = wdvui.treeRowGlyph(@src(), .{ .gravity_y = 0.5, .margin = .{ .w = 4 } });
+                var icon_slot = core.widgets.treeRowGlyph(@src(), .{ .gravity_y = 0.5, .margin = .{ .w = 4 } });
                 defer icon_slot.deinit();
-                if (!editor.host.drawFileIcon(ext, abs, text_color)) {
-                    dvui.icon(@src(), "file", icons.tvg.lucide.file, .{
-                        .stroke_color = text_color,
-                    }, wdvui.treeRowIconOptions(.{}));
+                if (!editor.app.host.drawFileIcon(ext, abs, text_color)) {
+                    core.icon.icon(@src(), "file", icons.tvg.lucide.file, .{
+                        .stroke_color = .{ .color = text_color },
+                    }, core.widgets.treeRowIconOptions(.{}));
                 }
             }
             // Basename is what users type most often; `.plain = false` still weights it like a
             // path segment when the query hits directory letters that also appear in the name.
-            wdvui.labelHighlighted(@src(), std.fs.path.basename(abs), query, false, .{
+            core.draw.labelHighlighted(@src(), std.fs.path.basename(abs), query, false, .{
                 .gravity_y = 0.5,
                 .padding = .{ .x = 6, .y = 0, .w = 6, .h = 0 },
-                .color_text = text_color,
+                .color_text = .{ .color = text_color },
                 .expand = .none,
             });
             // Dimmed project-relative directory, VSCode-style — also highlight matches so a
             // query like `src/` lights up the path rather than looking like a miss.
-            if (editor.folder) |root| {
-                const arena = dvui.currentWindow().arena();
-                const dir = std.fs.path.dirname(abs) orelse root;
-                const rel = std.fs.path.relativePosix(arena, ".", root, dir) catch "";
+            if (editor.app.folder) |root| {
+                const rel = relativeToRoot(root, std.fs.path.dirname(abs) orelse root);
                 if (rel.len > 0) {
-                    wdvui.labelHighlighted(@src(), rel, query, false, .{
+                    core.draw.labelHighlighted(@src(), rel, query, false, .{
                         .gravity_y = 0.5,
                         .gravity_x = 0.0,
-                        .color_text = text_color.opacity(0.5),
+                        .color_text = .{ .color = text_color.opacity(0.5) },
                         .expand = .none,
                     });
                 }
@@ -714,7 +775,7 @@ fn drawRow(
             // Same fixed glyph slot the menu bar uses for this command's icon (`Menu.zig`'s
             // `menuRowIcon`) — reserved even when `c.icon` is null, so rows with and without an
             // icon still line up in the same column.
-            wdvui.menuRowIcon(c.icon, text_color, c.enabled, i);
+            core.draw.menuRowIcon(c.icon, text_color, c.enabled, i);
             // Title over source, stacked — the same shape a settings row uses for its name and
             // the key beneath it (`SettingRow.header`). Sitting side by side, a source of varying
             // width pushed every title's neighbour out of line; stacked, the titles all start on
@@ -728,20 +789,20 @@ fn drawRow(
                 });
                 defer stack.deinit();
 
-                wdvui.labelHighlighted(@src(), c.title, query, true, .{
+                core.draw.labelHighlighted(@src(), c.title, query, true, .{
                     .margin = dvui.Rect.all(0),
                     .padding = dvui.Rect.all(0),
-                    .color_text = color,
+                    .color_text = .{ .color = color },
                     .expand = .none,
                 });
                 // Dimmed provenance in the mono face — highlighted too, so querying "pixi"
                 // lights up the source rather than looking like a miss on the title.
                 if (c.source) |src| {
-                    wdvui.labelHighlighted(@src(), src, query, true, .{
+                    core.draw.labelHighlighted(@src(), src, query, true, .{
                         .margin = dvui.Rect.all(0),
                         .padding = dvui.Rect.all(0),
                         .font = dvui.Font.theme(.mono).larger(-1),
-                        .color_text = color.opacity(0.5),
+                        .color_text = .{ .color = color.opacity(0.5) },
                         .expand = .none,
                     });
                 }
@@ -755,7 +816,7 @@ fn drawRow(
                 dvui.labelEx(@src(), "{s}", .{keys}, .{ .align_x = 1.0 }, .{
                     .gravity_y = 0.5,
                     .expand = .horizontal,
-                    .color_text = text_color.opacity(0.55),
+                    .color_text = .{ .color = text_color.opacity(0.55) },
                 });
             }
         },

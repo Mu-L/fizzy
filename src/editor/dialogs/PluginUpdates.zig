@@ -9,7 +9,7 @@
 const std = @import("std");
 const fizzy = @import("../../fizzy.zig");
 const dvui = @import("dvui");
-const PluginStore = @import("../PluginStore.zig");
+const PluginStore = @import("app").store.Store;
 
 /// The list stops growing here and scrolls instead, so a user with a dozen outdated plugins gets
 /// a scrollbar rather than a window clipped by the dialog's own `max_size`.
@@ -28,7 +28,7 @@ var closing = false;
 pub fn active(win: *dvui.Window) bool {
     var it = win.dialogs.iterator(null);
     while (it.next()) |d| {
-        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.dvui.DisplayFn) orelse continue;
+        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.core.dialogs.DisplayFn) orelse continue;
         if (df == dialog) return true;
     }
     return false;
@@ -37,7 +37,7 @@ pub fn active(win: *dvui.Window) bool {
 pub fn request() void {
     if (active(dvui.currentWindow())) return;
     closing = false;
-    var mutex = fizzy.dvui.dialog(@src(), .{
+    var mutex = fizzy.core.dialogs.dialog(@src(), .{
         .displayFn = dialog,
         .callafterFn = callAfter,
         .title = "Plugin updates",
@@ -84,7 +84,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
     if (count == 0) {
         if (!closing) {
             closing = true;
-            fizzy.dvui.closeFloatingDialogAnchored();
+            fizzy.core.dialogs.closeFloatingDialogAnchored();
         }
         return true;
     }
@@ -124,7 +124,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
         tl.addText(
             "Plugins run as native code inside Fizzy, with the same access to your files as Fizzy " ++
                 "itself. Only update plugins from authors you trust.",
-            .{ .font = body.larger(-1.0), .color_text = theme.color(.err, .fill) },
+            .{ .font = body.larger(-1.0), .color_text = .{ .color = theme.color(.err, .fill) } },
         );
     }
 
@@ -142,7 +142,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
     // downloading finishes.
     if (dialogButton(@src(), "Not now", .control, 1, 0) and !closing) {
         closing = true;
-        fizzy.dvui.closeFloatingDialogAnchored();
+        fizzy.core.dialogs.closeFloatingDialogAnchored();
     }
     if (PluginStore.anyPendingUpdateUnstarted()) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 1 } });

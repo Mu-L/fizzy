@@ -6,6 +6,8 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const builtin = @import("builtin");
+const core = @import("core");
+const layout_file = @import("layout_file.zig");
 
 const WebFileIo = if (builtin.target.cpu.arch == .wasm32)
     @import("../editor/WebFileIo.zig")
@@ -24,6 +26,23 @@ pub const SDL_DialogFileFilter = DialogFileFilter;
 
 pub const TitleBarButton = enum { minimize, maximize, close };
 
+/// The web backend allocates nothing on the app's behalf — no native dialogs, no native menu.
+/// Accepted and ignored so the startup path is the same on every target.
+pub fn setAllocator(_: std.mem.Allocator) void {}
+
+pub const DialogMode = enum { save, open };
+
+pub const DialogDirs = struct {
+    ctx: *anyopaque,
+    initial: *const fn (ctx: *anyopaque, mode: DialogMode) ?[]const u8,
+    remember: *const fn (ctx: *anyopaque, mode: DialogMode, dir: []const u8) void,
+};
+
+/// The browser's file picker starts wherever the browser decides; there is no directory to
+/// suggest and none to remember. Accepted and ignored so the startup path is the same on every
+/// target.
+pub fn setDialogDirs(_: DialogDirs) void {}
+
 pub fn resetTitleBarHints() void {}
 
 pub fn setTitleBarStrip(_: f32, _: i32) void {}
@@ -35,8 +54,6 @@ pub fn setTitleBarCaptionButtonRect(_: TitleBarButton, _: dvui.Rect.Physical) vo
 pub fn getHoveredTitleBarButton() ?TitleBarButton {
     return null;
 }
-
-pub fn performWindowButton(_: *dvui.Window, _: TitleBarButton) void {}
 
 pub fn isMaximized(_: *dvui.Window) bool {
     return true;
@@ -53,18 +70,18 @@ pub fn showWindow(_: *dvui.Window) void {}
 /// Symmetric with the native API: no window geometry to persist on web.
 pub fn saveWindowGeometry(_: *dvui.Window) void {}
 
-/// Symmetric with the native API: no `window.zon` to persist on web.
-pub fn saveWindowRatios(_: []const u8, _: f32, _: f32) void {}
-
-/// Symmetric with the native API: no `window.zon` to read on web — same defaults
-/// `SavedFrame` itself declares natively.
-pub fn loadWindowRatios(_: []const u8) struct { explorer_ratio: f32, panel_ratio: f32 } {
-    return .{ .explorer_ratio = 0.35, .panel_ratio = 0.25 };
-}
+/// `layout.zon` lives in `localStorage` on the web, through `core.fs` — the same file code as
+/// the desktop (`layout_file.zig`).
+pub const SavedRegion = layout_file.SavedRegion;
+pub const SavedShows = layout_file.SavedShows;
+pub const saveRegions = layout_file.saveRegions;
+pub const loadRegions = layout_file.loadRegions;
+pub const freeRegions = layout_file.freeRegions;
+pub const saveTree = layout_file.saveTree;
+pub const loadTree = layout_file.loadTree;
 
 /// Symmetric with the native API: no AppKit pump on web.
 pub fn macosLaunchComplete() void {}
-
 
 pub fn titlebarStripHeight(_: *dvui.Window) f32 {
     return 0;
@@ -110,7 +127,8 @@ pub fn takeTrackpadPinchRatio() f32 {
 
 /// Mirrors the native signature: a tag into `menu_model.flat_commands`. No native menu bar
 /// on web, so nothing is ever pending.
-pub fn pollPendingNativeMenuAction() ?usize {
+pub const NativeMenuAction = struct { index: usize, from_key: bool };
+pub fn pollPendingNativeMenuAction() ?NativeMenuAction {
     return null;
 }
 
@@ -156,8 +174,6 @@ pub fn rebuildDynamicNativeMenus() void {}
 /// The dvui menu re-reads the recents list every frame, so there is no retained
 /// native submenu to rebuild here (see `backend_native.rebuildNativeRecentFolders`).
 pub fn rebuildNativeRecentFolders() void {}
-
-pub fn showSimpleMessage(_: [:0]const u8, _: [:0]const u8) void {}
 
 pub fn showSaveFileDialog(
     cb: *const fn (?[][:0]const u8) void,

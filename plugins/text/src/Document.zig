@@ -1,0 +1,461 @@
+//! A single open text document: its path, contents, and grouping. The contents are kept
+//! in an `ArrayList(u8)` so the editing widget can grow/shrink it in place; fizzy stores
+//! only an opaque `DocHandle` whose `id` maps back to the registered `Document`.
+const std = @import("std");
+const builtin = @import("builtin");
+const dvui = @import("dvui");
+const sdk = @import("fizzy_sdk");
+const perf = @import("core").perf;
+const tc = @import("textcore/textcore.zig");
+const TextEntryWidget = @import("widgets/TextEntryWidget.zig");
+
+const is_wasm = builtin.target.cpu.arch == .wasm32;
+
+const Document = @This();
+
+/// What the document tab shows when its language has a preview pane: the editor alone, both
+/// side by side, or the preview alone. `.split` is both sides drawn with a divider between them —
+/// `.raw` and `.preview` are that same divider run to either end, so switching slides the preview
+/// in and out as a tray rather than swapping the pane's contents.
+pub const PreviewMode = enum {
+    raw,
+    split,
+    preview,
+};
+
+/// Last `.split` split position chosen this session. The mode itself persists as the markdown
+/// plugin setting `default_md_view` (via the `"markdown"` service); the ratio is session-only
+/// so a one-off drag doesn't rewrite settings.zon every frame of a split move.
+pub var sticky_split_ratio: f32 = 0.5;
+
+/// Record the user's raw|split|preview choice: persists markdown's `default_md_view` and
+/// remembers the split split ratio for documents opened later this session.
+pub fn rememberPreviewMode(mode: PreviewMode, user_ratio: f32) void {
+    sticky_split_ratio = user_ratio;
+    const md = sdk.host().getServiceTyped(sdk.services.markdown.Api) orelse return;
+    md.setDefaultView(switch (mode) {
+        .raw => .raw,
+        .split => .split,
+        .preview => .preview,
+    });
+}
+
+fn defaultPreviewMode() PreviewMode {
+    const md = sdk.host().getServiceTyped(sdk.services.markdown.Api) orelse return .split;
+    return switch (md.defaultView()) {
+        .raw => .raw,
+        .split => .split,
+        .preview => .preview,
+    };
+}
+
+/// Fizzy document id (monotonic, allocated from the host).
+id: u64,
+/// Absolute path on disk, heap-owned.
+path: []u8,
+/// Tab grouping (which split/tab group this document lives in).
+grouping: u64 = 0,
+/// File contents. The text-editing widget reads from and writes back to `items`.
+text: std.ArrayList(u8) = .empty,
+/// Cached `\n` count + 1; refreshed on load and when the editor reports edits.
+line_count: usize = 1,
+/// True for a document created via `createDocument` ("New File") that has never been
+/// written to a real on-disk path yet. Drives `documentHasRecognizedSaveExtension`, so
+/// `Editor.save()` routes an untitled document straight to Save As. Deliberately not
+/// inferred from the path (e.g. `""`/no extension) — an intentionally extensionless real
+/// file like `Makefile` must not be mistaken for an untitled document.
+unsaved: bool = false,
+/// The op id `savedBytes` last serialized at; what `written` makes the clean point.
+serialized_op_id: u64 = 0,
+
+/// Selection, mirrored from the `TextEntryWidget` after every draw (`TextEditor.draw`) so
+/// the Copy/Paste commands — invoked from the Edit menu / native menu, outside any frame's
+/// widget instance — have somewhere durable to read "what's currently selected" from.
+sel_start: usize = 0,
+sel_end: usize = 0,
+/// Whether this document's `TextEntryWidget` held dvui keyboard focus as of the last draw,
+/// mirrored alongside the selection above. Fizzy routes a clipboard verb to the active
+/// document only while the document's owner reports that verb enabled, which is how it tells
+/// "focus is in the editor" from "focus is in some other text input" (a search box, the Output
+/// Panel) without knowing anything about widget ownership — see `Keybinds.clipboardVerb`. A
+/// document that isn't drawn this frame (background tab) keeps its last value, which is
+/// correct: it can't be the active document *and* undrawn.
+editor_focused: bool = false,
+/// Selection the next `TextEditor.draw` should install, set by Paste/Undo/Redo (which all
+/// edit `text` from outside the widget's own frame) and consumed once. A full range rather
+/// than a bare offset so undo can restore what *was* selected — undoing "type over a
+/// selection" now re-selects the text it brought back.
+pending_sel: ?tc.Range = null,
+/// Vertical scroll offset, mirrored from the editor's `ScrollInfo` after every draw and
+/// restored on the widget's next `dvui.firstFrame` (see `TextEditor.zig`). dvui garbage-
+/// collects a widget id's persisted per-frame data (including its scroll position) the very
+/// next frame it isn't drawn — true for any inactive/background tab, since the workbench only
+/// draws the active document per pane. Without this, switching away to another document (a
+/// goto-definition jump, or just clicking another tab) for even one frame and back reset the
+/// original document's scroll to the top, discarding wherever the user had actually been
+/// reading. `Document` is fizzy-owned and outlives dvui's per-frame GC, so this is the durable
+/// copy; the field is written every frame regardless (cheap), not just on the restore frame.
+scroll_y: f32 = 0,
+/// 0-based source line the next `TextEditor.draw` should scroll into view, set by
+/// `revealPosition` (goto-definition) alongside `pending_cursor` and consumed once. A
+/// separate field, not derived from `pending_cursor`, because the editor scrolls to it
+/// directly (`ScrollInfo.scrollToOffset`) rather than relying on the text layout's own
+/// cursor-rect-discovery scroll (`TextEntryWidget`'s `scroll_to_cursor`), which only fires
+/// while the layout pass happens to walk over the cursor's new byte range — unreliable for a
+/// jump that lands outside the currently-laid-out/visible region (a fresh document's first
+/// draw, or a large jump within an already-open one). Editor never wraps lines
+/// (`break_lines = false`), so one source line is exactly one visual row and `line *
+/// line_height` is an exact, not approximate, scroll target.
+pending_scroll_line: ?u32 = null,
+/// The same reveal, for the preview pane — `LanguageSupport.previewReveal`, consumed by
+/// `TextEditor.drawPreviewPane`. Separate from `pending_scroll_line` because the two are
+/// consumed by different panes, and either may be the only one showing: `.raw` never draws a
+/// preview, `.preview` never draws the editor. Dropped unconsumed at the end of a frame that
+/// drew no preview, so turning one on later doesn't replay a jump from minutes ago.
+pending_preview_line: ?u32 = null,
+
+/// Owned completion candidates for the current completion list, if any — each `.label`/`.text`
+/// is a copy (`sdk.language.CompletionItem` fields from `sdk.host().completionFor(...)` are
+/// only valid for the duration of that call, same convention as `HoverResult.text`) made by
+/// `TextEditor.drawCompletion`. Empty exactly when `completion_anchor == null`.
+completion_items: std.ArrayListUnmanaged(TextEntryWidget.CompletionCandidate) = .empty,
+/// Which candidate is "current" — shown as ghost text and highlighted in the dropdown list.
+/// Moved by Up/Down in `TextEntryWidget.processEvents()`.
+completion_selected: usize = 0,
+/// Byte offset `completion_items` is valid for, or null when no completion is showing.
+/// Round-tripped with `completion_selected`/`TextEntryWidget.current_completion` every frame
+/// (`TextEditor.drawEditor`), the same way `sel_start`/`sel_end` round-trip — `te` is a fresh
+/// struct every frame, but `te.processEvents()` (Up/Down-navigates, Tab/Enter-accepts) needs
+/// to see whatever was showing as of the *previous* frame's `draw()`, since `drawCompletion`
+/// (which sets/refreshes it for the new frame) doesn't run until after `processEvents()`.
+completion_anchor: ?usize = null,
+
+/// Raw|split|preview state when a language plugin registers a preview pane.
+///
+/// `preview_split_ratio_user` is the position `.split` returns to: the fraction of the pane the
+/// *raw* side gets, last chosen by dragging the split. A ratio rather than points because it is
+/// what `settings.zon` has always stored and what a new document inherits — the split itself works
+/// in points, and `previewExtent` converts at the draw.
+///
+/// The live position is not here: it belongs to the split, under its own widget id, the same way
+/// every other divider in the app remembers where it sits.
+preview_mode: PreviewMode = .split,
+preview_split_ratio_user: f32 = 0.5,
+
+/// Undo/redo history — see `textcore.History` for the capture + grouping strategy.
+history: tc.History = .{},
+/// `history.topOpId()` as of the last successful save; the document is dirty exactly when
+/// the two differ. Deliberately an id, not `undo.items.len` — a length can return to its
+/// saved value via undo-then-new-edit while content differs from disk, but an id can't:
+/// undo/redo move the same `EditOp` (and its id) back and forth, while any genuinely new
+/// edit gets a fresh id that never collides with the one recorded at save time.
+clean_op_id: u64 = 0,
+
+/// Debounce state for `Host.notifyDocumentContentChanged` — see `tickContentChanged`.
+///
+/// Keyed on `history.topOpId()` rather than a hash of the text: the id already changes on
+/// exactly the events we care about (any genuinely new edit) and comparing two integers costs
+/// nothing per frame, whereas hashing a large file every frame to find out it didn't change is
+/// the sort of thing that quietly eats a millisecond on every keystroke.
+notify_seen_op_id: u64 = 0,
+notify_sent_op_id: u64 = 0,
+/// `perf.nanoTimestamp()` after which the current burst counts as settled.
+notify_due_ns: i128 = 0,
+
+/// How long the text has to stop changing before observers hear about it. Long enough that
+/// ordinary typing produces one notification per pause rather than per character, short enough
+/// that it feels immediate when you stop.
+const notify_debounce_ns: i128 = 300 * std.time.ns_per_ms;
+
+/// 64 MiB — generous for source files; guards against opening something huge by mistake.
+const max_file_bytes: usize = 64 * 1024 * 1024;
+
+/// Build a document from in-memory bytes (browser file picker, or after reading from disk).
+///
+/// Unknown and binary files still open: NULs and malformed UTF-8 become U+FFFD so dvui's
+/// text layout can draw them. The fallback editor's job is to show the file, not to refuse it.
+pub fn fromBytes(path: []const u8, bytes: []const u8) !Document {
+    if (tc.encoding.looksBinary(bytes)) {
+        dvui.log.warn("text: {s} has binary bytes; opening as plain text", .{path});
+    }
+    const gpa = sdk.allocator();
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(gpa);
+    try tc.encoding.appendLossy(&text, gpa, bytes);
+    const path_copy = try gpa.dupe(u8, path);
+    errdefer gpa.free(path_copy);
+    // Seed from the persisted `default_md_view` setting (and this session's split ratio). Start
+    // the split *at* the mode's resting position rather than animating there: the tray sliding
+    // open is feedback for a choice the user just made, not for every file they open.
+    const mode = defaultPreviewMode();
+    var doc = Document{
+        .id = sdk.host().allocDocId(),
+        .path = path_copy,
+        .text = text,
+        .preview_mode = mode,
+        .preview_split_ratio_user = sticky_split_ratio,
+    };
+    doc.refreshLineCount();
+    return doc;
+}
+
+pub fn refreshLineCount(self: *Document) void {
+    self.line_count = if (self.text.items.len == 0) 1 else std.mem.count(u8, self.text.items, "\n") + 1;
+}
+
+/// Resolves a 0-based `{line, character}` position (LSP `Position`-shaped, `character` a byte
+/// count within the line) against this document's own loaded `text`, for `revealPosition` —
+/// see `sdk.language.DefinitionLocation`'s doc comment for why goto-definition hands over a
+/// line/character pair instead of a pre-resolved byte offset. `line` past the end of the
+/// document clamps to the last line; `character` past the end of `line` clamps to the line's
+/// actual length (a stale/imprecise position from the provider should still land somewhere
+/// sane in the file, not panic or silently pick byte 0).
+pub fn byteOffsetForLineCharacter(self: *const Document, line: u32, character: u32) usize {
+    var line_start: usize = 0;
+    var lines_seen: u32 = 0;
+    while (lines_seen < line) {
+        const nl = std.mem.indexOfScalarPos(u8, self.text.items, line_start, '\n') orelse break;
+        line_start = nl + 1;
+        lines_seen += 1;
+    }
+    var line_end = line_start;
+    while (line_end < self.text.items.len and self.text.items[line_end] != '\n') : (line_end += 1) {}
+    return line_start + @min(character, line_end - line_start);
+}
+
+/// Inverse of `byteOffsetForLineCharacter`: 0-based `{line, character}` for a byte offset
+/// (clamped to the document). Used for the infobar caret chip.
+pub fn lineCharacterForByteOffset(self: *const Document, offset: usize) struct { line: u32, character: u32 } {
+    const text = self.text.items;
+    const end = @min(offset, text.len);
+    var line: u32 = 0;
+    var line_start: usize = 0;
+    var i: usize = 0;
+    while (i < end) : (i += 1) {
+        if (text[i] == '\n') {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    return .{ .line = line, .character = @intCast(end - line_start) };
+}
+
+/// Where `revealPosition` should scroll to for a goto-definition landing on `target_line`:
+/// the nearest blank (whitespace-only) line at or above it, so a leading doc-comment/
+/// attribute block sitting directly above the definition (no blank line separating them from
+/// it) stays in view too, rather than the definition itself landing right at the top edge
+/// with its comments scrolled just out of frame. Returns null when no blank line is found
+/// before reaching the start of the file — the definition (and everything above it) is
+/// already at the top of the file, so the caller should leave the viewport untouched rather
+/// than force a scroll to line 0.
+pub fn scrollTargetLine(self: *const Document, target_line: u32) ?u32 {
+    if (target_line == 0) return null;
+    const text = self.text.items;
+
+    // Forward scan to the byte offset where `target_line` starts.
+    var start: usize = 0;
+    var line_num: u32 = 0;
+    while (line_num < target_line) {
+        const nl = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse return null;
+        start = nl + 1;
+        line_num += 1;
+    }
+
+    // Walk upward one line at a time from `target_line - 1`, checking each for blankness.
+    // `line_end` is the exclusive end (its trailing '\n') of the line about to be examined.
+    var line = target_line;
+    var line_end = start;
+    while (line > 0) {
+        line -= 1;
+        if (line_end == 0) break; // defensive; see the loop-invariant note below.
+        const content_end = line_end - 1; // exclude the line's own trailing '\n'
+        const line_start = if (std.mem.lastIndexOfScalar(u8, text[0..content_end], '\n')) |i| i + 1 else 0;
+        if (std.mem.trim(u8, text[line_start..content_end], " \t\r").len == 0) return line;
+        // `line_start == 0` only happens on line 0 itself, which is also exactly when `line`
+        // reaches 0 and the loop condition ends it — so `line_end` never reaches 0 with `line`
+        // still positive on the next iteration; the check above is a guard against that
+        // invariant ever being wrong, not a path expected to trigger in practice.
+        line_end = line_start;
+    }
+    return null;
+}
+
+/// Build a document by reading `path` from disk. Runs on fizzy's load worker thread.
+/// Web has no filesystem; documents there are opened from bytes (`fromBytes`) instead.
+pub fn fromPath(path: []const u8) !Document {
+    if (comptime is_wasm) return error.Unsupported;
+    const gpa = sdk.allocator();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(dvui.io, path, gpa, .limited(max_file_bytes));
+    defer gpa.free(bytes);
+    return fromBytes(path, bytes);
+}
+
+pub fn deinit(self: *Document) void {
+    const gpa = sdk.allocator();
+    gpa.free(self.path);
+    self.text.deinit(gpa);
+    self.history.deinit(gpa);
+    self.clearCompletionItems();
+    self.completion_items.deinit(gpa);
+}
+
+/// Frees every candidate's owned `.text` and empties the list (but keeps its capacity) —
+/// call before replacing with a fresh fetch or when dismissing/accepting.
+pub fn clearCompletionItems(self: *Document) void {
+    const gpa = sdk.allocator();
+    for (self.completion_items.items) |it| {
+        gpa.free(it.label);
+        gpa.free(it.text);
+        gpa.free(it.detail);
+        gpa.free(it.documentation);
+    }
+    self.completion_items.clearRetainingCapacity();
+}
+
+pub fn isDirty(self: *const Document) bool {
+    return self.history.topOpId() != self.clean_op_id;
+}
+
+/// Broadcast this document's live contents to every plugin, now.
+///
+/// The text plugin owns `.md` (and everything else nothing claimed), so a plugin that indexes
+/// markdown links, counts words, or previews structure can only see unsaved text if we hand it
+/// over — nothing in the SDK exposes another plugin's buffer.
+pub fn notifyContentChanged(self: *Document) void {
+    self.notify_seen_op_id = self.history.topOpId();
+    self.notify_sent_op_id = self.notify_seen_op_id;
+    sdk.host().notifyDocumentContentChanged(self.path, self.text.items);
+}
+
+/// Per-frame half of the debounce. Returns true while a notification is still pending, which
+/// the caller passes up through `tickOpenDocuments` to keep frames coming — otherwise the app
+/// idles the moment you stop typing and the pending notification waits for whatever happens to
+/// wake it next.
+pub fn tickContentChanged(self: *Document) bool {
+    const top = self.history.topOpId();
+    if (top != self.notify_seen_op_id) {
+        // Still changing — restart the clock. A held key or a paste storm therefore produces
+        // one notification at the end, not one per event.
+        self.notify_seen_op_id = top;
+        self.notify_due_ns = perf.nanoTimestamp() + notify_debounce_ns;
+        return true;
+    }
+    if (self.notify_sent_op_id == top) return false;
+    if (perf.nanoTimestamp() < self.notify_due_ns) return true;
+
+    self.notifyContentChanged();
+    return false;
+}
+
+/// Write the current contents back to `path`.
+pub fn save(self: *Document) !void {
+    if (comptime is_wasm) return error.Unsupported;
+    try std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = self.path, .data = self.text.items });
+    // Close the group *before* snapshotting the id: without this a save landing mid-typing-run
+    // would let the next keystroke merge into the same group, so one undo would jump straight
+    // past the state that was written to disk. VSCode pushes a stack element on save for the
+    // same reason.
+    self.history.closeGroup();
+    self.clean_op_id = self.history.topOpId();
+    // Immediately, not on the debounce: an observer that also watches the filesystem is about
+    // to see this write land, and it should have our version of the contents first so it can
+    // recognize the on-disk change as already accounted for.
+    self.notifyContentChanged();
+}
+
+/// The bytes `save` would write, for a host that does the writing itself (a mounted drive).
+/// Remembers which edit those bytes stand for: the write lands later, and edits typed in the
+/// meantime must still count as unsaved when it does.
+pub fn savedBytes(self: *Document, allocator: std.mem.Allocator) ![]u8 {
+    self.history.closeGroup();
+    self.serialized_op_id = self.history.topOpId();
+    return allocator.dupe(u8, self.text.items);
+}
+
+/// The host wrote `savedBytes()` to `path`: the same bookkeeping `save` does after its write, plus
+/// adopting `path` when it is not ours yet (Save As). Clean up to the edit that was serialized,
+/// not up to now.
+pub fn written(self: *Document, path: []const u8) !void {
+    if (!std.mem.eql(u8, path, self.path)) {
+        const gpa = sdk.allocator();
+        const path_copy = try gpa.dupe(u8, path);
+        gpa.free(self.path);
+        self.path = path_copy;
+        self.unsaved = false;
+    }
+    self.clean_op_id = self.serialized_op_id;
+    self.notifyContentChanged();
+}
+
+/// Replace in-memory contents from disk and clear undo history (external change / discard).
+pub fn reloadFromDisk(self: *Document) !void {
+    if (comptime is_wasm) return error.Unsupported;
+    const gpa = sdk.allocator();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(dvui.io, self.path, gpa, .limited(max_file_bytes));
+    defer gpa.free(bytes);
+
+    self.text.clearRetainingCapacity();
+    try tc.encoding.appendLossy(&self.text, gpa, bytes);
+    self.history.deinit(gpa);
+    self.history = .{};
+    self.clean_op_id = 0;
+    self.refreshLineCount();
+    self.sel_start = 0;
+    self.sel_end = 0;
+    // Non-null `pending_sel` is what tells `TextEditor.draw` to disable `cache_layout`
+    // for the next frame — required after a full buffer replace, otherwise dvui's text
+    // layout cache (built against the previous contents) asserts / panics on draw.
+    self.pending_sel = .collapsed(0);
+    self.clearCompletionItems();
+    self.completion_anchor = null;
+    self.completion_selected = 0;
+}
+
+/// Retarget the document at `new_path` and write it there (Save As). Once this succeeds the
+/// document behaves exactly like one opened from disk at `new_path` (no longer `unsaved`).
+pub fn saveAs(self: *Document, new_path: []const u8) !void {
+    if (comptime is_wasm) return error.Unsupported;
+    const gpa = sdk.allocator();
+    const path_copy = try gpa.dupe(u8, new_path);
+    errdefer gpa.free(path_copy);
+    try std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = path_copy, .data = self.text.items });
+    gpa.free(self.path);
+    self.path = path_copy;
+    self.unsaved = false;
+    self.clean_op_id = self.history.topOpId();
+}
+
+/// Replace `text.items[start..end)` with `new` as one complete, undoable edit — used by the
+/// `text.paste` command, which (unlike the widget-driven keystroke path) builds a single
+/// edit outside any frame's `TextEntryWidget` instance.
+pub fn replaceRange(self: *Document, start: usize, end: usize, new: []const u8) !void {
+    const gpa = sdk.allocator();
+    const after: tc.Range = .collapsed(start + new.len);
+    try self.history.pushComplete(gpa, start, self.text.items[start..end], new, .init(start, end), after);
+    try self.text.replaceRange(gpa, start, end - start, new);
+    self.refreshLineCount();
+    self.sel_start = after.head;
+    self.sel_end = after.head;
+    self.pending_sel = after;
+}
+
+/// Reverses the most recent edit, if any, and relocates the caret to it (applied on the next
+/// `TextEditor.draw` via `pending_cursor`).
+pub fn undo(self: *Document) void {
+    const gpa = sdk.allocator();
+    const sel = self.history.applyUndo(gpa, &self.text) orelse return;
+    self.refreshLineCount();
+    self.sel_start = @min(sel.start(), self.text.items.len);
+    self.sel_end = @min(sel.end(), self.text.items.len);
+    self.pending_sel = sel;
+}
+
+/// Re-applies the most recently undone edit, if any.
+pub fn redo(self: *Document) void {
+    const gpa = sdk.allocator();
+    const sel = self.history.applyRedo(gpa, &self.text) orelse return;
+    self.refreshLineCount();
+    self.sel_start = @min(sel.start(), self.text.items.len);
+    self.sel_end = @min(sel.end(), self.text.items.len);
+    self.pending_sel = sel;
+}

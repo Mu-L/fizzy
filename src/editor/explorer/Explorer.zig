@@ -6,22 +6,22 @@ const workbench = @import("workbench");
 const icons = @import("icons");
 
 const Core = @import("mach").Core;
-const App = fizzy.App;
+const Entry = fizzy.Entry;
 const Editor = fizzy.Editor;
 
 const nfd = @import("nfd");
-const PluginStore = @import("../PluginStore.zig");
+const PluginStore = @import("app").store.Store;
+const Layout = @import("app").layout.Layout;
 
 pub const Explorer = @This();
 
 pub const files = workbench.files;
 // pub const animations = @import("animations.zig");
 // pub const keyframe_animations = @import("keyframe_animations.zig");
-// The pixel-art project view is contributed by the plugin via `Host.registerSidebarView`,
+// The pixel-art project view is contributed by the plugin via `Host.registerSurface`,
 // not re-exported here.
 pub const settings = @import("settings.zig");
 
-paned: *fizzy.dvui.PanedWidget = undefined,
 scroll_info: dvui.ScrollInfo = .{
     .horizontal = .auto,
 },
@@ -30,17 +30,11 @@ rect_screen: dvui.Rect.Physical = .{},
 open_branches: std.AutoHashMap(dvui.Id, void) = undefined,
 animations_ratio: f32 = 0.5,
 closed: bool = false,
-
-/// Peek state: when the explorer is collapsed (small window), a sidebar tap slides the
-/// explorer fully in and it stays open until the user clicks the floating collapse button
-/// at the bottom-right. No auto-close timer — that path caused a per-frame refresh that
-/// kept the app from settling after the open animation finished.
-peek_open: bool = false,
 collapse_btn_anim_started: bool = false,
 
 pub fn init() Explorer {
     return .{
-        .open_branches = .init(fizzy.app.allocator),
+        .open_branches = .init(fizzy.entry().allocator),
     };
 }
 
@@ -49,43 +43,36 @@ pub fn deinit(self: *Explorer) void {
     self.open_branches.deinit();
 }
 
-pub fn close(explorer: *Explorer) void {
-    explorer.paned.animateSplit(0.0, dvui.easing.outQuint);
+pub fn close(explorer: *Explorer, editor: *fizzy.Editor) void {
     explorer.closed = true;
+    if (editor.regionFor(fizzy.sdk.keywords.ide.sidebar)) |r| r.close();
 }
 
-pub fn open(explorer: *Explorer) void {
-    if (explorer.paned.collapsed()) {
-        // Already peeking: do nothing. The peek stays open until the floating collapse
-        // button is clicked — sidebar taps don't toggle it back closed (and we no longer
-        // need to refresh any timer).
-        if (!explorer.peek_open) explorer.peekOpen();
-        return;
-    }
-
-    if (fizzy.editor.explorer_ratio > 0.0) {
-        explorer.paned.animateSplit(fizzy.editor.explorer_ratio, dvui.easing.outBack);
-    } else {
-        explorer.paned.animateSplit(0.2, dvui.easing.outBack);
-    }
-
+pub fn open(explorer: *Explorer, editor: *fizzy.Editor) void {
     explorer.closed = false;
+    if (editor.regionFor(fizzy.sdk.keywords.ide.sidebar)) |r| r.open();
 }
 
-pub fn peekOpen(explorer: *Explorer) void {
-    explorer.paned.animateSplit(1.0, dvui.easing.outBack);
-    explorer.peek_open = true;
-    explorer.closed = false;
-}
-
-pub fn peekClose(explorer: *Explorer) void {
-    explorer.peek_open = false;
-    explorer.paned.animateSplit(0.0, dvui.easing.outQuint);
+/// Shut the explorer from the floating button, or from a tap that put something in the center
+/// worth seeing. `Region.close` withdraws the peek, so the narrow layout goes back to collapsing
+/// it by itself.
+pub fn peekClose(explorer: *Explorer, editor: *fizzy.Editor) void {
     explorer.closed = true;
     explorer.collapse_btn_anim_started = false;
+    if (editor.regionFor(fizzy.sdk.keywords.ide.sidebar)) |r| r.close();
 }
 
-pub fn draw(explorer: *Explorer) !dvui.App.Result {
+/// Draws the explorer *chrome* — header, scroll policy, collapse button — around whichever
+/// surface currently matches `keywords`. The chrome is the app's; the body is the plugin's.
+///
+/// The body is resolved through the layout's match set rather than the registry, so a user's
+/// keyword override moves the body on screen instead of only changing `Layout.matching`.
+pub fn draw(
+    explorer: *Explorer,
+    editor: *fizzy.Editor,
+    f: *Layout,
+    keywords: []const []const u8,
+) !dvui.App.Result {
     const vbox = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .both,
         .background = false,
@@ -95,7 +82,7 @@ pub fn draw(explorer: *Explorer) !dvui.App.Result {
     explorer.rect = vbox.data().rect;
     explorer.rect_screen = vbox.data().rectScale().r;
 
-    try drawHeader(explorer);
+    try drawHeader(explorer, f, keywords);
 
     _ = dvui.spacer(@src(), .{});
 
@@ -104,14 +91,16 @@ pub fn draw(explorer: *Explorer) !dvui.App.Result {
         .background = false,
     });
 
-    // The Plugins tab owns its own vertical scroll areas (installed + store panes inside
-    // a paned widget). With the default `.auto` vertical mode, each inner scrollArea
-    // reports its full content height as min_size, which bubbles up here and triggers
-    // a second explorer-level vertical bar on top of the pane scrollbars. Pin vertical
-    // scroll to `.given` for that tab so we fill the viewport and let the panes scroll.
+    // Some surfaces carry their own vertical scrolling, because a surface can be put in any
+    // region and only this one supplies a scroll area: the Plugins tab (installed and store
+    // panes inside a paned widget) and Settings. With the default `.auto` vertical mode, each
+    // inner scrollArea reports its full content height as min_size, which bubbles up here and
+    // triggers a second explorer-level bar on top of theirs. Pin vertical scroll to `.given`
+    // for those, so we fill the viewport and let the surface scroll.
     const self_vert_scroll = blk: {
-        if (fizzy.editor.host.activeSidebarView()) |view| {
-            break :blk std.mem.eql(u8, view.id, PluginStore.view_id);
+        if (f.selected(keywords)) |view| {
+            break :blk std.mem.eql(u8, view.id, PluginStore.view_id) or
+                std.mem.eql(u8, view.id, fizzy.Editor.view_settings);
         }
         break :blk false;
     };
@@ -129,14 +118,22 @@ pub fn draw(explorer: *Explorer) !dvui.App.Result {
         .background = false,
     });
 
+    // Through the layout, not `Host.selectedSurface`: the host remembers which
+    // view was chosen here and hands it back whether or not this place still
+    // holds it. Drag Files out to the main area and it is claimed by what it
+    // was dropped on — the rail drops the icon, and the host would still hand
+    // back Files to draw in the body, until a click on some other icon moved
+    // the remembered choice. `f.selected` reads the choice against what the
+    // place actually shows, which is the only reading that can never say that.
+    const shown = f.selected(keywords);
+
     if (comptime workbench.has_file_tree) {
-        if (!fizzy.editor.host.isActiveSidebarView(fizzy.Editor.workbench_files_view)) {
-            fizzy.editor.resetFileTreeWhenFilesHidden();
-        }
+        const showing_files = if (shown) |s| std.mem.eql(u8, s.id, fizzy.Editor.workbench_files_view) else false;
+        if (!showing_files) editor.resetFileTreeWhenFilesHidden();
     }
 
-    if (fizzy.editor.host.activeSidebarView()) |view| {
-        try view.draw(view.ctx);
+    if (shown) |surface| {
+        _ = try surface.draw(surface.ctx);
     }
 
     scroll.deinit();
@@ -147,22 +144,23 @@ pub fn draw(explorer: *Explorer) !dvui.App.Result {
 
     // Two calls rather than one: `pane_vbox` has to deinit between the vertical and horizontal
     // hints, since the horizontal ones are drawn over the outer `vbox` instead.
-    fizzy.dvui.drawScrollEdgeShadows(pane_vbox.data().contentRectScale(), null, &explorer.scroll_info, .{});
+    fizzy.core.draw.drawScrollEdgeShadows(pane_vbox.data().contentRectScale(), null, &explorer.scroll_info, .{});
 
     pane_vbox.deinit();
 
-    fizzy.dvui.drawScrollEdgeShadows(null, vbox.data().contentRectScale(), &explorer.scroll_info, .{});
+    fizzy.core.draw.drawScrollEdgeShadows(null, vbox.data().contentRectScale(), &explorer.scroll_info, .{});
 
     // Peek-only floating collapse button. Drawn last so it overlays everything else in the
-    // explorer pane. Only appears while we're full-screen peeking on a collapsed paned.
-    if (explorer.peek_open and explorer.paned.collapsed()) {
-        drawCollapseButton(explorer);
+    // explorer pane. Only while the region is *peeking*: open on a window too narrow to hold it
+    // beside the center, which is the one state where there is no split to drag it shut by.
+    if (editor.regionFor(fizzy.sdk.keywords.ide.sidebar)) |r| {
+        if (r.isPeeking()) drawCollapseButton(explorer, editor) else explorer.collapse_btn_anim_started = false;
     }
 
     return .ok;
 }
 
-fn drawCollapseButton(explorer: *Explorer) void {
+fn drawCollapseButton(explorer: *Explorer, editor: *fizzy.Editor) void {
     // Styled to match the floating Edit pill (see `Workspace.drawEditPill`): circular
     // background, same content.fill / content.text color pair, same drop shadow.
     const button_size: f32 = 48;
@@ -170,7 +168,8 @@ fn drawCollapseButton(explorer: *Explorer) void {
     const margin: f32 = 8;
     const wr = dvui.windowRect();
 
-    const anim_id = dvui.Id.update(explorer.paned.data().id, "collapse_btn");
+    const r = editor.regionFor(fizzy.sdk.keywords.ide.sidebar) orelse return;
+    const anim_id = dvui.Id.update(r.id, "collapse_btn");
     if (!explorer.collapse_btn_anim_started) {
         explorer.collapse_btn_anim_started = true;
         dvui.animation(anim_id, "_appear", .{
@@ -204,8 +203,8 @@ fn drawCollapseButton(explorer: *Explorer) void {
         .expand = .both,
         .corners = dvui.CornerRect.all(btn_radius),
         .background = true,
-        .color_fill = dvui.themeGet().color(.content, .fill),
-        .color_fill_hover = dvui.themeGet().color(.content, .fill).lighten(if (dvui.themeGet().dark) 10.0 else -10.0),
+        .color_fill = .{ .color = dvui.themeGet().color(.content, .fill) },
+        .color_fill_hover = .{ .color = dvui.themeGet().color(.content, .fill).lighten(if (dvui.themeGet().dark) 10.0 else -10.0) },
         .color_border = .transparent,
         .padding = .all(0),
         .margin = .all(margin),
@@ -223,11 +222,11 @@ fn drawCollapseButton(explorer: *Explorer) void {
     bw.drawBackground();
 
     const icon_color = dvui.themeGet().color(.content, .text);
-    dvui.icon(
+    fizzy.core.icon.icon(
         @src(),
         "collapse_explorer",
         icons.tvg.lucide.@"panel-left-close",
-        .{ .stroke_color = icon_color, .fill_color = icon_color },
+        .{ .stroke_color = .{ .color = icon_color }, .fill_color = .{ .color = icon_color } },
         .{
             .expand = .ratio,
             .gravity_x = 0.5,
@@ -238,16 +237,19 @@ fn drawCollapseButton(explorer: *Explorer) void {
     );
 
     if (bw.clicked()) {
-        explorer.peekClose();
+        explorer.peekClose(editor);
     }
 }
 
-pub fn hovered(explorer: *Explorer) bool {
-    return fizzy.dvui.hovered(explorer.paned.data());
+pub fn hovered(_: *Explorer, editor: *fizzy.Editor) bool {
+    _ = editor;
+    // The sidebar is a region now, and a region is a plain box — there is no widget handle to ask
+    // about hover. Nothing reads this today; it returns false rather than pretending.
+    return false;
 }
 
-pub fn drawHeader(_: *Explorer) !void {
-    const view = fizzy.editor.host.activeSidebarView() orelse return;
+pub fn drawHeader(_: *Explorer, f: *Layout, keywords: []const []const u8) !void {
+    const view = f.selected(keywords) orelse return;
     const header_title = std.ascii.allocUpperString(dvui.currentWindow().arena(), view.title) catch view.title;
 
     dvui.labelNoFmt(@src(), header_title, .{}, .{ .font = dvui.Font.theme(.heading) });

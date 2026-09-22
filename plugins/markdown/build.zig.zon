@@ -1,0 +1,23 @@
+.{
+    .name = .markdown,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "plugin.zig",
+        "plugin.zig.zon",
+        "src",
+        "static",
+    },
+    .fingerprint = 0x96be88e3e93bcfea,
+    .dependencies = .{
+        .fizzy = .{
+            .path = "../../sdk",
+        },
+        .md4zig = .{
+            .url = "git+https://github.com/fizzyedit/md4zig#2d0a687d28be9849b9abe3453bfb7c9f22ffcda1",
+            .hash = "md4zig-0.1.0-iiatj7oOBgCcrw8ee3UISfYe2LsKVEf7O3osC85HthPX",
+        },
+    },
+}

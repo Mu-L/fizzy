@@ -1,10 +1,8 @@
 //! Fizzy keybindings: the default bind table, fizzy's own commands, and key dispatch.
 //!
-//! Keys used to be wired straight to `fizzy.editor.*` calls by a hardcoded if-chain, which meant
-//! nothing was addressable by id and so nothing could be rebound. Now every fizzy action is a
-//! registered `Command`, and `tick()` resolves a key event to a command id through
-//! `keymap.Keymap` and runs it via the Host registry — the same registry plugin commands live
-//! in, which is what makes a single rebindable table (and, later, a command palette) possible.
+//! Every fizzy action is a registered `Command`, and `tick()` resolves a key event to a command
+//! id through `Keymap` and runs it via the Host registry — the same registry plugin
+//! commands live in, which is what makes one rebindable table and the command palette possible.
 //!
 //! **Migration shape.** dvui's `Window.keybinds` map is still the source of the *default* key
 //! for each action: dvui seeds its own binds, `register()` below adds fizzy's own, and plugins
@@ -20,8 +18,8 @@ const fizzy = @import("../fizzy.zig");
 const dvui = @import("dvui");
 const icons = @import("icons");
 const sdk = @import("fizzy_sdk");
-const keymap = @import("keymap/keymap.zig");
-const adapter = @import("keymap/dvui_adapter.zig");
+const Keymap = @import("app").keymap.Keymap;
+const adapter = @import("app").keymap.dvui_adapter;
 
 pub const Keybinds = @This();
 
@@ -44,7 +42,7 @@ const menu_model = @import("menu_model.zig");
 ///
 /// Runtime mac detection — `builtin.os.tag.isDarwin()` is `false` for
 /// wasm32-freestanding, so macOS web users would otherwise get the Windows (Ctrl)
-/// bindings. `fizzy.platform.isMacOS()` reads DVUI's `navigator.platform`-derived
+/// bindings. `fizzy.core.platform.isMacOS()` reads DVUI's `navigator.platform`-derived
 /// choice on web and uses `os.tag` on native.
 pub fn register() !void {
     const window = dvui.currentWindow();
@@ -55,7 +53,7 @@ pub fn register() !void {
     //
     // "zoom" is the trackpad-scheme canvas modifier (cmd/ctrl + scroll to zoom). Shared
     // by every `CanvasWidget` consumer (image viewer, pixi, etc.) — not plugin-specific.
-    if (fizzy.platform.isMacOS()) {
+    if (fizzy.core.platform.isMacOS()) {
         try window.keybinds.putNoClobber(window.gpa, "explorer", .{ .command = true, .key = .e });
         try window.keybinds.putNoClobber(window.gpa, "workspace", .{ .command = true, .key = .w });
         try window.keybinds.putNoClobber(window.gpa, "new_file", .{ .command = true, .key = .n });
@@ -82,7 +80,7 @@ pub fn register() !void {
 /// `Host.runCommand` passes `owner.state` to `run`, so fizzy needs *a* `Plugin` to hang its
 /// commands off. This is that pseudo-plugin: never added to `host.plugins`, so no lifecycle hook
 /// ever fires on it and `removeOwned` never touches its commands. The alternative — adding a
-/// `state` field to `sdk.regions.Command` — would move the ABI fingerprint and force every
+/// `state` field to `sdk.Command` — would move the ABI fingerprint and force every
 /// third-party plugin to be rebuilt, which isn't worth it for a pointer we can supply this way.
 var fizzy_plugin: sdk.Plugin = .{
     .state = undefined, // set to the Editor in `registerCommands`
@@ -129,6 +127,7 @@ const fizzy_commands = [_]FizzyCommand{
     .{ .id = "fizzy.copy", .title = "Copy", .bind = "copy", .run = cmdCopy, .isEnabled = cmdCopyEnabled, .icon = icons.tvg.lucide.copy },
     .{ .id = "fizzy.paste", .title = "Paste", .bind = "paste", .run = cmdPaste, .isEnabled = cmdPasteEnabled, .icon = icons.tvg.lucide.@"clipboard-paste" },
     .{ .id = "fizzy.toggleExplorer", .title = "Toggle Explorer", .bind = "explorer", .run = cmdToggleExplorer, .icon = icons.tvg.lucide.@"panel-left" },
+    .{ .id = "fizzy.resetLayout", .title = "Reset Layout", .bind = null, .run = cmdResetLayout, .icon = icons.tvg.lucide.@"rotate-ccw" },
     .{ .id = "fizzy.deleteSelection", .title = "Delete Selection", .bind = "delete_selection_contents", .run = cmdDeleteSelection, .isEnabled = cmdDeleteSelectionEnabled, .icon = icons.tvg.lucide.@"trash-2" },
     .{ .id = "fizzy.accept", .title = "Accept", .bind = "activate", .run = cmdAccept, .isEnabled = cmdAcceptEnabled, .icon = icons.tvg.lucide.check },
     .{ .id = "fizzy.cancel", .title = "Cancel", .bind = "cancel", .run = cmdCancel, .isEnabled = cmdCancelEnabled, .icon = icons.tvg.lucide.x },
@@ -179,7 +178,7 @@ fn cmdOpenFiles(_: *anyopaque) anyerror!void {
 }
 
 fn cmdNewFile(state: *anyopaque) anyerror!void {
-    editorFromState(state).requestNewFileDialog();
+    editorFromState(state).app.host.requestNewDocument(null, 0);
 }
 fn cmdSave(state: *anyopaque) anyerror!void {
     try editorFromState(state).save();
@@ -202,6 +201,16 @@ fn cmdRedo(state: *anyopaque) anyerror!void {
 /// the command palette, where no such event exists.
 var running_from_key_event: bool = false;
 
+/// Run `id` as if it came from a key event — for a native macOS menu item fired by its ⌘-key
+/// equivalent, whose keystroke AppKit still passes on to SDL afterwards. Clipboard verbs then
+/// leave the focused widget to the real event instead of synthesizing one (see
+/// `clipboardVerb`), which is what pasted twice into a settings field.
+pub fn runCommandWithKeyEventInFlight(editor: *Editor, id: []const u8) !void {
+    running_from_key_event = true;
+    defer running_from_key_event = false;
+    try editor.app.host.runCommand(id);
+}
+
 /// Copy/Paste must reach exactly one target: the active document's editor, or some other
 /// focused widget (Output Panel, a settings filter, a plugin search box) — never both.
 ///
@@ -220,11 +229,11 @@ var running_from_key_event: bool = false;
 /// adopted the convention (no `isEnabled`, or one that only tracks selection): it still gets the
 /// verb, preserving the old behaviour rather than silently losing copy in that plugin.
 ///
-/// The forwarding stays conditional. On macOS `cmd+c` never arrives as an SDL key event —
-/// AppKit matches the menu's key equivalent first — so the event must be synthesized. Elsewhere
-/// the real event is still in flight (dispatch doesn't mark it handled) and synthesizing would
-/// make the widget act twice. Menu clicks and palette invocations carry no key event anywhere,
-/// so they always synthesize.
+/// The forwarding stays conditional. When the verb was reached from a key event — the SDL
+/// key path on every OS, or on macOS a native menu item fired by its ⌘-key equivalent, whose
+/// keystroke AppKit passes on to SDL afterwards — the real event is still in flight (dispatch
+/// doesn't mark it handled) and synthesizing would make the widget act twice. Menu clicks and
+/// palette invocations carry no key event anywhere, so they always synthesize.
 fn clipboardVerb(editor: *Editor, comptime bind: []const u8) anyerror!void {
     if (editor.activeDocCommandEnabled(bind)) return runDocumentClipboardVerb(editor, bind);
 
@@ -300,10 +309,14 @@ fn cmdCommandPalette(state: *anyopaque) anyerror!void {
 fn cmdToggleExplorer(state: *anyopaque) anyerror!void {
     const editor = editorFromState(state);
     // `.closed`, not `paned.split_ratio` — the latter is only valid during draw.
-    if (editor.explorer.closed) editor.explorer.open() else editor.explorer.close();
+    if (editor.explorer.closed) editor.explorer.open(editor) else editor.explorer.close(editor);
     // A native menu click doesn't arrive as an SDL event, so without this nothing requests the
     // frame the paned needs to animate.
     dvui.refresh(null, @src(), dvui.currentWindow().data().id);
+}
+
+fn cmdResetLayout(state: *anyopaque) anyerror!void {
+    editorFromState(state).resetLayout();
 }
 
 fn cmdShowDvuiDemo(_: *anyopaque) anyerror!void {
@@ -329,7 +342,7 @@ fn cmdReportBug(_: *anyopaque) anyerror!void {
 pub fn registerCommands(editor: *Editor) !void {
     fizzy_plugin.state = editor;
     inline for (fizzy_commands) |c| {
-        try editor.host.registerCommand(.{
+        try editor.app.host.registerCommand(.{
             .id = c.id,
             .owner = &fizzy_plugin,
             .title = c.title,
@@ -347,7 +360,7 @@ pub fn registerCommands(editor: *Editor) !void {
 pub const Profile = enum { vscode };
 
 /// A default binding, resolved per platform. `mod` is Command on macOS and Control elsewhere
-/// (see `keymap.chord`), so most entries need only one spelling.
+/// (see `Keymap.chord`), so most entries need only one spelling.
 const DefaultBind = struct {
     command: []const u8,
     keys: []const u8,
@@ -459,18 +472,59 @@ fn fizzyCommandForBind(name: []const u8) ?FizzyCommand {
 /// The AppKit key-equivalent character for a key, or null for keys a plain `NSMenuItem`
 /// shortcut can't express (function keys, arrows, keypad). Lowercase throughout: AppKit takes
 /// shift from the modifier mask, and an uppercase character would demand shift on its own.
-fn nsKeyEquivalent(key: keymap.Key) ?[]const u8 {
+fn nsKeyEquivalent(key: Keymap.Key) ?[]const u8 {
     return switch (key) {
-        .a => "a", .b => "b", .c => "c", .d => "d", .e => "e", .f => "f", .g => "g",
-        .h => "h", .i => "i", .j => "j", .k => "k", .l => "l", .m => "m", .n => "n",
-        .o => "o", .p => "p", .q => "q", .r => "r", .s => "s", .t => "t", .u => "u",
-        .v => "v", .w => "w", .x => "x", .y => "y", .z => "z",
-        .zero => "0", .one => "1", .two => "2", .three => "3", .four => "4",
-        .five => "5", .six => "6", .seven => "7", .eight => "8", .nine => "9",
-        .grave => "`", .minus => "-", .equal => "=", .left_bracket => "[",
-        .right_bracket => "]", .backslash => "\\", .semicolon => ";",
-        .apostrophe => "'", .comma => ",", .period => ".", .slash => "/",
-        .space => " ", .tab => "\t", .enter => "\r", .backspace => "\u{8}",
+        .a => "a",
+        .b => "b",
+        .c => "c",
+        .d => "d",
+        .e => "e",
+        .f => "f",
+        .g => "g",
+        .h => "h",
+        .i => "i",
+        .j => "j",
+        .k => "k",
+        .l => "l",
+        .m => "m",
+        .n => "n",
+        .o => "o",
+        .p => "p",
+        .q => "q",
+        .r => "r",
+        .s => "s",
+        .t => "t",
+        .u => "u",
+        .v => "v",
+        .w => "w",
+        .x => "x",
+        .y => "y",
+        .z => "z",
+        .zero => "0",
+        .one => "1",
+        .two => "2",
+        .three => "3",
+        .four => "4",
+        .five => "5",
+        .six => "6",
+        .seven => "7",
+        .eight => "8",
+        .nine => "9",
+        .grave => "`",
+        .minus => "-",
+        .equal => "=",
+        .left_bracket => "[",
+        .right_bracket => "]",
+        .backslash => "\\",
+        .semicolon => ";",
+        .apostrophe => "'",
+        .comma => ",",
+        .period => ".",
+        .slash => "/",
+        .space => " ",
+        .tab => "\t",
+        .enter => "\r",
+        .backspace => "\u{8}",
         else => null,
     };
 }
@@ -521,8 +575,8 @@ pub fn chordShadowed(editor: *Editor, command_id: []const u8) bool {
 /// `cmd+f` to Format Document, which fizzy's own profile hands to Open Folder, has to end with
 /// `cmd+f` formatting: the menu, `Keybinds.tick` and AppKit all agree on the winner, and Open
 /// Folder shows no chord because it no longer has one.
-fn shadowedByHigherLayer(editor: *Editor, binding: keymap.Binding, command_id: []const u8) bool {
-    for (editor.keymap.bindings.items) |other| {
+fn shadowedByHigherLayer(editor: *Editor, binding: Keymap.Binding, command_id: []const u8) bool {
+    for (editor.app.keymap.bindings.items) |other| {
         const other_cmd = other.command orelse continue;
         if (std.mem.eql(u8, other_cmd, command_id)) continue;
         if (!other.stroke.eql(binding.stroke)) continue;
@@ -561,11 +615,9 @@ pub fn syncNativeMenuShortcuts(editor: *Editor) void {
         }
     }
 
-    // Plugin items (`Host.registerNativeMenuItem`). Before this they were built with an empty
-    // key equivalent and never restamped, so a plugin action with a perfectly good chord — the
-    // text plugin's Format Document, pixi's Transform / Grid Layout — showed none in the macOS
-    // Edit menu no matter what the user bound it to.
-    for (editor.host.native_menu_items.items, 0..) |ni, index| {
+    // Plugin items (`Host.registerNativeMenuItem`) get their chord restamped too, whatever the
+    // user bound.
+    for (editor.app.host.native_menu_items.items, 0..) |ni, index| {
         const command_id = ni.command orelse {
             fizzy.backend.setDynamicNativeMenuShortcut(index, null, 0);
             continue;
@@ -588,7 +640,7 @@ pub fn syncNativeMenuShortcuts(editor: *Editor) void {
 /// A binding another layer has taken over (`shadowedByHigherLayer`) shows nothing: the chord is
 /// no longer this command's, in the menu or anywhere else, and advertising it would promise a
 /// key that runs something else.
-pub fn strokeForCommand(editor: *Editor, command_id: []const u8) ?keymap.Stroke {
+pub fn strokeForCommand(editor: *Editor, command_id: []const u8) ?Keymap.Stroke {
     if (bestBinding(editor, command_id)) |b| {
         return if (shadowedByHigherLayer(editor, b, command_id)) null else b.stroke;
     }
@@ -608,9 +660,9 @@ pub fn menuKeybindFor(editor: *Editor, command_id: []const u8) dvui.enums.Keybin
 }
 
 /// Highest-precedence binding for `command` (user > plugin > profile > dvui), or null.
-fn bestBinding(editor: *Editor, command: []const u8) ?keymap.Binding {
-    var best: ?keymap.Binding = null;
-    for (editor.keymap.bindings.items) |b| {
+fn bestBinding(editor: *Editor, command: []const u8) ?Keymap.Binding {
+    var best: ?Keymap.Binding = null;
+    for (editor.app.keymap.bindings.items) |b| {
         const cmd = b.command orelse continue;
         if (!std.mem.eql(u8, cmd, command)) continue;
         if (best) |cur| {
@@ -636,7 +688,7 @@ pub fn nativeMenuOwnsChord(editor: *Editor, id: []const u8) bool {
 
 /// Whether a visible plugin `NativeMenuItem` names `command_id`.
 fn nativeMenuItemFor(editor: *Editor, command_id: []const u8) bool {
-    for (editor.host.native_menu_items.items) |ni| {
+    for (editor.app.host.native_menu_items.items) |ni| {
         if (ni.hidden) continue;
         const cmd = ni.command orelse continue;
         if (std.mem.eql(u8, cmd, command_id)) return true;
@@ -644,23 +696,19 @@ fn nativeMenuItemFor(editor: *Editor, command_id: []const u8) bool {
     return false;
 }
 
-pub fn isNativeMenuCommandOnMacOS(id: []const u8) bool {
-    return menu_model.contains(id);
-}
-
-/// Rebuild `editor.keymap` from the finished `dvui.Window.keybinds` map. Called at the end of
+/// Rebuild `editor.app.keymap` from the finished `dvui.Window.keybinds` map. Called at the end of
 /// `Editor.rebuildKeybinds`, so it sees dvui's defaults, fizzy's own binds, and every loaded
 /// plugin's contributions in one pass.
 pub fn buildKeymap(editor: *Editor) !void {
-    const gpa = editor.host.allocator;
+    const gpa = editor.app.host.allocator;
     const window = dvui.currentWindow();
 
-    editor.keymap.deinit(gpa);
-    editor.keymap = .{};
+    editor.app.keymap.deinit(gpa);
+    editor.app.keymap = .{};
 
-    if (editor.keybind_conflicts) |prev| {
+    if (editor.app.keybind_conflicts) |prev| {
         gpa.free(prev);
-        editor.keybind_conflicts = null;
+        editor.app.keybind_conflicts = null;
     }
 
     // Layer 1 (lowest): whatever ended up in dvui's bind map — dvui's own defaults, fizzy's own
@@ -670,7 +718,7 @@ pub fn buildKeymap(editor: *Editor) !void {
         const cmd = fizzyCommandForBind(kv.key_ptr.*) orelse continue;
         // Modifier-only binds ("shift", "zoom", "ctrl/cmd") have no key and can't be a chord.
         const chord = adapter.fromKeybind(kv.value_ptr.*) orelse continue;
-        try editor.keymap.add(gpa, .{
+        try editor.app.keymap.add(gpa, .{
             .stroke = .{ .first = chord },
             .command = cmd.id,
             .source = .dvui,
@@ -678,25 +726,25 @@ pub fn buildKeymap(editor: *Editor) !void {
     }
 
     // Layer 2: fizzy's own default profile.
-    const platform: keymap.Platform = if (fizzy.platform.isMacOS()) .mac else .other;
+    const platform: Keymap.Platform = if (fizzy.core.platform.isMacOS()) .mac else .other;
     for (defaultsFor(editor.keybind_profile)) |d| {
         const text = if (platform == .mac) (d.keys_mac orelse d.keys) else d.keys;
-        const stroke = keymap.parseKeys(text, platform) catch |err| {
+        const stroke = Keymap.parseKeys(text, platform) catch |err| {
             dvui.log.err("default keybind '{s}' for '{s}' is invalid: {s}", .{ text, d.command, @errorName(err) });
             continue;
         };
-        try editor.keymap.add(gpa, .{ .stroke = stroke, .command = d.command, .source = .profile });
+        try editor.app.keymap.add(gpa, .{ .stroke = stroke, .command = d.command, .source = .profile });
     }
 
     // Layer 2b: owner-scoped plugin defaults (C2-lite). Higher source than profile so they win
     // when their owner is active; `owner_id` keeps them inert otherwise.
     for (plugin_owner_defaults) |d| {
-        if (editor.host.command(d.command) == null) continue;
-        const stroke = keymap.parseKeys(d.keys, platform) catch |err| {
+        if (editor.app.host.command(d.command) == null) continue;
+        const stroke = Keymap.parseKeys(d.keys, platform) catch |err| {
             dvui.log.err("plugin keybind '{s}' for '{s}' is invalid: {s}", .{ d.keys, d.command, @errorName(err) });
             continue;
         };
-        try editor.keymap.add(gpa, .{
+        try editor.app.keymap.add(gpa, .{
             .stroke = stroke,
             .command = d.command,
             .source = .plugin,
@@ -715,7 +763,7 @@ pub fn buildKeymap(editor: *Editor) !void {
     syncNativeMenuShortcuts(editor);
 
     // Cache conflicts for the Keyboard Shortcuts settings pane.
-    editor.keybind_conflicts = editor.keymap.conflicts(gpa) catch |err| blk: {
+    editor.app.keybind_conflicts = editor.app.keymap.conflicts(gpa) catch |err| blk: {
         dvui.log.err("keybind conflicts() failed: {s}", .{@errorName(err)});
         break :blk null;
     };
@@ -724,25 +772,17 @@ pub fn buildKeymap(editor: *Editor) !void {
 /// Read and apply `<config>/keybinds.zon`. A missing file is the normal case — defaults are
 /// never written out, so a user who has rebound nothing has no file at all.
 fn loadUserOverrides(editor: *Editor) !void {
-    if (comptime builtin.target.cpu.arch == .wasm32) return;
-    const gpa = editor.host.allocator;
+    const gpa = editor.app.host.allocator;
 
-    if (editor.keybinds_overrides) |*f| {
+    if (editor.app.keybinds_overrides) |*f| {
         f.deinit(gpa);
-        editor.keybinds_overrides = null;
+        editor.app.keybinds_overrides = null;
     }
 
-    const path = try std.fs.path.join(gpa, &.{ editor.config_folder, "keybinds.zon" });
+    const path = try std.fs.path.join(gpa, &.{ editor.app.config_folder, "keybinds.zon" });
     defer gpa.free(path);
 
-    const text = std.Io.Dir.cwd().readFileAllocOptions(
-        dvui.io,
-        path,
-        gpa,
-        .limited(1024 * 1024),
-        .of(u8),
-        0,
-    ) catch |err| switch (err) {
+    const text = fizzy.core.fs.readZ(gpa, dvui.io, path) catch |err| switch (err) {
         error.FileNotFound => return,
         else => {
             dvui.log.err("keybinds.zon read failed: {s}", .{@errorName(err)});
@@ -751,8 +791,8 @@ fn loadUserOverrides(editor: *Editor) !void {
     };
     defer gpa.free(text);
 
-    const platform: keymap.Platform = if (fizzy.platform.isMacOS()) .mac else .other;
-    var file = try keymap.zon.parse(gpa, text, platform);
+    const platform: Keymap.Platform = if (fizzy.core.platform.isMacOS()) .mac else .other;
+    var file = try Keymap.zon.parse(gpa, text, platform);
     errdefer file.deinit(gpa);
 
     for (file.diagnostics) |d| {
@@ -761,10 +801,10 @@ fn loadUserOverrides(editor: *Editor) !void {
 
     const view = try file.toBindings(gpa, .user);
     defer gpa.free(view);
-    for (view) |b| try editor.keymap.add(gpa, b);
+    for (view) |b| try editor.app.keymap.add(gpa, b);
 
     // The keymap borrows this File's strings, so it has to outlive the keymap.
-    editor.keybinds_overrides = file;
+    editor.app.keybinds_overrides = file;
 }
 
 // ---- projection back into dvui's bind map -------------------------------------------------------
@@ -782,9 +822,9 @@ fn loadUserOverrides(editor: *Editor) !void {
 pub const bind_override_prefix = "bind.";
 
 /// The dvui bind name a fizzy command's key is mirrored onto, so a rebind also moves the
-/// built-in bind dvui's own widgets match on. The menus no longer go through this — they ask
-/// the keymap directly (`menuKeybindFor`), which answers for every command rather than only the
-/// ones that happen to have a dvui bind name.
+/// built-in bind dvui's own widgets match on. The menus ask the keymap directly
+/// (`menuKeybindFor`), which answers for every command rather than only the ones that happen
+/// to have a dvui bind name.
 fn fizzyBindForCommand(id: []const u8) ?[]const u8 {
     inline for (fizzy_commands) |c| {
         if (std.mem.eql(u8, c.id, id)) return c.bind;
@@ -801,7 +841,7 @@ fn fizzyBindForCommand(id: []const u8) ?[]const u8 {
 fn projectUserOverrides(editor: *Editor) void {
     const window = dvui.currentWindow();
 
-    for (editor.keymap.bindings.items) |b| {
+    for (editor.app.keymap.bindings.items) |b| {
         if (b.source != .user) continue;
         const command = b.command orelse continue;
 
@@ -834,12 +874,12 @@ fn projectUserOverrides(editor: *Editor) void {
 
 /// Context flags for `when` matching. Only what fizzy can answer today; grows as bindings
 /// need finer gates.
-fn currentContext(editor: *Editor) keymap.When {
+fn currentContext(editor: *Editor) Keymap.When {
     return .{
         .editor_focused = editor.activeDoc() != null,
         .explorer_focused = !editor.explorer.closed,
         .modal_open = editor.command_palette.open,
-        // Declared by `keymap.When` since it was written but never filled in, so any `when`
+        // Declared by `Keymap.When` since it was written but never filled in, so any `when`
         // clause mentioning text input could not match. `dvui.wantTextInput` is the signal.
         .text_input_focused = editor.text_input_focused,
     };
@@ -853,7 +893,7 @@ fn activeOwnerId(editor: *Editor) ?[]const u8 {
 // These keybinds are available regardless of the currently focused widget.
 // Any binds that need to be consumed by a specific widget do not need to trigger here.
 pub fn tick() !void {
-    const editor = fizzy.editor;
+    const editor = fizzy.editor();
     // While the palette is open it owns the keyboard entirely — otherwise Escape would also run
     // `fizzy.cancel`, and a typed character could trip a single-key binding.
     if (editor.command_palette.open) return;
@@ -871,7 +911,7 @@ pub fn tick() !void {
                 if (ke.action != .down and ke.action != .repeat) continue;
 
                 const chord = adapter.chordFrom(ke) orelse continue;
-                switch (editor.keymap.resolve(chord, ctx, active_owner)) {
+                switch (editor.app.keymap.resolve(chord, ctx, active_owner)) {
                     .none => {},
                     // `pending` (first half of a chord) and `unbound` both *claim* the key, and
                     // ought to mark the event handled so it doesn't also reach a widget. Neither
@@ -898,7 +938,7 @@ pub fn tick() !void {
                         // commands need to know that, or they synthesize a second one.
                         running_from_key_event = true;
                         defer running_from_key_event = false;
-                        editor.host.runCommand(id) catch |err| {
+                        editor.app.host.runCommand(id) catch |err| {
                             dvui.log.err("command '{s}' failed: {s}", .{ id, @errorName(err) });
                         };
                     },
@@ -919,39 +959,35 @@ fn ownerIdForCommand(command: []const u8) ?[]const u8 {
 }
 
 fn keybindsPath(editor: *Editor, gpa: std.mem.Allocator) ![]u8 {
-    return try std.fs.path.join(gpa, &.{ editor.config_folder, "keybinds.zon" });
+    return try std.fs.path.join(gpa, &.{ editor.app.config_folder, "keybinds.zon" });
 }
 
 /// Rewrite `keybinds.zon` from `bindings`, then rebuild the live keymap.
-fn writeAndReload(editor: *Editor, bindings: []const keymap.zon.OwnedBinding) !void {
-    if (comptime builtin.target.cpu.arch == .wasm32) return;
-    const gpa = editor.host.allocator;
+fn writeAndReload(editor: *Editor, bindings: []const Keymap.zon.OwnedBinding) !void {
+    const gpa = editor.app.host.allocator;
     const path = try keybindsPath(editor, gpa);
     defer gpa.free(path);
 
-    const text = try keymap.zon.format(gpa, bindings);
+    const text = try Keymap.zon.format(gpa, bindings);
     defer gpa.free(text);
 
     if (bindings.len == 0) {
-        std.Io.Dir.cwd().deleteFile(dvui.io, path) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
+        try fizzy.core.fs.remove(dvui.io, path);
     } else {
-        try std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = path, .data = text });
+        try fizzy.core.fs.write(dvui.io, path, text);
     }
 
     editor.rebuildKeybinds();
 }
 
-fn collectCurrentOverrides(editor: *Editor, gpa: std.mem.Allocator) !std.ArrayList(keymap.zon.OwnedBinding) {
-    var out: std.ArrayList(keymap.zon.OwnedBinding) = .empty;
+fn collectCurrentOverrides(editor: *Editor, gpa: std.mem.Allocator) !std.ArrayList(Keymap.zon.OwnedBinding) {
+    var out: std.ArrayList(Keymap.zon.OwnedBinding) = .empty;
     errdefer {
         for (out.items) |*b| b.deinit(gpa);
         out.deinit(gpa);
     }
 
-    if (editor.keybinds_overrides) |file| {
+    if (editor.app.keybinds_overrides) |file| {
         for (file.bindings) |b| {
             try out.append(gpa, .{
                 .keys = try gpa.dupe(u8, b.keys),
@@ -968,10 +1004,9 @@ fn collectCurrentOverrides(editor: *Editor, gpa: std.mem.Allocator) !std.ArrayLi
 
 /// Set (or replace) the user override for `command`. `keys` is VSCode grammar (`mod+p`).
 pub fn setUserBinding(editor: *Editor, command: []const u8, keys: []const u8) !void {
-    if (comptime builtin.target.cpu.arch == .wasm32) return;
-    const gpa = editor.host.allocator;
-    const platform: keymap.Platform = if (fizzy.platform.isMacOS()) .mac else .other;
-    const stroke = try keymap.parseKeys(keys, platform);
+    const gpa = editor.app.host.allocator;
+    const platform: Keymap.Platform = if (fizzy.core.platform.isMacOS()) .mac else .other;
+    const stroke = try Keymap.parseKeys(keys, platform);
 
     var list = try collectCurrentOverrides(editor, gpa);
     defer {
@@ -1005,8 +1040,7 @@ pub fn setUserBinding(editor: *Editor, command: []const u8, keys: []const u8) !v
 
 /// Remove the user override for `command`, restoring the profile/plugin default.
 pub fn clearUserBinding(editor: *Editor, command: []const u8) !void {
-    if (comptime builtin.target.cpu.arch == .wasm32) return;
-    const gpa = editor.host.allocator;
+    const gpa = editor.app.host.allocator;
 
     var list = try collectCurrentOverrides(editor, gpa);
     defer {
@@ -1033,7 +1067,7 @@ pub fn clearUserBinding(editor: *Editor, command: []const u8) !void {
 
 /// True when `command` has a user-layer override in the live keymap.
 pub fn hasUserOverride(editor: *Editor, command: []const u8) bool {
-    for (editor.keymap.bindings.items) |b| {
+    for (editor.app.keymap.bindings.items) |b| {
         if (b.source != .user) continue;
         const c = b.command orelse continue;
         if (std.mem.eql(u8, c, command)) return true;

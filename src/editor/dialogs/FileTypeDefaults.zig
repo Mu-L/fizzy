@@ -2,11 +2,9 @@
 //! (`Plugin.fileTypes`) overlap something another plugin already opens — including the very
 //! common case where the prior owner was only the `text` fallback ("a new plugin wants `.txt`").
 //!
-//! **Why this exists.** Which plugin opens a file used to be a silent numeric contest between
-//! plugin authors (`fileTypePriority`, now removed): nothing stopped a third-party plugin from
-//! claiming a low number for an extension it had no business monopolizing, and the user had no
-//! way to see or override the outcome. Ownership is now an explicit, persisted user decision,
-//! and this window is where that decision gets made the first time it comes up.
+//! **Why this exists.** Which plugin opens a file is an explicit, persisted user decision, not
+//! a priority contest between plugin authors, and this window is where that decision gets made
+//! the first time it comes up.
 //!
 //! **Why it never nags.** There is deliberately no *per-extension* "already asked" record on disk
 //! — such a record cannot tell "nothing has changed since we asked" apart from "a *different* new
@@ -81,7 +79,7 @@ var closing = false;
 pub fn active(win: *dvui.Window) bool {
     var it = win.dialogs.iterator(null);
     while (it.next()) |d| {
-        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.dvui.DisplayFn) orelse continue;
+        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.core.dialogs.DisplayFn) orelse continue;
         if (df == dialog) return true;
     }
     return false;
@@ -93,7 +91,7 @@ pub fn request(id: []const u8, display_name: []const u8, new_rows: []Row) void {
     if (new_rows.len == 0) return;
     if (active(dvui.currentWindow())) return;
 
-    const gpa = fizzy.app.allocator;
+    const gpa = fizzy.entry().allocator;
     reset();
     plugin_id = gpa.dupe(u8, id) catch return;
     plugin_name = gpa.dupe(u8, display_name) catch {
@@ -104,7 +102,7 @@ pub fn request(id: []const u8, display_name: []const u8, new_rows: []Row) void {
     rows = new_rows;
     closing = false;
 
-    var mutex = fizzy.dvui.dialog(@src(), .{
+    var mutex = fizzy.core.dialogs.dialog(@src(), .{
         .displayFn = dialog,
         .callafterFn = callAfter,
         .title = "File types",
@@ -121,7 +119,7 @@ pub fn request(id: []const u8, display_name: []const u8, new_rows: []Row) void {
 
 /// Free everything this module owns. Safe to call twice.
 fn reset() void {
-    const gpa = fizzy.app.allocator;
+    const gpa = fizzy.entry().allocator;
     for (rows) |r| {
         gpa.free(r.ext);
         for (r.choices) |c| {
@@ -168,7 +166,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
     if (rows.len == 0) {
         if (!closing) {
             closing = true;
-            fizzy.dvui.closeFloatingDialogAnchored();
+            fizzy.core.dialogs.closeFloatingDialogAnchored();
         }
         return true;
     }
@@ -194,7 +192,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
         defer head.deinit();
         const head_opts: dvui.Options = .{
             .font = body.larger(-1.0),
-            .color_text = theme.color(.content, .text).opacity(0.7),
+            .color_text = .{ .color = theme.color(.content, .text).opacity(0.7) },
             .gravity_y = 0.5,
         };
         dvui.labelNoFmt(@src(), "TYPE", .{}, head_opts.override(.{ .min_size_content = .{ .w = col_ext_w, .h = 0 } }));
@@ -263,13 +261,13 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
     // question simply goes unanswered until this plugin next arrives (reinstall or first load).
     if (dialogButton(@src(), "Not now", .control, 1, 0) and !closing) {
         closing = true;
-        fizzy.dvui.closeFloatingDialogAnchored();
+        fizzy.core.dialogs.closeFloatingDialogAnchored();
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 1 } });
     if (dialogButton(@src(), "Confirm", .highlight, 2, 1) and !closing) {
         confirm();
         closing = true;
-        fizzy.dvui.closeFloatingDialogAnchored();
+        fizzy.core.dialogs.closeFloatingDialogAnchored();
     }
 
     return true;
@@ -283,7 +281,7 @@ fn confirm() void {
     for (rows) |row| {
         if (row.selected >= row.choices.len) continue;
         const chosen = row.choices[row.selected].id;
-        fizzy.editor.resolveExtensionConflict(row.ext, chosen) catch |err|
+        fizzy.editor().resolveExtensionConflict(row.ext, chosen) catch |err|
             dvui.log.err("file types: could not assign '{s}' to '{s}': {s}", .{ row.ext, chosen, @errorName(err) });
     }
 }
@@ -308,7 +306,7 @@ fn drawOwnerDropdown(row: *Row, ri: usize) void {
         var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical });
         defer hbox.deinit();
         dvui.labelNoFmt(@src(), selected.name, .{}, .{ .margin = .all(0), .padding = .all(0), .gravity_y = 0.5 });
-        dvui.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_x = 1.0, .gravity_y = 0.5 });
+        fizzy.core.icon.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_x = 1.0, .gravity_y = 0.5 });
     }
 
     if (!dropdown.dropped()) return;
@@ -338,7 +336,7 @@ fn addOwnerChoice(dropdown: *dvui.DropdownWidget, choice: Choice) bool {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
         dvui.labelNoFmt(@src(), if (choice.builtin) "Built-in" else "Plugin", .{}, opts.override(.{
             .font = dvui.Font.theme(.body).larger(-1.0),
-            .color_text = dvui.themeGet().color(.content, .text).opacity(0.6),
+            .color_text = .{ .color = dvui.themeGet().color(.content, .text).opacity(0.6) },
             .gravity_x = 1.0,
             .gravity_y = 0.5,
         }));

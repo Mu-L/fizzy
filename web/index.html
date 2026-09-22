@@ -144,6 +144,7 @@
       // `dvui` import object into `instantiateStreaming`, so we add a `fizzy`
       // namespace on the way through — same trick as the trackpad export, inverted.
       const utf8 = new TextDecoder();
+      const utf8encode = (s) => new TextEncoder().encode(s);
       let wasmInstance = null;
       const overlayUrls = new Map();
       const overlays = new Map();
@@ -158,13 +159,56 @@
       overlayRoot.style.cssText = "position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:1;";
       document.getElementById("app-root").appendChild(overlayRoot);
 
-      const origInstantiateStreaming = WebAssembly.instantiateStreaming.bind(WebAssembly);
-      WebAssembly.instantiateStreaming = (source, imports) => {
-        imports.fizzy = {
+      // The one function table, created here so it can grow: a plugin loaded at runtime (a
+      // wasm side module, see `loadPlugin`) brings functions of its own, and its function
+      // pointers are indices into this table. The main module imports it (`--import-table`).
+      const functionTable = new WebAssembly.Table({ initial: 4096, element: "anyfunc" });
+
+      // The `fizzy` import namespace. Memory is always the main module's (a plugin shares it);
+      // the *callbacks* go to whichever instance made the call — a plugin exports its own
+      // `FizzyWebRequestReady` and friends, with state of its own behind them — so this is a
+      // factory over the instance to call back into.
+      function oauthPopup(inst, url, cleanup) {
+        const done = () => { if (cleanup) cleanup(); };
+        const fail = () => {
+          done();
+          inst.exports.FizzyWebOAuthFailed();
+          if (dvuiApp) dvuiApp.requestRender();
+        };
+        let settled = false;
+        const onMessage = (ev) => {
+          if (ev.origin !== location.origin || !ev.data || typeof ev.data.fizzyOAuth !== "string") return;
+          settled = true;
+          window.removeEventListener("message", onMessage);
+          done();
+          const bytes = utf8encode(ev.data.fizzyOAuth);
+          const ptr = inst.exports.FizzyWebOAuthAlloc(bytes.length);
+          if (!ptr) return fail();
+          new Uint8Array(wasmInstance.exports.memory.buffer, ptr, bytes.length).set(bytes);
+          inst.exports.FizzyWebOAuthResult(ptr, bytes.length);
+          if (dvuiApp) dvuiApp.requestRender();
+        };
+        window.addEventListener("message", onMessage);
+        const popup = window.open(url, "fizzy-oauth", "popup,width=520,height=680");
+        if (!popup) {
+          window.removeEventListener("message", onMessage);
+          return fail();
+        }
+        const watch = setInterval(() => {
+          if (settled) return clearInterval(watch);
+          if (popup.closed) {
+            clearInterval(watch);
+            window.removeEventListener("message", onMessage);
+            fail();
+          }
+        }, 500);
+      }
+
+      const fizzyImports = (target) => ({
           fizzy_web_image_request(id, urlPtr, urlLen) {
-            const inst = wasmInstance;
+            const inst = target();
             if (!inst) return;
-            const url = utf8.decode(new Uint8Array(inst.exports.memory.buffer, urlPtr, urlLen));
+            const url = utf8.decode(new Uint8Array(wasmInstance.exports.memory.buffer, urlPtr, urlLen));
             overlayUrls.set(id, url);
             loadImagePixels(url).then((imageData) => {
               const bytes = new Uint8Array(
@@ -176,7 +220,7 @@
               if (!ptr) {
                 inst.exports.FizzyWebImageFailed(id);
               } else {
-                new Uint8Array(inst.exports.memory.buffer, ptr, bytes.length).set(bytes);
+                new Uint8Array(wasmInstance.exports.memory.buffer, ptr, bytes.length).set(bytes);
                 inst.exports.FizzyWebImageReady(id, ptr, bytes.length, imageData.width, imageData.height);
               }
               if (dvuiApp) dvuiApp.requestRender();
@@ -228,11 +272,137 @@
             entry.img.remove();
             overlays.delete(id);
           },
-          // Byte fetch for the store catalog / READMEs / icons — no rasterize, just GET.
-          fizzy_web_fetch(id, urlPtr, urlLen) {
+          // A full request for `core.transport.Web`: any method, headers as `Name: value`
+          // lines, a body, and the status back with the bytes. Cloud drives speak through
+          // this; `fizzy_web_fetch` below stays the GET-only path the store uses.
+          fizzy_web_request(id, methodPtr, methodLen, urlPtr, urlLen, headersPtr, headersLen, bodyPtr, bodyLen) {
+            const inst = target();
+            if (!inst) return;
+            const mem = wasmInstance.exports.memory.buffer;
+            const method = utf8.decode(new Uint8Array(mem, methodPtr, methodLen));
+            const url = utf8.decode(new Uint8Array(mem, urlPtr, urlLen));
+            const headers = new Headers();
+            for (const line of utf8.decode(new Uint8Array(mem, headersPtr, headersLen)).split("\n")) {
+              const at = line.indexOf(": ");
+              if (at > 0) headers.append(line.slice(0, at), line.slice(at + 2));
+            }
+            // Copied: the wasm buffer may move before fetch reads it.
+            const body = bodyLen > 0 ? new Uint8Array(mem, bodyPtr, bodyLen).slice() : undefined;
+            const fail = () => {
+              inst.exports.FizzyWebRequestFailed(id);
+              if (dvuiApp) dvuiApp.requestRender();
+            };
+            fetch(url, { method, headers, body, cache: "no-store" }).then((res) => {
+              return res.arrayBuffer().then((buf) => {
+                const bytes = new Uint8Array(buf);
+                const ptr = inst.exports.FizzyWebRequestAlloc(id, bytes.length);
+                if (!ptr) return fail();
+                if (bytes.length > 0) new Uint8Array(wasmInstance.exports.memory.buffer, ptr, bytes.length).set(bytes);
+                inst.exports.FizzyWebRequestReady(id, res.status, ptr, bytes.length);
+                if (dvuiApp) dvuiApp.requestRender();
+              });
+            }).catch(fail);
+          },
+          // A web OAuth round trip for whichever plugin asks (core/transport/WebOAuth.zig): open
+          // the provider's URL in a popup and hand back what it redirected to
+          // oauth-callback.html with. Provider-agnostic on purpose.
+          // The popup round trip: open `url`, wait for the page it ends on to post its
+          // location back (`oauth-callback.html`, or a page of the plugin's own that does the
+          // same), fail if the popup closes first. Bound to the instance that asked, whose
+          // `FizzyWebOAuth*` exports carry the answer.
+          fizzy_web_oauth_open(urlPtr, urlLen) {
+            const inst = target();
+            if (!inst) return;
+            const url = utf8.decode(new Uint8Array(wasmInstance.exports.memory.buffer, urlPtr, urlLen));
+            oauthPopup(inst, url);
+          },
+          // The same round trip through a page the plugin *carries* rather than one served
+          // beside the app: `html` becomes a same-origin blob URL (so its `postMessage` to
+          // the opener passes the origin check), with `hash` as the fragment the page reads.
+          // How a plugin loaded at runtime brings its own picker.
+          fizzy_web_oauth_open_page(htmlPtr, htmlLen, hashPtr, hashLen) {
+            const inst = target();
+            if (!inst) return;
+            const mem = wasmInstance.exports.memory.buffer;
+            const html = utf8.decode(new Uint8Array(mem, htmlPtr, htmlLen));
+            const hash = utf8.decode(new Uint8Array(mem, hashPtr, hashLen));
+            const blobUrl = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+            oauthPopup(inst, blobUrl + (hash.length ? "#" + hash : ""), () => URL.revokeObjectURL(blobUrl));
+          },
+          // Load a plugin built for the web (see `loadPlugin` below) and report back through
+          // `FizzyWebPluginReady` / `FizzyWebPluginFailed` on the host.
+          fizzy_web_plugin_load(req, idPtr, idLen, urlPtr, urlLen) {
             const inst = wasmInstance;
             if (!inst) return;
-            const url = utf8.decode(new Uint8Array(inst.exports.memory.buffer, urlPtr, urlLen));
+            const mem = wasmInstance.exports.memory.buffer;
+            const id = utf8.decode(new Uint8Array(mem, idPtr, idLen));
+            const url = utf8.decode(new Uint8Array(mem, urlPtr, urlLen));
+            loadPlugin(req, url, id).then(() => {
+              if (dvuiApp) dvuiApp.requestRender();
+            }).catch((err) => {
+              console.error("fizzy: plugin load failed:", url, err);
+              inst.exports.FizzyWebPluginFailed(req);
+              if (dvuiApp) dvuiApp.requestRender();
+            });
+          },
+          // `core.fs` on the web: the app's own small files (settings.zon, recents.zon,
+          // keybinds.zon) live in localStorage, keyed by the path the app would have used.
+          fizzy_web_storage_get(keyPtr, keyLen, bufPtr, bufLen) {
+            const key = "fizzy.file:" + utf8.decode(new Uint8Array(wasmInstance.exports.memory.buffer, keyPtr, keyLen));
+            let value = null;
+            try { value = localStorage.getItem(key); } catch (_) {}
+            if (value === null) return 0xffffffff;
+            const bytes = utf8encode(value);
+            if (bytes.length <= bufLen) new Uint8Array(wasmInstance.exports.memory.buffer, bufPtr, bytes.length).set(bytes);
+            return bytes.length;
+          },
+          fizzy_web_storage_set(keyPtr, keyLen, valPtr, valLen) {
+            const mem = wasmInstance.exports.memory.buffer;
+            const key = "fizzy.file:" + utf8.decode(new Uint8Array(mem, keyPtr, keyLen));
+            const value = utf8.decode(new Uint8Array(mem, valPtr, valLen));
+            try { localStorage.setItem(key, value); } catch (err) { console.warn("fizzy: could not store", key, err); }
+          },
+          fizzy_web_storage_remove(keyPtr, keyLen) {
+            const key = "fizzy.file:" + utf8.decode(new Uint8Array(wasmInstance.exports.memory.buffer, keyPtr, keyLen));
+            try { localStorage.removeItem(key); } catch (_) {}
+          },
+          // What the page remembers for an id, so the host can load it again after a disable
+          // without a round trip through the store. Same copy-into-buffer shape as the storage
+          // shims: returns the length needed, or `max` when there is nothing.
+          fizzy_web_plugin_remembered_url(idPtr, idLen, bufPtr, bufLen) {
+            const mem = wasmInstance.exports.memory.buffer;
+            const id = utf8.decode(new Uint8Array(mem, idPtr, idLen));
+            const url = rememberedPlugins()[id];
+            if (typeof url !== "string") return 0xffffffff;
+            const bytes = utf8encode(url);
+            if (bytes.length <= bufLen) new Uint8Array(wasmInstance.exports.memory.buffer, bufPtr, bytes.length).set(bytes);
+            return bytes.length;
+          },
+          fizzy_web_plugin_forget(idPtr, idLen) {
+            forgetPlugin(utf8.decode(new Uint8Array(wasmInstance.exports.memory.buffer, idPtr, idLen)));
+          },
+          // An update, on the web, is a change of which URL this page fetches next time: a side
+          // module already linked into the table cannot be replaced in a running page, so the
+          // new version is remembered now and linked on the next load.
+          fizzy_web_plugin_remember(idPtr, idLen, urlPtr, urlLen) {
+            const mem = wasmInstance.exports.memory.buffer;
+            rememberPlugin(
+              utf8.decode(new Uint8Array(mem, idPtr, idLen)),
+              utf8.decode(new Uint8Array(mem, urlPtr, urlLen)),
+            );
+          },
+          fizzy_web_oauth_callback_url(bufPtr, bufLen) {
+            const inst = target();
+            if (!inst) return 0;
+            const bytes = utf8encode(location.origin + "/oauth-callback.html");
+            if (bytes.length <= bufLen) new Uint8Array(wasmInstance.exports.memory.buffer, bufPtr, bytes.length).set(bytes);
+            return bytes.length;
+          },
+          // Byte fetch for the store catalog / READMEs / icons — no rasterize, just GET.
+          fizzy_web_fetch(id, urlPtr, urlLen) {
+            const inst = target();
+            if (!inst) return;
+            const url = utf8.decode(new Uint8Array(wasmInstance.exports.memory.buffer, urlPtr, urlLen));
             fetch(url, { cache: "no-cache" }).then((res) => {
               if (!res.ok) throw new Error("http " + res.status);
               return res.arrayBuffer();
@@ -242,7 +412,7 @@
               if (!ptr) {
                 inst.exports.FizzyWebFetchFailed(id);
               } else {
-                new Uint8Array(inst.exports.memory.buffer, ptr, bytes.length).set(bytes);
+                new Uint8Array(wasmInstance.exports.memory.buffer, ptr, bytes.length).set(bytes);
                 inst.exports.FizzyWebFetchReady(id, ptr, bytes.length);
               }
               if (dvuiApp) dvuiApp.requestRender();
@@ -251,12 +421,177 @@
               if (dvuiApp) dvuiApp.requestRender();
             });
           },
-        };
+      });
+
+      const origInstantiateStreaming = WebAssembly.instantiateStreaming.bind(WebAssembly);
+      WebAssembly.instantiateStreaming = (source, imports) => {
+        imports.fizzy = fizzyImports(() => wasmInstance);
+        imports.env = { __indirect_function_table: functionTable };
         return origInstantiateStreaming(source, imports).then((result) => {
           wasmInstance = result.instance;
           return result;
         });
       };
+
+      // `?plugin=<id>` loads `plugins/<id>/<id>.wasm` beside the app once it is up — the
+      // developer's way in until the store serves web builds.
+      // Plugins the store installed on an earlier visit, by id → URL. The page's memory, since
+      // the app has no settings file here; forgotten on uninstall.
+      const rememberedKey = "fizzy.web_plugins";
+      function rememberedPlugins() {
+        try { return JSON.parse(localStorage.getItem(rememberedKey) || "{}"); } catch (_) { return {}; }
+      }
+      function rememberPlugin(id, url) {
+        try {
+          const all = rememberedPlugins();
+          all[id] = url;
+          localStorage.setItem(rememberedKey, JSON.stringify(all));
+        } catch (_) {}
+      }
+      function forgetPlugin(id) {
+        try {
+          const all = rememberedPlugins();
+          delete all[id];
+          localStorage.setItem(rememberedKey, JSON.stringify(all));
+        } catch (_) {}
+      }
+      function requestPlugin(id, url) {
+        const inst = wasmInstance;
+        const idBytes = utf8encode(id);
+        const urlBytes = utf8encode(url || "");
+        const idPtr = inst.exports.FizzyWebPluginAlloc(idBytes.length, 1);
+        const urlPtr = urlBytes.length ? inst.exports.FizzyWebPluginAlloc(urlBytes.length, 1) : 0;
+        if (!idPtr || (urlBytes.length && !urlPtr)) return;
+        new Uint8Array(inst.exports.memory.buffer, idPtr, idBytes.length).set(idBytes);
+        if (urlBytes.length) new Uint8Array(inst.exports.memory.buffer, urlPtr, urlBytes.length).set(urlBytes);
+        inst.exports.FizzyWebPluginRequest(idPtr, idBytes.length, urlPtr, urlBytes.length);
+      }
+      function requestUrlPlugins() {
+        const inst = wasmInstance;
+        if (!inst || !inst.exports.FizzyWebPluginRequest) return;
+        for (const [id, url] of Object.entries(rememberedPlugins())) requestPlugin(id, url);
+        for (const id of new URLSearchParams(location.search).getAll("plugin")) requestPlugin(id, "");
+        if (dvuiApp) dvuiApp.requestRender();
+        // `?open=<url>`: fetch a file and open it as an upload would be (a zip becomes the
+        // root folder). After the plugins, so the one that owns it may be among them.
+        for (const url of new URLSearchParams(location.search).getAll("open")) {
+          fetch(url, { cache: "no-store" }).then((r) => r.arrayBuffer()).then((buf) => {
+            const inst2 = wasmInstance;
+            const name = utf8encode(url.split("/").pop().split("?")[0]);
+            const namePtr = inst2.exports.FizzyWebPluginAlloc(name.length, 1);
+            const bytes = new Uint8Array(buf);
+            const bytesPtr = inst2.exports.FizzyWebPluginAlloc(bytes.length, 1);
+            if (!namePtr || !bytesPtr) return;
+            new Uint8Array(inst2.exports.memory.buffer, namePtr, name.length).set(name);
+            new Uint8Array(inst2.exports.memory.buffer, bytesPtr, bytes.length).set(bytes);
+            inst2.exports.FizzyWebOpenBytes(namePtr, name.length, bytesPtr, bytes.length);
+            if (dvuiApp) dvuiApp.requestRender();
+          }).catch((err) => console.error("fizzy: could not open", url, err));
+        }
+      }
+
+      // ---- plugins at runtime: wasm side modules -------------------------------------------
+      //
+      // A plugin built for the web is an Emscripten-style side module: position-independent,
+      // importing the host's memory, function table and stack pointer, with its own data laid
+      // out at `__memory_base` and its functions at `__table_base`. Loading one is: fetch,
+      // read its `dylink.0` needs, carve its data out of the host's heap, grow the table,
+      // instantiate against the host's exports, apply relocations, then hand the host a table
+      // index for each of the plugin's entry points — the dylib model, with indices for
+      // function pointers. Everything after that is the same code the desktop runs.
+      const pluginEntryPoints = [
+        "fizzy_plugin_abi_fingerprint",
+        "fizzy_plugin_sdk_version",
+        "fizzy_plugin_min_sdk_version",
+        "fizzy_plugin_version",
+        "fizzy_plugin_id",
+        "fizzy_plugin_manifest_zon",
+        "fizzy_plugin_register",
+        "fizzy_plugin_set_dvui_context",
+        "fizzy_plugin_set_render_bridge",
+        "fizzy_plugin_set_globals",
+      ];
+      const loadedPlugins = new Map();
+
+      function readDylinkNeeds(module) {
+        const sections = WebAssembly.Module.customSections(module, "dylink.0");
+        if (sections.length === 0) throw new Error("not a side module (no dylink.0 section)");
+        const bytes = new Uint8Array(sections[0]);
+        let pos = 0;
+        const leb = () => {
+          let result = 0, shift = 0, b;
+          do { b = bytes[pos++]; result |= (b & 0x7f) << shift; shift += 7; } while (b & 0x80);
+          return result >>> 0;
+        };
+        const needs = { memorySize: 0, memoryAlign: 0, tableSize: 0, tableAlign: 0 };
+        while (pos < bytes.length) {
+          const type = bytes[pos++];
+          const size = leb();
+          const end = pos + size;
+          if (type === 1) { // WASM_DYLINK_MEM_INFO
+            needs.memorySize = leb();
+            needs.memoryAlign = leb();
+            needs.tableSize = leb();
+            needs.tableAlign = leb();
+          }
+          pos = end;
+        }
+        return needs;
+      }
+
+      async function loadPlugin(req, url, id) {
+        const host = wasmInstance;
+        const bytes = await (await fetch(url, { cache: "no-store" })).arrayBuffer();
+        const module = await WebAssembly.compile(bytes);
+        const needs = readDylinkNeeds(module);
+        const memoryBase = host.exports.FizzyWebPluginAlloc(needs.memorySize, 1 << needs.memoryAlign);
+        if (!memoryBase) throw new Error("out of memory for plugin data");
+        const tableBase = functionTable.length;
+        functionTable.grow(needs.tableSize);
+        // Every function the host exports is available to the plugin (dvui's C shims, stb);
+        // the linking globals point the plugin at its own slice of memory and table.
+        const env = {};
+        for (const [name, value] of Object.entries(host.exports)) {
+          if (typeof value === "function") env[name] = value;
+        }
+        env.memory = host.exports.memory;
+        env.__indirect_function_table = functionTable;
+        env.__stack_pointer = host.exports.__stack_pointer;
+        env.__memory_base = new WebAssembly.Global({ value: "i32", mutable: false }, memoryBase);
+        env.__table_base = new WebAssembly.Global({ value: "i32", mutable: false }, tableBase);
+        // Say which import the host lacks, rather than the linker's "Import #12".
+        const missing = WebAssembly.Module.imports(module)
+          .filter((i) => i.module === "env" && i.kind === "function" && !(i.name in env))
+          .map((i) => i.name);
+        if (missing.length) throw new Error("the host does not export: " + missing.join(", "));
+        const holder = { inst: null };
+        const instance = await WebAssembly.instantiate(module, {
+          env,
+          fizzy: fizzyImports(() => holder.inst),
+          dvui: dvuiApp ? dvuiApp.imports : {},
+        });
+        holder.inst = instance;
+        if (instance.exports.__wasm_apply_data_relocs) instance.exports.__wasm_apply_data_relocs();
+        if (instance.exports.__wasm_call_ctors) instance.exports.__wasm_call_ctors();
+        // The entry points, as table indices the host can call through.
+        const base = functionTable.length;
+        functionTable.grow(pluginEntryPoints.length);
+        pluginEntryPoints.forEach((name, i) => {
+          const fn = instance.exports[name];
+          if (!fn) throw new Error("plugin is missing " + name);
+          functionTable.set(base + i, fn);
+        });
+        const list = host.exports.FizzyWebPluginAlloc(4 * pluginEntryPoints.length, 4);
+        const indices = new Uint32Array(host.exports.memory.buffer, list, pluginEntryPoints.length);
+        for (let i = 0; i < pluginEntryPoints.length; i++) indices[i] = base + i;
+        loadedPlugins.set(url, instance);
+        host.exports.FizzyWebPluginReady(req, list, pluginEntryPoints.length);
+        // Deliberately not remembered here. Linking a module says nothing about whether this
+        // host will run it — the fingerprint, SDK version and declared id are checked after
+        // `FizzyWebPluginReady`, in `PluginLoader_web.loadAndRegister` — and a build remembered
+        // at this point would be re-fetched and re-refused on every later visit. The host calls
+        // `fizzy_web_plugin_remember` once the plugin has actually registered.
+      }
 
       function hideUnplacedOverlays() {
         if (overlayFrameOpen) {
@@ -353,6 +688,8 @@
             window.dispatchEvent(new Event("resize"));
             app.requestRender();
             hideLoading();
+            // After the first frame: the editor exists once `dvui_init` has run.
+            setTimeout(requestUrlPlugins, 0);
           })
           .catch((err) => {
             console.error(err);

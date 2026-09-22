@@ -15,8 +15,8 @@ pub var mouse_distance: f32 = std.math.floatMax(f32);
 /// native/dvui menu comparison this exists for is done.
 pub var debug_force_on_macos: bool = false;
 
-pub fn draw() !dvui.App.Result {
-    const bg_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .color_fill = dvui.themeGet().color(.control, .fill) });
+pub fn draw(editor: *Editor) !dvui.App.Result {
+    const bg_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .color_fill = .{ .color = dvui.themeGet().color(.control, .fill) } });
     defer bg_box.deinit();
 
     var m = dvui.menu(@src(), .horizontal, .{});
@@ -33,7 +33,7 @@ pub fn draw() !dvui.App.Result {
 
     // Fizzy owns only the menu bar container + theme; the top-level menus are
     // plugin (and fizzy built-in) contributions, drawn in registration order.
-    for (fizzy.editor.host.menus.items) |*menu| {
+    for (editor.app.host.menus.items) |*menu| {
         if (menu.hidden) continue;
         menu.draw(menu.ctx) catch |err| {
             dvui.log.err("Menu contribution failed: {any}", .{err});
@@ -46,11 +46,9 @@ pub fn draw() !dvui.App.Result {
 /// File menu (workbench contribution).
 /// Run the command a menu item stands for.
 ///
-/// Every item in both menu bars names a command and does nothing else. Before this, each item's
-/// action was written out here *and* in the macOS menu path *and* as the command body in
-/// `Keybinds` — three copies that had already drifted apart.
+/// Every item in both menu bars names a command and does nothing else.
 fn run(id: []const u8) void {
-    fizzy.editor.host.runCommand(id) catch |err| {
+    fizzy.editor().app.host.runCommand(id) catch |err| {
         dvui.log.err("menu command '{s}' failed: {s}", .{ id, @errorName(err) });
     };
 }
@@ -60,7 +58,7 @@ fn run(id: []const u8) void {
 /// with the macOS builder walking the same tree.
 pub fn drawModelMenu(ctx: ?*anyopaque) anyerror!void {
     const sub: *const model.Submenu = @ptrCast(@alignCast(ctx orelse return));
-    const editor = fizzy.editor;
+    const editor = fizzy.editor();
 
     // Every top-level menu (File/Edit/View/Help) is drawn through this same function at this
     // same `@src()`s, so without a differentiator dvui sees sibling widgets — the button, the
@@ -76,7 +74,7 @@ pub fn drawModelMenu(ctx: ?*anyopaque) anyerror!void {
     if (menuItem(@src(), sub.title, .{ .submenu = true }, .{
         .expand = .horizontal,
         .id_extra = extra,
-        .color_text = dvui.themeGet().color(.control, .text),
+        .color_text = .{ .color = dvui.themeGet().color(.control, .text) },
     })) |r| {
         var animator = dvui.animate(@src(), .{
             .kind = .alpha,
@@ -109,13 +107,24 @@ fn drawModelItem(
 
         .recent_folders => try drawRecentFolders(editor, id_extra),
 
+        .open_actions => {
+            const host = &editor.app.host;
+            for (host.open_actions.items) |a| {
+                if (!host.openActionShown(a)) continue;
+                if (host.drawMenuItem(a.title, a.command)) {
+                    fw.close();
+                    host.runCommand(a.command) catch |err| dvui.log.warn("open action {s}: {t}", .{ a.id, err });
+                }
+            }
+        },
+
         .submenu => |nested| {
             // No nested submenus in the bar today; the model allows them, so handle rather
             // than silently drop.
             if (menuItemWithChevron(@src(), nested.title, .{ .submenu = true }, .{
                 .expand = .horizontal,
                 .id_extra = id_extra,
-                .color_text = dvui.themeGet().color(.window, .text),
+                .color_text = .{ .color = dvui.themeGet().color(.window, .text) },
             })) |r| {
                 var nested_fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
                 defer nested_fw.deinit();
@@ -135,12 +144,12 @@ fn drawModelItem(
             // fizzy command is registered there too (`Keybinds.registerCommands`), so this and
             // `Editor.fizzyDrawMenuItem` (the plugin-section row equivalent) resolve it the same
             // way instead of each menu item duplicating an icon assignment of its own.
-            const icon: ?[]const u8 = if (editor.host.command(c.id)) |cmd| cmd.icon else null;
+            const icon: ?[]const u8 = if (editor.app.host.command(c.id)) |cmd| cmd.icon else null;
 
             if (menuItemWithHotkey(@src(), c.title.resolve(editor), icon, hotkey, enabled, .{}, .{
                 .expand = .horizontal,
                 .id_extra = id_extra,
-                .color_text = dvui.themeGet().color(.window, .text),
+                .color_text = .{ .color = dvui.themeGet().color(.window, .text) },
             }) != null) {
                 run(c.id);
                 fw.close();
@@ -151,22 +160,19 @@ fn drawModelItem(
 
 /// The chord shown beside a row, straight from the keymap `Keybinds.tick` dispatches out of.
 ///
-/// This used to go via the command's dvui *bind name* (`dvui.Window.keybinds`), which only
-/// worked for the subset of commands that have one. Anything bound purely through the keymap —
-/// a command with no dvui bind (`fizzy.quickOpen`), or any plugin command the user gave a chord
-/// in the Keyboard Shortcuts pane — resolved to nothing and drew a blank accelerator, even
-/// though the chord worked. Asking the keymap directly is one lookup for every command.
+/// From the keymap, not the command's dvui *bind name*: a command with no dvui bind
+/// (`fizzy.quickOpen`) or a plugin command the user gave a chord has an accelerator too.
 fn hotkeyFor(editor: *Editor, command_id: []const u8) dvui.enums.Keybind {
     return fizzy.Editor.Keybinds.menuKeybindFor(editor, command_id);
 }
 
 fn drawRecentFolders(editor: *Editor, id_extra: usize) !void {
-    if (editor.recents.folders.items.len == 0) return;
+    if (editor.app.recents.folders.items.len == 0) return;
 
     if (menuItemWithChevron(@src(), "Recent Folders", .{ .submenu = true }, .{
         .expand = .horizontal,
         .id_extra = id_extra,
-        .color_text = dvui.themeGet().color(.window, .text),
+        .color_text = .{ .color = dvui.themeGet().color(.window, .text) },
     })) |recents_item| {
         var recents_anim = dvui.animate(@src(), .{
             .kind = .alpha,
@@ -180,9 +186,9 @@ fn drawRecentFolders(editor: *Editor, id_extra: usize) !void {
         var vert_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .none });
         defer vert_box.deinit();
 
-        var i: usize = editor.recents.folders.items.len;
+        var i: usize = editor.app.recents.folders.items.len;
         while (i > 0) : (i -= 1) {
-            const folder = editor.recents.folders.items[i - 1];
+            const folder = editor.app.recents.folders.items[i - 1];
             if (menuItem(@src(), folder, .{}, .{
                 .expand = .horizontal,
                 .font = dvui.Font.theme(.mono),
@@ -220,8 +226,8 @@ pub fn menuItemWithHotkey(src: std.builtin.SourceLocation, label_str: []const u8
     // here would fire at function exit, *after* the explicit `mi.deinit()` call, closing the
     // parent before its child and panicking ("widget is not closed within its parent").
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = opts.id_extra orelse 0 });
-    fizzy.dvui.menuRowIcon(icon, opts.color_text orelse dvui.themeGet().color(.window, .text), enabled, opts.id_extra orelse 0);
-    fizzy.dvui.labelWithKeybind(label_str, hotkey, enabled, opts, opts);
+    fizzy.core.draw.menuRowIcon(icon, if (opts.color_text) |c| c.toColor() else dvui.themeGet().color(.window, .text), enabled, opts.id_extra orelse 0);
+    fizzy.core.draw.labelWithKeybind(label_str, hotkey, enabled, opts, opts);
     row.deinit();
 
     mi.deinit();
@@ -241,8 +247,8 @@ pub fn menuItem(src: std.builtin.SourceLocation, label_str: []const u8, init_opt
     label_opts.margin = dvui.Rect.all(0);
     label_opts.padding = dvui.Rect.all(0);
 
-    if (fizzy.dvui.hovered(mi.data())) {
-        label_opts.color_text = dvui.themeGet().color(.window, .text);
+    if (fizzy.core.widgets.hovered(mi.data())) {
+        label_opts.color_text = .{ .color = dvui.themeGet().color(.window, .text) };
     }
 
     dvui.labelNoFmt(@src(), label_str, .{}, label_opts);
@@ -273,15 +279,15 @@ pub fn menuItemWithChevron(src: std.builtin.SourceLocation, label_str: []const u
     label_opts.margin = dvui.Rect.all(0);
     label_opts.padding = dvui.Rect.all(0);
 
-    if (fizzy.dvui.hovered(mi.data())) {
-        label_opts.color_text = dvui.themeGet().color(.window, .text);
+    if (fizzy.core.widgets.hovered(mi.data())) {
+        label_opts.color_text = .{ .color = dvui.themeGet().color(.window, .text) };
     }
 
     dvui.labelNoFmt(@src(), label_str, .{}, label_opts);
 
-    dvui.icon(@src(), "chevron_right", dvui.entypo.chevron_small_right, .{
-        .stroke_color = dvui.themeGet().color(.control, .text).opacity(0.5),
-        .fill_color = dvui.themeGet().color(.control, .text).opacity(0.5),
+    fizzy.core.icon.icon(@src(), "chevron_right", dvui.entypo.chevron_small_right, .{
+        .stroke_color = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.5) },
+        .fill_color = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.5) },
     }, .{
         .expand = .none,
         .gravity_x = 1.0,
@@ -301,10 +307,7 @@ pub fn menuItemWithChevron(src: std.builtin.SourceLocation, label_str: []const u
 /// registered under one of a menu's legacy alias ids (e.g. `"workbench.menu.file"`, still a
 /// published contract per `Submenu.aliases`'s doc comment) is found here too. The native macOS
 /// builder (`backend_native.zig`'s `resolveBuiltinNativeMenu`) already resolved aliases for its
-/// own leaf items; this used to be the one place in the menu that didn't, so a plugin section
-/// registered under a pre-rename id (pixi's Edit-menu "Grid Layout" section, back when Edit's id
-/// was still `shell.menu.edit`) appeared in the native bar but silently never drew in this
-/// in-app one.
+/// own leaf items.
 ///
 /// Draws a single separator ahead of the whole group, not one per section (or per row within a
 /// section — `Editor.fizzyDrawMenuItem`, the widget every section's `draw` goes through, no
@@ -315,7 +318,7 @@ pub fn menuItemWithChevron(src: std.builtin.SourceLocation, label_str: []const u
 pub fn drawMenuSections(parent_menu_id: []const u8) !void {
     const sub = model.submenuFor(parent_menu_id) orelse return;
     var drew_separator = false;
-    for (fizzy.editor.host.menu_sections.items) |*section| {
+    for (fizzy.editor().app.host.menu_sections.items) |*section| {
         if (section.hidden) continue;
         if (!model.menuMatches(sub, section.parent_menu_id)) continue;
         if (!drew_separator) {

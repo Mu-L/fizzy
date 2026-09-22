@@ -17,19 +17,20 @@
 const std = @import("std");
 
 /// Shared with the runtime loader so install + load locations never drift (see its doc comment).
-/// Lives in this package; keep `localConfigRoot` in sync with `src/core/paths.zig`.
+/// Lives in this package; keep `localConfigRoot` in sync with `core/paths.zig`.
 const core_paths = @import("paths.zig");
 
 /// The `core` module's import set, shared with the app build so a dependency can't reach four of
 /// the five `core` compiles and miss this one (see its doc comment).
 const core_module = @import("core_module.zig");
 
-/// LazyPath to a repo-relative source file (`src/core/…`, `src/sdk/…`).
+/// LazyPath to a source tree this package needs (`src/…` for the SDK itself, `core/…` for the
+/// shared floor).
 ///
-/// Two layouts share this package:
-/// - **In-repo** (`fizzy/sdk/`): sources live at `../src/…` beside this package.
-/// - **Release tarball** (`fizzy-sdk-v*.tar.gz`): `src/` is vendored next to `build.zig`
-///   so the archive root *is* this package (see `scripts/pack-sdk.sh`).
+/// The SDK's own source lives inside this package (`sdk/src/`) and resolves directly. `core/`
+/// is the one tree that does not: in-repo it sits beside this package (`../core/…`), and in the
+/// release tarball (`fizzy-sdk-v*.tar.gz`) it is vendored at the archive root, which *is* this
+/// package — so the access check below picks whichever layout is present.
 fn repoPath(b: *std.Build, sub_path: []const u8) std.Build.LazyPath {
     b.build_root.handle.access(b.graph.io, sub_path, .{}) catch {
         const root = b.build_root.path orelse @panic("fizzy sdk: missing build_root");
@@ -73,16 +74,16 @@ pub const ModuleOptions = struct {
 
 /// Plugin identity read from `plugin.zig.zon` at configure time — see `readManifest` and
 /// `manifest_identity.zig`'s doc comment for why this is a plain relative `@import` (shared
-/// with `src/plugins/shared/build/helpers.zig`'s twin `readManifestAt`) rather than a duplicate
+/// with `plugins/shared/build/helpers.zig`'s twin `readManifestAt`) rather than a duplicate
 /// struct.
 pub const IdentityManifest = @import("manifest_identity.zig").IdentityManifest;
 
-/// Derived from `sdk_version.zig` (`std`-only, unlike `src/sdk/version.zig` itself,
+/// Derived from `sdk_version.zig` (`std`-only, unlike `src/version.zig` itself,
 /// which transitively reaches "dvui"/"proxy_bridge" — named imports this compilation unit
 /// doesn't carry; see `dylib_exports` above for the same "avoid a deep import" reasoning) rather
 /// than duplicated as a literal: a hand-copied version string here silently drifted out of sync
 /// with every `sdk_version` bump for a long stretch before this, since nothing forced anyone to
-/// notice. `src/plugins/shared/build/helpers.zig`'s `current_sdk_version` mirrors this the same way.
+/// notice. `plugins/shared/build/helpers.zig`'s `current_sdk_version` mirrors this the same way.
 pub const current_sdk_version: []const u8 = std.fmt.comptimePrint("{d}.{d}.{d}", .{
     version_number.sdk_version.major,
     version_number.sdk_version.minor,
@@ -248,7 +249,10 @@ pub fn install(b: *std.Build, lib: *std.Build.Step.Compile, opts: InstallOptions
     // zig-out/sdk-meta.json — same pin/optimize-class as the dylib; CI reads this on all targets.
     b.getInstallStep().dependOn(addSdkMeta(b, lib));
 
-    // {config}/fizzy/plugins/{name}/{name}.{ext} — so the running editor picks it up (dev convenience).
+    // {config}/fizzy/plugins/{name}/{name}.{ext} — so the running editor picks it up (dev
+    // convenience). Not for a wasm build: the browser has no plugins directory, and the desktop
+    // editor would only find a file it cannot open.
+    if (lib.rootModuleTarget().cpu.arch == .wasm32) return;
     const dev = b.allocator.create(DevInstall) catch @panic("OOM");
     dev.* = .{
         .step = std.Build.Step.init(.{
@@ -333,13 +337,14 @@ fn pluginExt(os_tag: std.Target.Os.Tag) []const u8 {
     return switch (os_tag) {
         .windows => "dll",
         .macos => "dylib",
+        .freestanding => "wasm",
         else => "so",
     };
 }
 
 /// Resolve `{local_config}/fizzy/plugins` on the build host — exactly where the app scans for
 /// user plugins. Must mirror `known-folders` `.local_configuration` (what the runtime loader
-/// uses, see `src/core/paths.zig`) + `fizzy/plugins`:
+/// uses, see `core/paths.zig`) + `fizzy/plugins`:
 ///   macOS   `~/Library/Application Support/fizzy/plugins`
 ///   Linux   `$XDG_CONFIG_HOME/fizzy/plugins` (or `~/.config/fizzy/plugins`)
 ///   Windows `%LOCALAPPDATA%/fizzy/plugins`   (FOLDERID_LocalAppData — *not* Roaming/`%APPDATA%`)
@@ -456,6 +461,10 @@ pub const PluginArtifact = struct {
     /// The author's `plugin.zig` module — importable from the generated root as `"plugin_impl"`
     /// (an internal wiring detail; the field here is named for what it actually is).
     module: *std.Build.Module,
+    /// The same source as a module an application bundles statically, exported from the package
+    /// as `"plugin"`. A `build.zig` that adds the plugin's own dependencies to `module` adds
+    /// them here too.
+    static: *std.Build.Module,
 };
 
 /// Generate the hidden dylib root module: `std_options` (routes this dylib's `std.log`/`dvui.log`
@@ -472,7 +481,7 @@ pub const PluginArtifact = struct {
 /// alongside the one already on `plugin_impl`, makes Zig's build graph treat the file as the root
 /// of two modules at once and refuse it ("file exists in modules 'fizzy_plugin_options' and
 /// 'fizzy_plugin_options0'") the moment `plugin.zig` itself references the import — which fizzy's
-/// own built-ins now do (see `src/plugins/shared/build/helpers.zig`'s twin `generatedDylibRoot`).
+/// own built-ins now do (see `plugins/shared/build/helpers.zig`'s twin `generatedDylibRoot`).
 fn generatedDylibRoot(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -501,7 +510,7 @@ fn generatedDylibRoot(
         .target = target,
         .optimize = optimize,
         .root_source_file = root_path,
-        .link_libc = true,
+        .link_libc = target.result.cpu.arch != .wasm32,
     });
     mod.addImport("fizzy_sdk", sdk_mod);
     mod.addImport("plugin_impl", plugin_mod);
@@ -520,7 +529,7 @@ pub fn create(b: *std.Build, opts: CreateOptions) PluginArtifact {
         .target = opts.target,
         .optimize = opts.optimize,
         .root_source_file = opts.root_source_file orelse b.path("plugin.zig"),
-        .link_libc = opts.link_libc,
+        .link_libc = opts.link_libc and opts.target.result.cpu.arch != .wasm32,
     });
     addImports(plugin_module, plugin_modules);
     plugin_module.addAnonymousImport("plugin_zon", .{ .root_source_file = b.path("plugin.zig.zon") });
@@ -530,6 +539,7 @@ pub fn create(b: *std.Build, opts: CreateOptions) PluginArtifact {
 
     const root_mod = generatedDylibRoot(b, opts.target, opts.optimize, plugin_modules.sdk, plugin_module);
 
+    const is_wasm = opts.target.result.cpu.arch == .wasm32;
     const lib = b.addLibrary(.{
         .name = m.id,
         .linkage = .dynamic,
@@ -537,7 +547,35 @@ pub fn create(b: *std.Build, opts: CreateOptions) PluginArtifact {
     });
     lib.linker_allow_shlib_undefined = true;
     lib.root_module.export_symbol_names = &dylib_exports;
-    return .{ .lib = lib, .module = plugin_module };
+    if (is_wasm) {
+        // A wasm *side module* (Emscripten's term): position-independent, no entry, no
+        // threads, loaded into the web host's memory and function table at runtime — the
+        // dylib model with table indices for function pointers. See `docs/REVIEW_2026-09.md`
+        // §2 and `web/index.html`'s loader.
+        lib.root_module.pic = true;
+        lib.root_module.single_threaded = true;
+        lib.entry = .disabled;
+        lib.rdynamic = true;
+        // Whatever the module does not define is an `env` import the loader resolves from
+        // the host: dvui's C shims (`dvui_c_alloc`, …) and the `fizzy_web_*` JS calls.
+        lib.import_symbols = true;
+    }
+
+    // The same `plugin.zig` as a module an application can link in (`fizzy.buildApp`), exported
+    // as `"plugin"`. Its `dvui`/`core`/`fizzy_sdk` imports are the application's, wired by
+    // fizzy's build when it bundles the plugin; only the plugin's own dependencies and its
+    // manifest are attached here. A separate options step from the dylib's, so the generated
+    // file never belongs to two modules of one compilation.
+    const static_module = b.addModule("plugin", .{
+        .target = opts.target,
+        .optimize = opts.optimize,
+        .root_source_file = opts.root_source_file orelse b.path("plugin.zig"),
+        .link_libc = opts.link_libc and opts.target.result.cpu.arch != .wasm32,
+    });
+    static_module.addAnonymousImport("plugin_zon", .{ .root_source_file = b.path("plugin.zig.zon") });
+    static_module.addOptions(plugin_options_import, pluginOptions(b, m.id, m.name, m.version, m.min_sdk_version, m.raw));
+
+    return .{ .lib = lib, .module = plugin_module, .static = static_module };
 }
 
 pub fn exportModules(
@@ -545,7 +583,19 @@ pub fn exportModules(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) !void {
-    const dvui_dep = b.dependency("dvui", .{
+    // A wasm side module has no libc and no C libraries of its own: fonts and images are the
+    // host's (rendered through the bridge), and the web has no tree-sitter to run.
+    const is_wasm = target.result.cpu.arch == .wasm32;
+    const dvui_dep = if (is_wasm) b.dependency("dvui", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = .proxy,
+        .accesskit = .off,
+        .libc = false,
+        .freetype = false,
+        .@"stb-image" = false,
+        .@"tree-sitter" = false,
+    }) else b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
         .backend = .proxy,
@@ -557,15 +607,15 @@ pub fn exportModules(
     const core_mod = b.addModule("core", .{
         .target = target,
         .optimize = optimize,
-        .root_source_file = repoPath(b, "src/core/core.zig"),
-        .link_libc = true,
+        .root_source_file = repoPath(b, "core/core.zig"),
+        .link_libc = !is_wasm,
     });
     _ = core_module.addImports(b, core_mod, dvui_proxy_mod, target, optimize);
 
     const sdk_mod = b.addModule("fizzy_sdk", .{
         .target = target,
         .optimize = optimize,
-        .root_source_file = repoPath(b, "src/sdk/sdk.zig"),
+        .root_source_file = repoPath(b, "src/sdk.zig"),
     });
     sdk_mod.addImport("dvui", dvui_proxy_mod);
     sdk_mod.addImport("proxy_bridge", proxy_bridge_mod);

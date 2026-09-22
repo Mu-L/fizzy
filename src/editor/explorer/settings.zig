@@ -1,7 +1,6 @@
 //! The fizzy's own settings, as data.
 //!
-//! These used to be drawn inline inside nested `dvui.groupBox`es. They're now a flat declarative
-//! table: `SettingsTree` renders them as branches/leaves of the settings tree and matches the
+//! A flat declarative table: `SettingsTree` renders them as branches/leaves of the settings tree and matches the
 //! user's search text against `label` + `keywords` without drawing anything, so a group with no
 //! surviving leaves can be skipped entirely.
 //!
@@ -21,6 +20,7 @@ const core = @import("core");
 const Editor = fizzy.Editor;
 const KeybindSettings = @import("../KeybindSettings.zig");
 const FileTypeSettings = @import("../FileTypeSettings.zig");
+const LayoutSettings = @import("../LayoutSettings.zig");
 
 const fuzzy = core.fuzzy;
 
@@ -125,6 +125,39 @@ pub const groups = [_]Group{
                 .keywords = "transparency alpha",
                 .draw = drawContentOpacity,
             },
+            .{
+                .label = "Modal dim",
+                .key = "modal_dim",
+                .description = "How much a dialog or the command palette darkens everything " ++
+                    "behind it while it is open.",
+                .keywords = "dialog palette scrim dark shade overlay",
+                .draw = drawModalDim,
+            },
+            .{
+                .label = "Dialog opacity",
+                .key = "dialog_opacity",
+                .description = "How much of a dialog or the command palette is its own colour " ++
+                    "rather than the frosted view behind it. At 1 it matches a plain panel " ++
+                    "like the explorer; lower shows more of the blur.",
+                .keywords = "dialog palette transparency alpha glass frost",
+                .draw = drawDialogOpacity,
+            },
+            .{
+                .label = "Dialog blur",
+                .key = "dialog_blur",
+                .description = "How strongly the frosted backdrop under dialogs and the command " ++
+                    "palette blurs what is behind it. 0 turns the frost off.",
+                .keywords = "dialog palette blur frost glass radius",
+                .draw = drawDialogBlur,
+            },
+            .{
+                .label = "Dialog brightness",
+                .key = "dialog_lift",
+                .description = "How much lighter a dialog or the command palette is than what " ++
+                    "is behind it — the lift a glass material has. 0 is none.",
+                .keywords = "dialog palette light bright glass frost lift",
+                .draw = drawDialogLift,
+            },
         },
     },
     .{
@@ -197,11 +230,29 @@ pub const groups = [_]Group{
         },
     },
     .{
+        .title = "Layout",
+        .icon = icons.tvg.lucide.@"panel-left",
+        .items = &.{
+            .{
+                .label = "Regions",
+                .key = "regions",
+                .description = "What each region of the window shows. A plugin declares the kind " ++
+                    "of place its panels belong and this layout's regions declare what they " ++
+                    "accept; where the two agree is where a panel lands by default. Choose a " ++
+                    "region's contents yourself and that choice is remembered — the same panel " ++
+                    "in two places, or a region left empty, are both allowed.",
+                .keywords = "region placement move panel sidebar surface unplaced keywords",
+                // Every panel is individually searchable — see `LayoutSettings`.
+                .search = .{ .score = LayoutSettings.score, .draw = LayoutSettings.draw },
+            },
+        },
+    },
+    .{
         .title = "Debugging",
         .icon = icons.tvg.lucide.bug,
         .items = &.{
             .{
-                .label = "Frame rate",
+                .label = "Layout rate",
                 .key = "fps",
                 .description = "Frames per second this window is currently drawing. Read-only.",
                 .keywords = "fps performance diagnostics",
@@ -227,21 +278,21 @@ fn drawTheme() void {
     });
 
     dvui.label(@src(), "{s}", .{dvui.themeGet().name}, .{ .margin = .all(0), .padding = .all(0) });
-    dvui.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_y = 0.5 });
+    core.icon.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_y = 0.5 });
 
     hbox.deinit();
 
     if (dropdown.dropped()) {
-        for (fizzy.editor.themes.items) |theme| {
+        for (fizzy.editor().themes.items) |theme| {
             if (dropdown.addChoiceLabel(theme.name)) {
-                Editor.Settings.setThemeName(&fizzy.editor.settings, fizzy.app.allocator, theme.name) catch {
+                Editor.Settings.setThemeName(&fizzy.editor().app.settings, fizzy.entry().allocator, theme.name) catch {
                     dvui.log.err("Failed to store theme name", .{});
                     break;
                 };
-                fizzy.editor.applySettingsTheme() catch {
+                fizzy.editor().applySettingsTheme() catch {
                     dvui.log.err("Failed to apply theme", .{});
                 };
-                fizzy.editor.markSettingsDirty();
+                fizzy.editor().markSettingsDirty();
                 dvui.refresh(null, @src(), null);
                 break;
             }
@@ -258,50 +309,98 @@ fn fontSizeSlider(src: std.builtin.SourceLocation, value: *f32) void {
         .max = 20.0,
         .min = 6.0,
     }, .{ .expand = .horizontal })) {
-        fizzy.editor.applyFontSizesFromSettings();
-        fizzy.editor.markSettingsDirty();
+        fizzy.editor().applyFontSizesFromSettings();
+        fizzy.editor().markSettingsDirty();
         dvui.refresh(null, @src(), null);
     }
 }
 
 fn drawBodyFontSize() void {
-    fontSizeSlider(@src(), &fizzy.editor.settings.font_body_size);
+    fontSizeSlider(@src(), &fizzy.editor().app.settings.font_body_size);
 }
 
 fn drawHeadingFontSize() void {
-    fontSizeSlider(@src(), &fizzy.editor.settings.font_heading_size);
+    fontSizeSlider(@src(), &fizzy.editor().app.settings.font_heading_size);
 }
 
 fn drawTitleFontSize() void {
-    fontSizeSlider(@src(), &fizzy.editor.settings.font_title_size);
+    fontSizeSlider(@src(), &fizzy.editor().app.settings.font_title_size);
 }
 
 fn drawMonoFontSize() void {
-    fontSizeSlider(@src(), &fizzy.editor.settings.font_mono_size);
+    fontSizeSlider(@src(), &fizzy.editor().app.settings.font_mono_size);
 }
 
 fn drawWindowOpacity() void {
     if (dvui.sliderEntry(@src(), "{d:0.01}", .{
-        .value = &if (dvui.themeGet().dark) fizzy.editor.settings.window_opacity_dark else fizzy.editor.settings.window_opacity_light,
+        .value = &if (dvui.themeGet().dark) fizzy.editor().app.settings.window_opacity_dark else fizzy.editor().app.settings.window_opacity_light,
         .interval = 0.01,
         .max = 1.0,
         .min = 0.0,
     }, .{ .expand = .horizontal })) {
-        fizzy.backend.setTitlebarColor(dvui.currentWindow(), dvui.themeGet().color(.content, .fill).opacity(if (dvui.themeGet().dark) fizzy.editor.settings.window_opacity_dark else fizzy.editor.settings.window_opacity_light));
-        fizzy.editor.markSettingsDirty();
+        fizzy.backend.setTitlebarColor(dvui.currentWindow(), dvui.themeGet().color(.content, .fill).opacity(if (dvui.themeGet().dark) fizzy.editor().app.settings.window_opacity_dark else fizzy.editor().app.settings.window_opacity_light));
+        fizzy.editor().markSettingsDirty();
         dvui.refresh(null, @src(), null);
     }
 }
 
 fn drawContentOpacity() void {
     if (dvui.sliderEntry(@src(), "{d:0.01}", .{
-        .value = &fizzy.editor.settings.content_opacity,
+        .value = &fizzy.editor().app.settings.content_opacity,
         .interval = 0.01,
         .max = 1.0,
         .min = 0.0,
     }, .{ .expand = .horizontal })) {
-        fizzy.backend.setTitlebarColor(dvui.currentWindow(), dvui.themeGet().color(.content, .fill).opacity(fizzy.editor.settings.content_opacity));
-        fizzy.editor.markSettingsDirty();
+        fizzy.backend.setTitlebarColor(dvui.currentWindow(), dvui.themeGet().color(.content, .fill).opacity(fizzy.editor().app.settings.content_opacity));
+        fizzy.editor().markSettingsDirty();
+        dvui.refresh(null, @src(), null);
+    }
+}
+
+fn drawModalDim() void {
+    if (dvui.sliderEntry(@src(), "{d:0.01}", .{
+        .value = &fizzy.editor().app.settings.modal_dim,
+        .interval = 0.01,
+        .max = 1.0,
+        .min = 0.0,
+    }, .{ .expand = .horizontal })) {
+        fizzy.editor().markSettingsDirty();
+        dvui.refresh(null, @src(), null);
+    }
+}
+
+fn drawDialogOpacity() void {
+    if (dvui.sliderEntry(@src(), "{d:0.01}", .{
+        .value = &fizzy.editor().app.settings.dialog_opacity,
+        .interval = 0.01,
+        .max = 1.0,
+        .min = 0.0,
+    }, .{ .expand = .horizontal })) {
+        fizzy.editor().markSettingsDirty();
+        dvui.refresh(null, @src(), null);
+    }
+}
+
+fn drawDialogBlur() void {
+    if (dvui.sliderEntry(@src(), "{d:0.0}", .{
+        .value = &fizzy.editor().app.settings.dialog_blur,
+        .interval = 1,
+        .max = 48,
+        .min = 0,
+    }, .{ .expand = .horizontal })) {
+        fizzy.editor().markSettingsDirty();
+        dvui.refresh(null, @src(), null);
+    }
+}
+
+fn drawDialogLift() void {
+    if (dvui.sliderEntry(@src(), "{d:0.01}", .{
+        .value = &fizzy.editor().app.settings.dialog_lift,
+        .interval = 0.01,
+        .max = 1.0,
+        .min = 0.0,
+    }, .{ .expand = .horizontal })) {
+        fizzy.editor().markSettingsDirty();
         dvui.refresh(null, @src(), null);
     }
 }
@@ -309,16 +408,16 @@ fn drawContentOpacity() void {
 // ---- Input ------------------------------------------------------------------------------
 
 fn drawHoldMenuDuration() void {
-    var hold_menu_ms: f32 = @floatFromInt(fizzy.editor.settings.hold_menu_duration_ms);
+    var hold_menu_ms: f32 = @floatFromInt(fizzy.editor().app.settings.hold_menu_duration_ms);
     if (dvui.sliderEntry(@src(), "{d:0.0} ms", .{
         .value = &hold_menu_ms,
         .interval = 50,
         .max = 1500,
         .min = 100,
     }, .{ .expand = .horizontal })) {
-        fizzy.editor.settings.hold_menu_duration_ms = @intFromFloat(hold_menu_ms);
-        fizzy.editor.applyHoldMenuDuration();
-        fizzy.editor.markSettingsDirty();
+        fizzy.editor().app.settings.hold_menu_duration_ms = @intFromFloat(hold_menu_ms);
+        fizzy.editor().applyHoldMenuDuration();
+        fizzy.editor().markSettingsDirty();
         dvui.refresh(null, @src(), null);
     }
 }
@@ -336,7 +435,7 @@ fn drawInputScheme() void {
         .gravity_x = 1.0,
     });
 
-    const label_text: []const u8 = switch (fizzy.editor.settings.input_scheme) {
+    const label_text: []const u8 = switch (fizzy.editor().app.settings.input_scheme) {
         .auto => switch (dvui.mouseType()) {
             .unknown => "Auto",
             .mouse, .trackpad => |hint| std.fmt.allocPrint(dvui.currentWindow().arena(), "Auto ({s})", .{@tagName(hint)}) catch "Auto",
@@ -345,7 +444,7 @@ fn drawInputScheme() void {
         .trackpad => "Trackpad",
     };
     dvui.label(@src(), "{s}", .{label_text}, .{ .margin = .all(0), .padding = .all(0) });
-    dvui.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_y = 0.5 });
+    core.icon.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_y = 0.5 });
 
     hbox.deinit();
 
@@ -356,8 +455,8 @@ fn drawInputScheme() void {
             .{ "Trackpad", Editor.Settings.InputScheme.trackpad },
         }) |choice| {
             if (dropdown.addChoiceLabel(choice[0])) {
-                fizzy.editor.settings.input_scheme = choice[1];
-                fizzy.editor.markSettingsDirty();
+                fizzy.editor().app.settings.input_scheme = choice[1];
+                fizzy.editor().markSettingsDirty();
                 dvui.refresh(null, @src(), null);
             }
         }
@@ -382,12 +481,12 @@ fn drawPluginUpdateMode() void {
         .gravity_x = 1.0,
     });
 
-    const label_text: []const u8 = switch (fizzy.editor.settings.plugin_update_mode) {
+    const label_text: []const u8 = switch (fizzy.editor().app.settings.plugin_update_mode) {
         .prompt => "Prompt",
         .silent => "Silent",
     };
     dvui.label(@src(), "{s}", .{label_text}, .{ .margin = .all(0), .padding = .all(0) });
-    dvui.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_y = 0.5 });
+    core.icon.icon(@src(), "dropdown_triangle", dvui.entypo.triangle_down, .{}, .{ .gravity_y = 0.5 });
 
     hbox.deinit();
 
@@ -397,8 +496,8 @@ fn drawPluginUpdateMode() void {
             .{ "Silent", Editor.Settings.PluginUpdateMode.silent },
         }) |choice| {
             if (dropdown.addChoiceLabel(choice[0])) {
-                fizzy.editor.settings.plugin_update_mode = choice[1];
-                fizzy.editor.markSettingsDirty();
+                fizzy.editor().app.settings.plugin_update_mode = choice[1];
+                fizzy.editor().markSettingsDirty();
                 dvui.refresh(null, @src(), null);
             }
         }

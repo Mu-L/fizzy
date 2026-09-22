@@ -9,7 +9,38 @@ const core_mod = fizzy_sdk.core_module;
 const dvui = fizzy_sdk.dvui;
 const velopack = @import("velopack.zig");
 
+/// A plugin checkout for the web build, with the modules its own `build.zig` would have added
+/// beside the SDK's (a bundled library under `src/`, say) — the web build has no way to run that
+/// `build.zig`, so they are named here.
+pub const WebPluginDir = struct {
+    dir: []const u8,
+    modules: []const ExtraModule = &.{},
+    pub const ExtraModule = struct {
+        /// The import name the plugin uses.
+        name: []const u8,
+        /// Root source file, relative to `dir`.
+        root: []const u8,
+        /// Whether the module itself imports `dvui` / `core`.
+        dvui: bool = true,
+        core: bool = false,
+    };
+};
+
 pub const Options = struct {
+    /// Plugins the application bundles beyond fizzy's own — see `build.zig`'s `buildApp`.
+    app_plugins: []const @import("sdk.zig").BundledPlugin = &.{},
+    /// Dependencies (by the name in `build.zig.zon`) whose `"plugin"` module the **web** build
+    /// links in. The browser cannot `dlopen`, so a plugin exists there only if the application
+    /// bundles it; this is fizzy-the-app's list, resolved for the wasm target. Each is looked
+    /// up lazily, so a missing dependency only costs the web target that plugin. For a
+    /// URL-pinned package; a *path* to a sibling checkout cannot go here (its own `fizzy`
+    /// dependency would name this repo's `sdk/` under a second path, which Zig refuses) —
+    /// that is what `web_plugin_dirs` is for.
+    web_plugin_deps: []const []const u8 = &.{},
+    /// Plugin checkouts (directories holding `plugin.zig` + `plugin.zig.zon`) the **web** build
+    /// links in, taken by path outside the package graph. Local development's answer to
+    /// `web_plugin_deps`; a directory that is missing is skipped with a note.
+    web_plugin_dirs: []const WebPluginDir = &.{},
     windows_msvc_libc_opt: ?[]const u8 = null,
     fetch_msvc_opt: ?bool = null,
     macos_sign_app_identity: ?[]const u8 = null,
@@ -18,6 +49,50 @@ pub const Options = struct {
 };
 
 pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, opts: Options) !void {
+    const cfg = try readConfig(b, target, opts) orelse return;
+    try construct(b, target, optimize, opts, cfg);
+}
+
+/// Everything `build` reads before it constructs anything — the options, the version, the
+/// generated option steps. Split from the construction so a consumer that defers the app
+/// (`build.zig`'s `defer-app`) consumes its options now and constructs later, with its own
+/// plugins.
+pub const Config = struct {
+    vz: velopack.Dep,
+    macos_sdl_paths: ?@import("common.zig").MacosSdlPaths,
+    zig_out_subdir: []const u8,
+    zig_out_install_dir: std.Build.InstallDir,
+    target_is_windows_msvc: bool,
+    cross_win_msvc: bool,
+    effective_win_libc: ?[]const u8,
+    velopack_supported_for_target: bool,
+    velopack_enabled: bool,
+    velopack_required_fail: ?*std.Build.Step,
+    no_emit: bool,
+    app_version: []const u8,
+    build_opts: *std.Build.Step.Options,
+    app_name: []const u8,
+    app_repo_url: []const u8,
+    app_repo_url_fallback: []const u8,
+    app_layout_path: ?std.Build.LazyPath,
+    static_workbench: bool,
+    static_text: bool,
+    static_image: bool,
+    workbench_opts: *std.Build.Step.Options,
+    msvcup_before_compile: *std.Build.Step.Run,
+    accesskit: dvui.AccesskitOptions,
+    test_filters: []const []const u8,
+    macos_sign_app_identity: ?[]const u8,
+    macos_sign_install_identity: ?[]const u8,
+    macos_notary_profile: ?[]const u8,
+    windows_msvc_libc_opt: ?[]const u8,
+    fetch_msvc: bool,
+    win_libc: velopack.ResolvedWindowsMsvcLibc,
+};
+
+/// Phase one of `build`: read every option and set up the option steps. Null on the
+/// configure pass where Velopack is not fetched yet (Zig fetches it and runs again).
+pub fn readConfig(b: *std.Build, target: std.Build.ResolvedTarget, opts: Options) !?Config {
     const windows_msvc_libc_opt = opts.windows_msvc_libc_opt;
     const fetch_msvc_opt = opts.fetch_msvc_opt;
     const macos_sign_app_identity = opts.macos_sign_app_identity;
@@ -27,25 +102,14 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // Resolve Velopack lazily (app-only; plugins depend on `sdk/` which has no Velopack).
     // First configure pass returns null → Zig fetches velopack_zig and re-runs build();
     // the second pass proceeds with a valid handle.
-    const vz = b.lazyDependency("velopack_zig", .{}) orelse return;
+    const vz = b.lazyDependency("velopack_zig", .{}) orelse return null;
 
     const common = @import("common.zig");
-    const plugins = @import("plugins.zig");
-    const sdk = @import("sdk.zig");
-    const fizzy_exe = @import("exe.zig");
-    const web = @import("web.zig");
-    const package = @import("package.zig");
-    const msvc = @import("msvc.zig");
-
-    const workbench_plugin = plugins.workbench;
-    const text_plugin = plugins.text;
-    const image_plugin = plugins.image;
-    const FizzyExecutable = fizzy_exe.FizzyExecutable;
 
     // Built-in plugins are embedded by importing their `static/integration.zig` directly
     // (via build/plugins.zig); the root build owns the module graph, so there is no plugin
     // package dependency to resolve here. Their canonical `build.zig` is only for the
-    // standalone (`cd src/plugins/<name> && zig build`) third-party-shape build.
+    // standalone (`cd plugins/<name> && zig build`) third-party-shape build.
 
     const macos_sdl_paths = try common.macosSdlPathsForExplicitTarget(b, target);
     const zig_out_subdir = common.zigOutSubdirForTarget(b, target);
@@ -128,8 +192,7 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // Empty by default (no fallback).
     const app_repo_url_fallback = b.option([]const u8, "repo-url-fallback", "Comma-separated fallback GitHub repo URLs for Velopack auto-update, tried after -Drepo-url") orelse "";
 
-    var version_owned: ?[]u8 = null;
-    defer if (version_owned) |buf| b.allocator.free(buf);
+    var version_owned: ?[]u8 = null; // lives as long as the build process
 
     const app_version: []const u8 = if (app_version_opt) |v| v else blk: {
         const raw = b.build_root.handle.readFileAlloc(b.graph.io, "VERSION", b.allocator, std.Io.Limit.limited(256)) catch |e| std.debug.panic("read VERSION: {}", .{e});
@@ -139,9 +202,28 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
     const build_opts = b.addOptions();
     build_opts.addOption([]const u8, "app_version", app_version);
+
+    // Application identity (see app/AppInfo.zig). Options rather than literals so an app built
+    // on fizzy as a library can set them; fizzy passes its own values.
+    const app_name = b.option([]const u8, "app-name", "Short lowercase app identifier (exe name, packId, config dir)") orelse "fizzy";
+    const app_display_name = b.option([]const u8, "app-display-name", "Human-facing application name") orelse "Fizzy";
+    const app_bundle_id = b.option([]const u8, "app-bundle-id", "Reverse-DNS application identifier") orelse "com.foxnne.fizzy";
+    const app_config_dir = b.option([]const u8, "app-config-dir", "Config directory name (defaults to app-name)") orelse app_name;
+    const app_registry_url = b.option([]const u8, "app-registry-url", "Plugin registry catalog URL; empty disables the store") orelse "https://plugins.fizzyed.it/catalog";
+    build_opts.addOption([]const u8, "app_name", app_name);
+    build_opts.addOption([]const u8, "app_display_name", app_display_name);
+    build_opts.addOption([]const u8, "app_bundle_id", app_bundle_id);
+    build_opts.addOption([]const u8, "app_config_dir", app_config_dir);
+    build_opts.addOption([]const u8, "app_registry_url", app_registry_url);
     build_opts.addOption([]const u8, "app_repo_url", app_repo_url);
     build_opts.addOption([]const u8, "app_repo_url_fallback", app_repo_url_fallback);
     build_opts.addOption(bool, "velopack_enabled", velopack_enabled);
+
+    // A consumer that wants its own shape passes `-Dapp-layout=` (a LazyPath to
+    // `pub fn layout(?*anyopaque, *Layout)`). Fizzy itself uses `src/editor/layout.zig`.
+    // There is no `-Dlayout=` enum of shipped presets — those live in `examples/`.
+    const app_layout_path = b.option(std.Build.LazyPath, "app-layout", "App-owned layout file (pub fn layout(?*anyopaque, *Layout))");
+    build_opts.addOption(bool, "has_app_layout", app_layout_path != null);
     const static_workbench = b.option(
         bool,
         "static-workbench",
@@ -176,6 +258,89 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
     const accesskit = b.option(dvui.AccesskitOptions, "accesskit", "Enable accesskit") orelse .off;
 
+    const test_filters = b.option(
+        []const []const u8,
+        "test-filter",
+        "Skip tests that do not match any filter",
+    ) orelse &[0][]const u8{};
+    return .{
+        .vz = vz,
+        .macos_sdl_paths = macos_sdl_paths,
+        .zig_out_subdir = zig_out_subdir,
+        .zig_out_install_dir = zig_out_install_dir,
+        .target_is_windows_msvc = target_is_windows_msvc,
+        .cross_win_msvc = cross_win_msvc,
+        .effective_win_libc = effective_win_libc,
+        .velopack_supported_for_target = velopack_supported_for_target,
+        .velopack_enabled = velopack_enabled,
+        .velopack_required_fail = velopack_required_fail,
+        .no_emit = no_emit,
+        .app_version = app_version,
+        .build_opts = build_opts,
+        .app_name = app_name,
+        .app_repo_url = app_repo_url,
+        .app_repo_url_fallback = app_repo_url_fallback,
+        .app_layout_path = app_layout_path,
+        .static_workbench = static_workbench,
+        .static_text = static_text,
+        .static_image = static_image,
+        .workbench_opts = workbench_opts,
+        .msvcup_before_compile = msvcup_before_compile,
+        .accesskit = accesskit,
+        .test_filters = test_filters,
+        .macos_sign_app_identity = macos_sign_app_identity,
+        .macos_sign_install_identity = macos_sign_install_identity,
+        .macos_notary_profile = macos_notary_profile,
+        .windows_msvc_libc_opt = windows_msvc_libc_opt,
+        .fetch_msvc = fetch_msvc,
+        .win_libc = win_libc,
+    };
+}
+
+/// Phase two of `build`: the executables, the web build, tests, packaging.
+pub fn construct(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, opts: Options, cfg: Config) !void {
+    const common = @import("common.zig");
+    const plugins = @import("plugins.zig");
+    const sdk = @import("sdk.zig");
+    const fizzy_exe = @import("exe.zig");
+    const web = @import("web.zig");
+    const package = @import("package.zig");
+    const msvc = @import("msvc.zig");
+    const workbench_plugin = plugins.workbench;
+    const text_plugin = plugins.text;
+    const image_plugin = plugins.image;
+    const FizzyExecutable = fizzy_exe.FizzyExecutable;
+    const vz = cfg.vz;
+    const macos_sdl_paths = cfg.macos_sdl_paths;
+    const zig_out_subdir = cfg.zig_out_subdir;
+    const zig_out_install_dir = cfg.zig_out_install_dir;
+    const target_is_windows_msvc = cfg.target_is_windows_msvc;
+    const cross_win_msvc = cfg.cross_win_msvc;
+    const effective_win_libc = cfg.effective_win_libc;
+    const velopack_supported_for_target = cfg.velopack_supported_for_target;
+    const velopack_enabled = cfg.velopack_enabled;
+    const velopack_required_fail = cfg.velopack_required_fail;
+    const no_emit = cfg.no_emit;
+    const app_version = cfg.app_version;
+    const build_opts = cfg.build_opts;
+    const app_name = cfg.app_name;
+    const app_repo_url = cfg.app_repo_url;
+    const app_repo_url_fallback = cfg.app_repo_url_fallback;
+    const app_layout_path = cfg.app_layout_path;
+    const static_workbench = cfg.static_workbench;
+    const static_text = cfg.static_text;
+    const static_image = cfg.static_image;
+    const workbench_opts = cfg.workbench_opts;
+    const msvcup_before_compile = cfg.msvcup_before_compile;
+    const accesskit = cfg.accesskit;
+    const test_filters = cfg.test_filters;
+    const macos_sign_app_identity = cfg.macos_sign_app_identity;
+    const macos_sign_install_identity = cfg.macos_sign_install_identity;
+    const macos_notary_profile = cfg.macos_notary_profile;
+    const windows_msvc_libc_opt = cfg.windows_msvc_libc_opt;
+    const fetch_msvc = cfg.fetch_msvc;
+    const win_libc = cfg.win_libc;
+
     const assetpack = @import("assetpack");
     const assets_module = assetpack.pack(b, b.path("assets"), .{});
 
@@ -185,9 +350,9 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // web.js, index.html, NotoSansKR-Regular.ttf}`, deployable as-is to a static host.
     // ---------------------------------------------------------------
 
-    web.addSteps(b, optimize, build_opts, workbench_opts, assets_module);
+    web.addSteps(b, optimize, build_opts, workbench_opts, assets_module, opts.app_plugins, opts.web_plugin_deps, opts.web_plugin_dirs);
 
-    const main_fizzy = try fizzy_exe.addFizzyExecutableForTarget(b, vz, target, optimize, accesskit, build_opts, workbench_opts, assets_module, macos_sdl_paths, velopack_enabled);
+    const main_fizzy = try fizzy_exe.addFizzyExecutableForTarget(b, vz, target, optimize, accesskit, build_opts, workbench_opts, assets_module, macos_sdl_paths, velopack_enabled, app_name, app_layout_path, opts.app_plugins);
     const exe = main_fizzy.exe;
 
     const package_fizzy: FizzyExecutable = package_blk: {
@@ -201,7 +366,8 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         pack_opts.addOption(bool, "static_workbench", static_workbench);
         pack_opts.addOption(bool, "static_text", static_text);
         pack_opts.addOption(bool, "static_image", static_image);
-        break :package_blk try fizzy_exe.addFizzyExecutableForTarget(b, vz, target, optimize, accesskit, pack_opts, workbench_opts, assets_module, macos_sdl_paths, true);
+        pack_opts.addOption(bool, "has_app_layout", app_layout_path != null);
+        break :package_blk try fizzy_exe.addFizzyExecutableForTarget(b, vz, target, optimize, accesskit, pack_opts, workbench_opts, assets_module, macos_sdl_paths, true, app_name, app_layout_path, opts.app_plugins);
     };
     const exe_for_package = package_fizzy.exe;
 
@@ -333,12 +499,6 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // Both share the same `zig build test` and `zig build check`
     // entry points.
 
-    const test_filters = b.option(
-        []const []const u8,
-        "test-filter",
-        "Skip tests that do not match any filter",
-    ) orelse &[0][]const u8{};
-
     // `zig build test` is the CI entry point and must stay self-contained: pure
     // unit tests only, no dvui/SDL/Velopack/MSVC. Integration tests live under
     // `zig build test-integration` (Velopack + dvui-testing + comctl32 on Windows
@@ -353,58 +513,63 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // `addAnonymousImport`) is a separate module whose tests are never run. That is
     // how `fizzy-unit-tests` silently ran zero tests behind a green build. So: one
     // `addTest` per pure-logic root, each rooted directly at the file under test.
-    // Files reached from such a root by relative `@import` (plugin_store's
+    // Files reached from such a root by relative `@import` (the registry client's
     // registry/compat/download, say) are part of the same module and *are* collected.
     var unit_test_artifacts: std.ArrayListUnmanaged(*std.Build.Step.Compile) = .empty;
 
     inline for (.{
-        .{ "fizzy-direction-tests", "src/core/math/direction.zig" },
-        .{ "fizzy-easing-tests", "src/core/math/easing.zig" },
-        .{ "fizzy-layout-anchor-tests", "src/core/math/layout_anchor.zig" },
-        .{ "fizzy-window-layout-tests", "src/backend/window_layout.zig" },
-        .{ "fizzy-plugin-store-tests", "src/backend/plugin_store/store.zig" },
-        .{ "fizzy-paths-tests", "src/core/paths.zig" },
-        .{ "fizzy-lsp-protocol-tests", "src/core/lsp/Protocol.zig" },
-        .{ "fizzy-lsp-uri-tests", "src/core/lsp/UriUtil.zig" },
-        .{ "fizzy-settings-plugins-zon-tests", "src/editor/SettingsPluginsZon.zig" },
-        // std-only despite living under src/sdk/ — and the SDK-rooted test artifact
-        // below never reaches it (nothing in the graph forces `sdk.manifest`), so it
+        .{ "fizzy-direction-tests", "core/math/direction.zig" },
+        .{ "fizzy-easing-tests", "core/math/easing.zig" },
+        .{ "fizzy-layout-anchor-tests", "core/math/layout_anchor.zig" },
+        .{ "fizzy-window-layout-tests", "app/window/window_layout.zig" },
+        .{ "fizzy-plugin-store-tests", "app/store/registry/store.zig" },
+        .{ "fizzy-paths-tests", "core/paths.zig" },
+        // The credential store behind `Host.secrets`: a 0600 file, keyed, round-tripped.
+        .{ "fizzy-secrets-tests", "app/Secrets.zig" },
+        .{ "fizzy-lsp-protocol-tests", "core/lsp/Protocol.zig" },
+        .{ "fizzy-lsp-uri-tests", "core/lsp/UriUtil.zig" },
+        .{ "fizzy-settings-plugins-zon-tests", "app/settings/SettingsPluginsZon.zig" },
+        // std-only despite living under sdk/src/ — and the SDK-rooted test artifact
+        // below never reaches it (nothing in the graph forces `sdk.Manifest`), so it
         // needs its own root either way.
-        .{ "fizzy-sdk-manifest-tests", "src/sdk/manifest.zig" },
+        .{ "fizzy-sdk-manifest-tests", "sdk/src/Manifest.zig" },
         // The `[[wikilink]]` tokenizer. std-only on purpose: it's shared verbatim by the
         // markdown renderer and by out-of-tree indexers, so it must not depend on dvui or
         // anything else the SDK-rooted artifact drags in.
-        .{ "fizzy-sdk-wikilink-tests", "src/sdk/services/wikilink.zig" },
-        // The text plugin's headless editing model. Lives under src/plugins/ but is
+        .{ "fizzy-sdk-wikilink-tests", "sdk/src/services/wikilink.zig" },
+        // The text plugin's headless editing model. Lives under plugins/ but is
         // deliberately dvui-free (see textcore.zig), so it tests as pure logic from the
         // app build. One root covers every file below it — they're relative imports.
-        .{ "fizzy-textcore-tests", "src/plugins/text/src/textcore/textcore.zig" },
+        .{ "fizzy-textcore-tests", "plugins/text/src/textcore/textcore.zig" },
         // Keybinding parse/resolve core. Deliberately dvui-free (see keymap.zig) — dvui's
         // keybind map can't express chords and is keyed by bind name, not command.
-        .{ "fizzy-keymap-tests", "src/editor/keymap/keymap.zig" },
-        // `<img>` scanning for the markdown preview's raw-HTML blocks. Under src/plugins/
+        .{ "fizzy-keymap-tests", "app/keymap/Keymap.zig" },
+        // `<img>` scanning for the markdown preview's raw-HTML blocks. Under plugins/
         // but std-only by design (see html_images.zig), so it tests from the app build.
-        .{ "fizzy-md-html-images-tests", "src/plugins/markdown/src/md/html_images.zig" },
+        .{ "fizzy-md-html-images-tests", "plugins/markdown/src/md/html_images.zig" },
         // Resolving a fetched README's relative image paths against its source URL. std-only,
         // same reasoning as html_images above.
-        .{ "fizzy-md-url-join-tests", "src/plugins/markdown/src/md/url_join.zig" },
+        .{ "fizzy-md-url-join-tests", "plugins/markdown/src/md/url_join.zig" },
         // Sniffing image bytes stb can't decode (SVG badges), so the preview never re-enters
         // stbi for them every frame. std-only, same reasoning as the two above.
-        .{ "fizzy-md-image-format-tests", "src/plugins/markdown/src/md/image_format.zig" },
+        .{ "fizzy-md-image-format-tests", "plugins/markdown/src/md/image_format.zig" },
         // The markdown preview's block height table — placement, height trust, and the
         // never-blank visible-range guarantee. std-only by design (see block_heights.zig) so
         // the rules the preview's scroll stability rests on are testable without a Window.
-        .{ "fizzy-md-block-heights-tests", "src/plugins/markdown/src/md/block_heights.zig" },
+        .{ "fizzy-md-block-heights-tests", "plugins/markdown/src/md/block_heights.zig" },
         // Fence language tag → file extension, which is the whole of what the markdown plugin
         // knows about languages: the grammar itself comes from whichever plugin claims that
         // extension. std-only, so the table is testable without a Window.
-        .{ "fizzy-md-code-language-tests", "src/plugins/markdown/src/md/code_language.zig" },
+        .{ "fizzy-md-code-language-tests", "plugins/markdown/src/md/code_language.zig" },
         // Content-swap reveal phase machine. std-only by design (see reveal.zig) — the dvui
         // half is the thin wrapper in core/dvui.zig.
-        .{ "fizzy-reveal-tests", "src/core/reveal.zig" },
+        .{ "fizzy-reveal-tests", "core/reveal.zig" },
+        // Fade / blur-fade timeline. std-only (see crossfade.zig) — pictures and the clock
+        // live in core/anim.zig.
+        .{ "fizzy-crossfade-tests", "core/crossfade.zig" },
         // Ring buffering and dot-segment filtering for the folder watcher. std-only so it can
         // be tested here; FolderWatcher.zig itself needs a live editor.
-        .{ "fizzy-folder-events-tests", "src/editor/folder_events.zig" },
+        .{ "fizzy-folder-events-tests", "app/watch/folder_events.zig" },
     }) |entry| {
         try unit_test_artifacts.append(b.allocator, b.addTest(.{
             .name = entry[0],
@@ -423,12 +588,59 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         const fuzzy_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
-            .root_source_file = b.path("src/core/fuzzy.zig"),
+            .root_source_file = b.path("core/fuzzy.zig"),
         });
         fuzzy_module.addImport("zf", core_mod.zfModule(b, target, optimize));
         try unit_test_artifacts.append(b.allocator, b.addTest(.{
             .name = "fizzy-fuzzy-tests",
             .root_module = fuzzy_module,
+            .filters = test_filters,
+        }));
+    }
+
+    // `core.FileTable` — the shared project file set. Reaches `fuzzy.zig` by relative import so
+    // it needs zf too, and nothing else: it takes its `std.Io` from the host rather than reading
+    // `dvui.io`, precisely so the listing cache and the ranking are testable against a real
+    // directory here instead of only under a running app.
+    {
+        const file_table_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path("core/FileTable.zig"),
+        });
+        file_table_module.addImport("zf", core_mod.zfModule(b, target, optimize));
+        try unit_test_artifacts.append(b.allocator, b.addTest(.{
+            .name = "fizzy-file-table-tests",
+            .root_module = file_table_module,
+            .filters = test_filters,
+        }));
+    }
+
+    // `core.transport.Native` — `std.http.Client` on a thread, tested against a loopback
+    // `std.http.Server` — and the `core.vfs` contract's own tests (`Mem`, zip). No dvui.
+    {
+        const transport_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path("core/transport_tests.zig"),
+        });
+        try unit_test_artifacts.append(b.allocator, b.addTest(.{
+            .name = "fizzy-native-transport-tests",
+            .root_module = transport_module,
+            .filters = test_filters,
+        }));
+    }
+
+    // `core.work`: a stepped task run both ways. No dvui, no Io.
+    {
+        const work_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path("core/work.zig"),
+        });
+        try unit_test_artifacts.append(b.allocator, b.addTest(.{
+            .name = "fizzy-work-tests",
+            .root_module = work_module,
             .filters = test_filters,
         }));
     }
@@ -477,7 +689,7 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
     // Build a module rooted at `src/fizzy.zig` carrying all the same
     // imports the production exe carries. Because fizzy.zig's transitive
-    // imports (App.zig, Editor.zig, …) reference `dvui`, `assets`, etc. by
+    // imports (Entry.zig, Editor.zig, …) reference `dvui`, `assets`, etc. by
     // name, those names must be wired here.
     // We point dvui at the *testing* backend so calling drawing
     // functions doesn't try to open a real OS window.
@@ -489,13 +701,13 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     fizzy_test_module.addImport("dvui", dvui_testing_dep.module("dvui_testing"));
     fizzy_test_module.addImport("backend", dvui_testing_dep.module("testing"));
     fizzy_test_module.addImport("assets", assets_module);
-    fizzy_test_module.addOptions("build_opts", build_opts);
+    fizzy_test_module.addImport("build_opts", sdk.buildOptsModule(build_opts));
 
     // Shared `core` module for the test build (dvui testing backend variant).
     const core_module_test = b.createModule(.{
         .target = target,
         .optimize = optimize,
-        .root_source_file = b.path("src/core/core.zig"),
+        .root_source_file = b.path("core/core.zig"),
     });
     const icons_test = core_mod.addImports(b, core_module_test, dvui_testing_dep.module("dvui_testing"), target, optimize);
     fizzy_test_module.addImport("core", core_module_test);
@@ -528,6 +740,9 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .core = core_module_test,
         .sdk = sdk_module_test,
     }, fizzy_test_module);
+    // The `app` framework module (the plugin store), wired the same way the exe and the web
+    // build wire it — see `build/sdk.zig`.
+    const app_module_test = sdk.wireAppModule(b, target, optimize, dvui_testing_dep.module("dvui_testing"), core_module_test, sdk_module_test, icons_test, markdown_module_test, if (nightwatch_test_dep) |dep| dep.module("nightwatch") else null, build_opts, null, fizzy_test_module);
     _ = image_plugin.addStaticModule(b, target, optimize, .{
         .dvui = dvui_testing_dep.module("dvui_testing"),
         .core = core_module_test,
@@ -551,6 +766,19 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     });
     integration_module.addImport("fizzy", fizzy_test_module);
     integration_module.addImport("dvui", dvui_testing_dep.module("dvui_testing"));
+
+    // The endless example's own layout — not a shipped preset. Tests drive it the way a
+    // consumer would: as a file that imports `app` / `dvui` / `core`.
+    const endless_layout_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("examples/endless-app/src/layout.zig"),
+    });
+    endless_layout_mod.addImport("dvui", dvui_testing_dep.module("dvui_testing"));
+    endless_layout_mod.addImport("app", app_module_test);
+    endless_layout_mod.addImport("core", core_module_test);
+    endless_layout_mod.addImport("fizzy_sdk", sdk_module_test);
+    integration_module.addImport("endless_layout", endless_layout_mod);
 
     // The text plugin itself, so integration tests can drive its `TextEntryWidget` directly in
     // a headless window. Its editing behavior splits in two: the *decisions* live in dvui-free
@@ -624,7 +852,7 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         // The documents it benchmarks are this repo's own sources — `@embedFile` can't reach
         // outside its package, so they arrive the same way.
         bench_module.addAnonymousImport("sample_large", .{ .root_source_file = b.path("src/editor/Editor.zig") });
-        bench_module.addAnonymousImport("sample_small", .{ .root_source_file = b.path("src/App.zig") });
+        bench_module.addAnonymousImport("sample_small", .{ .root_source_file = b.path("src/Entry.zig") });
 
         const bench_text = b.addTest(.{ .name = "fizzy-bench-text", .root_module = bench_module });
         bench_text.root_module.link_libcpp = !target_is_windows_msvc;
@@ -673,24 +901,37 @@ pub fn build(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
     // Pure-logic tests that nevertheless sit in a file importing `dvui` (or the SDK)
     // can't join the unit layer, so they get their own roots here. Rooting at
-    // `src/sdk/sdk.zig` collects every SDK file reachable from it by relative
+    // `sdk/src/sdk.zig` collects every SDK file reachable from it by relative
     // import *and actually referenced* — dylib.zig, fingerprint.zig, settings.zig,
     // version.zig, Host.zig. A file only reached through an unreferenced `pub const
     // x = @import(…)` in sdk.zig is analyzed lazily and its tests never run (that is
-    // why manifest.zig has its own root in the unit list above); when adding tests
+    // why Manifest.zig has its own root in the unit list above); when adding tests
     // to a new SDK file, check the reported test count actually went up.
     {
         const sdk_tests_module = sdk.wireSdkModule(b, target, optimize, dvui_testing_dep.module("dvui_testing"), dvui_test_proxy_bridge, core_module_test, null);
         const plugin_loader_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
-            .root_source_file = b.path("src/editor/PluginLoader.zig"),
+            .root_source_file = b.path("app/store/PluginLoader.zig"),
         });
         plugin_loader_module.addImport("dvui", dvui_testing_dep.module("dvui_testing"));
         plugin_loader_module.addImport("fizzy_sdk", sdk_module_test);
 
+        // How big a pane is: the split's drag, capture handoff and hit distance, and the pane
+        // row's shares. Both need a real Window — every bug either has had was a dvui
+        // event-routing or layout-settle rule, and those do not reproduce on paper. See
+        // `core/sizing_tests.zig` for why the root sits a directory above them.
+        const split_tests_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path("core/sizing_tests.zig"),
+        });
+        split_tests_module.addImport("dvui", dvui_testing_dep.module("dvui_testing"));
+        if (icons_test) |icons| split_tests_module.addImport("icons", icons);
+
         inline for (.{
             .{ "fizzy-sdk-tests", sdk_tests_module },
+            .{ "fizzy-sizing-tests", split_tests_module },
             .{ "fizzy-plugin-loader-tests", plugin_loader_module },
         }) |entry| {
             const t = b.addTest(.{

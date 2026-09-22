@@ -2,11 +2,8 @@
 //!
 //! Both menu bars are rendered from this one tree: `Menu.zig` draws it with dvui, and
 //! `backend_native.buildMenuBar` builds the macOS `NSMenu` from it. Neither owns a list of
-//! items, so an entry added here appears in both by construction — which is the whole point.
-//! Before this, every item was written out in both places (plus an `NSMenuItem` selector, an
-//! `NativeMenuAction` variant, and an Objective-C forwarding method), and the two had already
-//! drifted: the macOS View menu said "Show Explorer" even when the explorer was open, and
-//! Recent Folders existed only in the dvui menu.
+//! items, so an entry added here appears in both by construction — which is the whole point:
+//! two hand-kept lists drift.
 //!
 //! An item names a **command** and nothing else — see `Keybinds.fizzy_commands`. Titles,
 //! enablement and shortcuts are either declared here once or derived from the command, never
@@ -71,7 +68,7 @@ pub const Submenu = struct {
     /// the one plugin that targeted it, was updated to `fizzy.menu.edit`).
     id: []const u8,
     /// Ids this menu used to have, still accepted alongside the current one. Plugins target a
-    /// menu by `parent_menu_id`, and that is a published contract — `sdk/regions.zig` documents
+    /// menu by `parent_menu_id`, and that is a published contract — `sdk/src/menus.zig` documents
     /// the old spellings and shipped plugins use them — so renaming without accepting the old
     /// names would silently drop a third-party plugin's menu section with no error anywhere.
     /// (File's `workbench.menu.file` is the one alias still live, from when File really was a
@@ -85,8 +82,10 @@ pub const Item = union(enum) {
     command: CommandItem,
     separator,
     submenu: Submenu,
-    /// The recents list, filled at draw time from `editor.recents`.
+    /// The recents list, filled at draw time from `editor.app.recents`.
     recent_folders,
+    /// Plugins' `OpenAction`s (`host.open_actions`), the ones currently enabled.
+    open_actions,
     /// Plugin-contributed section parented to this menu id (e.g. "fizzy.menu.edit").
     plugin_section: []const u8,
 };
@@ -107,7 +106,7 @@ fn canSave(editor: *Editor) bool {
 }
 
 fn canSaveAll(editor: *Editor) bool {
-    for (editor.open_files.values()) |doc| {
+    for (editor.app.open_files.values()) |doc| {
         if (doc.owner.isDirty(doc) and doc.owner.documentHasRecognizedSaveExtension(doc)) return true;
     }
     return false;
@@ -148,7 +147,7 @@ fn explorerTitle(editor: *Editor) [:0]const u8 {
 /// TEMPORARY: only meaningful on macOS, where the in-app dvui menu bar is normally suppressed
 /// in favor of the native one — see `Menu.debug_force_on_macos`.
 fn isMacOSOnly(_: *Editor) bool {
-    return fizzy.platform.isMacOS();
+    return fizzy.core.platform.isMacOS();
 }
 
 fn dvuiMenuDebugTitle(_: *Editor) [:0]const u8 {
@@ -162,6 +161,7 @@ const file_items = [_]Item{
     .{ .command = .{ .id = "fizzy.openFolder", .title = .{ .static = "Open Folder" }, .sf_symbol = "folder" } },
     // Not "doc.on.doc": that is the system's Copy glyph, which the Edit menu below uses.
     .{ .command = .{ .id = "fizzy.openFiles", .title = .{ .static = "Open Files" }, .sf_symbol = "doc.text" } },
+    .open_actions,
     .separator,
     .recent_folders,
     .separator,
@@ -197,6 +197,7 @@ const edit_items = [_]Item{
 
 const view_items = [_]Item{
     .{ .command = .{ .id = "fizzy.toggleExplorer", .title = .{ .dynamic = explorerTitle } } },
+    .{ .command = .{ .id = "fizzy.resetLayout", .title = .{ .static = "Reset Layout" }, .sf_symbol = "arrow.counterclockwise" } },
     .{ .plugin_section = "fizzy.menu.view" },
     .separator,
     .{ .command = .{ .id = "fizzy.showDvuiDemo", .title = .{ .static = "Show DVUI Demo" } } },

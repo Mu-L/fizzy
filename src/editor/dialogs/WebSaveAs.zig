@@ -22,14 +22,14 @@ pub const Kind = enum {
 pub fn request(default_filename: []const u8, kind: Kind) void {
     if (active(dvui.currentWindow())) return;
     if (default_name_storage) |old| {
-        fizzy.app.allocator.free(old);
+        fizzy.entry().allocator.free(old);
         default_name_storage = null;
     }
-    default_name_storage = fizzy.app.allocator.dupe(u8, default_filename) catch {
+    default_name_storage = fizzy.entry().allocator.dupe(u8, default_filename) catch {
         dvui.log.err("Web Save As: out of memory", .{});
         return;
     };
-    var mutex = fizzy.dvui.dialog(@src(), .{
+    var mutex = fizzy.core.dialogs.dialog(@src(), .{
         .displayFn = dialog,
         .callafterFn = callAfter,
         .title = kind.dialogTitle(),
@@ -45,7 +45,7 @@ pub fn request(default_filename: []const u8, kind: Kind) void {
 pub fn active(win: *dvui.Window) bool {
     var it = win.dialogs.iterator(null);
     while (it.next()) |d| {
-        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.dvui.DisplayFn) orelse continue;
+        const df = dvui.dataGet(null, d.id, "_displayFn", fizzy.core.dialogs.DisplayFn) orelse continue;
         if (df == dialog) return true;
     }
     return false;
@@ -59,7 +59,7 @@ pub fn dialog(id: dvui.Id) anyerror!bool {
         @src(),
         "Files download to your browser's download folder.",
         .{},
-        .{ .color_text = dvui.themeGet().color(.control, .text), .margin = .{ .h = 8 } },
+        .{ .color_text = .{ .color = dvui.themeGet().color(.control, .text) }, .margin = .{ .h = 8 } },
     );
 
     const te = dvui.textEntry(@src(), .{ .placeholder = "filename.fiz" }, .{ .expand = .horizontal });
@@ -78,22 +78,22 @@ pub fn callAfter(id: dvui.Id, response: dvui.enums.DialogResponse) anyerror!void
     const name = dvui.dataGetSlice(null, id, "_save_as_name", []const u8) orelse "";
     defer {
         if (default_name_storage) |old| {
-            fizzy.app.allocator.free(old);
+            fizzy.entry().allocator.free(old);
             default_name_storage = null;
         }
     }
 
     if (response != .ok or name.len == 0) {
         if (response == .cancel) {
-            fizzy.editor.cancelPendingSaveDialog();
+            fizzy.editor().cancelPendingSaveDialog();
         }
         return;
     }
 
-    const owned = fizzy.app.allocator.dupe(u8, name) catch {
+    const owned = fizzy.entry().allocator.dupe(u8, name) catch {
         dvui.log.err("Web Save As: out of memory", .{});
         return;
     };
-    if (WebFileIo.pending_save_filename) |old| fizzy.app.allocator.free(old);
+    if (WebFileIo.pending_save_filename) |old| fizzy.entry().allocator.free(old);
     WebFileIo.pending_save_filename = owned;
 }

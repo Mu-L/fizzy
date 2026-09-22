@@ -30,6 +30,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const AppInfo = @import("app").AppInfo;
 
 pub const default_progid_extensions = [_]ExtAssoc{
     .{ .ext = ".fiz", .progid = "Fizzy.fiz", .friendly = "Fizzy Document" },
@@ -37,38 +38,38 @@ pub const default_progid_extensions = [_]ExtAssoc{
 };
 
 pub const open_with_only_extensions = [_][]const u8{
-    ".png",  ".jpg",           ".jpeg",         ".ascx",     ".asp",
-    ".aspx", ".bash",          ".bash_login",   ".bash_logout", ".bash_profile",
-    ".bashrc", ".bat",         ".bowerrc",      ".c",        ".c++",
-    ".cc",   ".cfg",           ".cjs",          ".clj",      ".cljs",
-    ".cljx", ".clojure",       ".cls",          ".cmake",    ".cmd",
-    ".code-workspace", ".coffee", ".config",    ".containerfile", ".cpp",
-    ".cs",   ".cshtml",        ".csproj",       ".css",      ".csv",
-    ".csx",  ".ctp",           ".cxx",          ".dart",     ".diff",
-    ".dockerfile", ".dot",     ".dtd",          ".editorconfig", ".edn",
-    ".erb",  ".eyaml",         ".eyml",         ".fs",       ".fsi",
-    ".fsscript", ".fsx",       ".gemspec",      ".gitattributes", ".gitconfig",
-    ".gitignore", ".go",       ".gradle",       ".groovy",   ".h",
-    ".h++",  ".handlebars",    ".hbs",          ".hh",       ".hpp",
-    ".htm",  ".html",          ".hxx",          ".ini",      ".ipynb",
-    ".jade", ".jav",           ".java",         ".js",       ".jscsrc",
-    ".jshintrc", ".jshtm",     ".json",         ".jsp",      ".jsx",
-    ".less", ".lock",          ".log",          ".lua",      ".m",
-    ".makefile", ".markdown",  ".md",           ".mdoc",     ".mdown",
-    ".mdtext", ".mdtxt",       ".mdwn",         ".mjs",      ".mk",
-    ".mkd",  ".mkdn",          ".ml",           ".mli",      ".mm",
-    ".php",  ".phtml",         ".pl",           ".pl6",      ".plist",
-    ".pm",   ".pm6",           ".pod",          ".pp",       ".profile",
-    ".properties", ".ps1",     ".psd1",         ".psgi",     ".psm1",
-    ".pug",  ".py",            ".pyi",          ".r",        ".rb",
-    ".rhistory", ".rprofile",  ".rs",           ".rst",      ".rt",
-    ".sass", ".scss",          ".sh",           ".shtml",    ".sql",
-    ".svg",  ".swift",         ".t",            ".tex",      ".toml",
-    ".ts",   ".tsx",           ".txt",          ".vb",       ".vue",
-    ".wxi",  ".wxl",           ".wxs",          ".xaml",     ".xcodeproj",
-    ".xcworkspace", ".xhtml",  ".xml",          ".yaml",     ".yml",
-    ".zig",  ".zon",           ".zlogin",       ".zlogout",  ".zprofile",
-    ".zsh",  ".zshenv",        ".zshrc",
+    ".png",            ".jpg",        ".jpeg",       ".ascx",          ".asp",
+    ".aspx",           ".bash",       ".bash_login", ".bash_logout",   ".bash_profile",
+    ".bashrc",         ".bat",        ".bowerrc",    ".c",             ".c++",
+    ".cc",             ".cfg",        ".cjs",        ".clj",           ".cljs",
+    ".cljx",           ".clojure",    ".cls",        ".cmake",         ".cmd",
+    ".code-workspace", ".coffee",     ".config",     ".containerfile", ".cpp",
+    ".cs",             ".cshtml",     ".csproj",     ".css",           ".csv",
+    ".csx",            ".ctp",        ".cxx",        ".dart",          ".diff",
+    ".dockerfile",     ".dot",        ".dtd",        ".editorconfig",  ".edn",
+    ".erb",            ".eyaml",      ".eyml",       ".fs",            ".fsi",
+    ".fsscript",       ".fsx",        ".gemspec",    ".gitattributes", ".gitconfig",
+    ".gitignore",      ".go",         ".gradle",     ".groovy",        ".h",
+    ".h++",            ".handlebars", ".hbs",        ".hh",            ".hpp",
+    ".htm",            ".html",       ".hxx",        ".ini",           ".ipynb",
+    ".jade",           ".jav",        ".java",       ".js",            ".jscsrc",
+    ".jshintrc",       ".jshtm",      ".json",       ".jsp",           ".jsx",
+    ".less",           ".lock",       ".log",        ".lua",           ".m",
+    ".makefile",       ".markdown",   ".md",         ".mdoc",          ".mdown",
+    ".mdtext",         ".mdtxt",      ".mdwn",       ".mjs",           ".mk",
+    ".mkd",            ".mkdn",       ".ml",         ".mli",           ".mm",
+    ".php",            ".phtml",      ".pl",         ".pl6",           ".plist",
+    ".pm",             ".pm6",        ".pod",        ".pp",            ".profile",
+    ".properties",     ".ps1",        ".psd1",       ".psgi",          ".psm1",
+    ".pug",            ".py",         ".pyi",        ".r",             ".rb",
+    ".rhistory",       ".rprofile",   ".rs",         ".rst",           ".rt",
+    ".sass",           ".scss",       ".sh",         ".shtml",         ".sql",
+    ".svg",            ".swift",      ".t",          ".tex",           ".toml",
+    ".ts",             ".tsx",        ".txt",        ".vb",            ".vue",
+    ".wxi",            ".wxl",        ".wxs",        ".xaml",          ".xcodeproj",
+    ".xcworkspace",    ".xhtml",      ".xml",        ".yaml",          ".yml",
+    ".zig",            ".zon",        ".zlogin",     ".zlogout",       ".zprofile",
+    ".zsh",            ".zshenv",     ".zshrc",
 };
 
 pub const ExtAssoc = struct {
@@ -105,12 +106,16 @@ const WindowsImpl = struct {
     const library_loader = win32.system.library_loader;
     const HKEY = win32.system.registry.HKEY;
 
-    const app_name = "fizzy";
+    // Registry identity is the *app's*, not fizzy's: two apps built on fizzy would otherwise
+    // write the same keys, and installing the second would silently take over the first's
+    // associations. The document progids above are a separate question — they name a file
+    // format rather than an application, and still say Fizzy.
+    const app_name = AppInfo.current.display_name;
     // All sub-keys passed through `setStringValueRaw` are relative to
     // `HKCU\Software\Classes\…`; the prefix is added once inside that helper.
-    const application_key = "Applications\\fizzy.exe";
-    const open_with_progid = "Fizzy.Document";
-    const open_with_friendly = "Fizzy Document";
+    const application_key = "Applications\\" ++ AppInfo.current.name ++ ".exe";
+    const open_with_progid = AppInfo.current.display_name ++ ".Document";
+    const open_with_friendly = AppInfo.current.display_name ++ " Document";
 
     // `std.process.executablePath` now requires an `Io`, which the Velopack C
     // callbacks that drive registration don't have. This path is Windows-only,

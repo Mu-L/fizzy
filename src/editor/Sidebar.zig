@@ -3,11 +3,13 @@ const builtin = @import("builtin");
 const fizzy = @import("../fizzy.zig");
 const dvui = @import("dvui");
 const Constants = @import("Constants.zig");
-const App = fizzy.App;
+const Entry = fizzy.Entry;
 const Editor = fizzy.Editor;
 
 const SidebarView = fizzy.sdk.SidebarView;
-const PluginStore = @import("PluginStore.zig");
+const PluginStore = @import("app").store.Store;
+const Accounts = @import("Accounts.zig");
+const Layout = @import("app").layout.Layout;
 
 pub const Sidebar = @This();
 
@@ -36,7 +38,10 @@ pub fn deinit() void {
 /// "reached unreachable code".
 pub const Action = enum { none, open, close };
 
-pub fn draw(_: Sidebar) !Action {
+/// `f` is the layout frame: the rail lists whatever currently *matches* the keywords its
+/// region accepts, rather than every surface in `host.surfaces`. That is what
+/// makes a user's keyword override actually move an icon out of (or into) this rail.
+pub fn draw(_: Sidebar, editor: *Editor, f: *Layout, keywords: []const []const u8) !Action {
     const vbox = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .vertical,
         .background = false,
@@ -63,16 +68,16 @@ pub fn draw(_: Sidebar) !Action {
             .background = false,
         });
 
-        for (fizzy.editor.host.sidebar_views.items, 0..) |*view, i| {
-            if (view.hidden or isPinned(view.id)) continue;
-            const a = try drawOption(view, i, 20);
+        for (f.matching(keywords), 0..) |surface, i| {
+            if (isPinned(surface.id)) continue;
+            const a = try drawOption(editor, f, keywords, surface, i, 20);
             if (a != .none) ret = a;
         }
 
         const si = scroll.si.*;
         scroll.deinit();
 
-        fizzy.dvui.drawScrollEdgeShadows(pane.data().contentRectScale(), null, &si, .{});
+        fizzy.core.draw.drawScrollEdgeShadows(pane.data().contentRectScale(), null, &si, .{});
 
         pane.deinit();
     }
@@ -85,9 +90,19 @@ pub fn draw(_: Sidebar) !Action {
         });
         defer bottom.deinit();
 
-        for (fizzy.editor.host.sidebar_views.items, 0..) |*view, i| {
-            if (view.hidden or !isPinned(view.id)) continue;
-            const a = try drawOption(view, i, 20);
+        // The account disc, when anything can be signed in to; then plugin-drawn items (a
+        // badge, a status light); then fizzy's own two.
+        if (editor.app.host.account_providers.items.len != 0) try Accounts.drawRailDisc(editor, 20);
+        for (editor.app.host.rail_items.items, 0..) |item, i| {
+            if (item.hidden) continue;
+            var slot = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = i, .background = false, .min_size_content = .{ .h = 20 } });
+            defer slot.deinit();
+            item.draw(item.ctx, 20) catch |err| dvui.log.err("rail item '{s}' failed to draw: {t}", .{ item.id, err });
+        }
+
+        for (f.matching(keywords), 0..) |surface, i| {
+            if (!isPinned(surface.id)) continue;
+            const a = try drawOption(editor, f, keywords, surface, i, 20);
             if (a != .none) ret = a;
         }
     }
@@ -95,8 +110,15 @@ pub fn draw(_: Sidebar) !Action {
     return ret;
 }
 
-fn drawOption(view: *const SidebarView, index: usize, size: f32) !Action {
-    const selected = fizzy.editor.host.isActiveSidebarView(view.id);
+fn drawOption(
+    editor: *Editor,
+    f: *Layout,
+    keywords: []const []const u8,
+    view: *Layout.Surface,
+    index: usize,
+    size: f32,
+) !Action {
+    const selected = f.isSelected(keywords, view);
     var ret: Action = .none;
 
     const theme = dvui.themeGet();
@@ -121,7 +143,7 @@ fn drawOption(view: *const SidebarView, index: usize, size: f32) !Action {
 
     // Only the store view can carry one; nothing else in the rail has a pending-decision notion.
     const undecided_count: usize = if (std.mem.eql(u8, view.id, PluginStore.view_id))
-        fizzy.editor.undecidedPluginCount()
+        editor.app.undecidedPluginCount()
     else
         0;
 
@@ -130,11 +152,16 @@ fn drawOption(view: *const SidebarView, index: usize, size: f32) !Action {
     // Apply both fill and stroke: Entypo glyphs are fill-based, Lucide (and most
     // plugin icons) are stroke-based. Setting only one leaves the other at DVUI's
     // default white — which is how a stroke icon looks "full white" in the rail.
-    dvui.icon(
+    fizzy.core.icon.icon(
         @src(),
         view.id,
-        view.icon,
-        .{ .fill_color = color, .stroke_color = color },
+        // A surface's icon is format-tagged and optional; the rail draws tvg. A surface with a
+        // png or no icon simply gets no glyph here rather than the rail refusing to list it.
+        switch (view.icon orelse .none) {
+            .tvg => |bytes| bytes,
+            else => dvui.entypo.dot_single,
+        },
+        .{ .fill_color = .{ .color = color }, .stroke_color = .{ .color = color } },
         .{
             .id_extra = index,
             .min_size_content = .{ .h = size },
@@ -158,7 +185,7 @@ fn drawOption(view: *const SidebarView, index: usize, size: f32) !Action {
         dot.x -= r;
         dot.y -= r;
         dot.fill(dvui.CornerRect.Physical.round(r), .{
-            .color = theme.color(.highlight, .fill),
+            .color = .{ .color = theme.color(.highlight, .fill) },
             .fade = 0,
         });
     }
@@ -169,11 +196,17 @@ fn drawOption(view: *const SidebarView, index: usize, size: f32) !Action {
         // here; Editor.zig invokes `peekClose` / `open` after `editor.explorer.paned` has
         // been recreated for this frame. Doing the call directly here would dereference
         // last frame's freed paned widget and crash on wasm.
-        const explorer_visible = fizzy.editor.explorer.peek_open or !fizzy.editor.explorer.closed;
+        // The region, not `explorer.closed`: on a narrow window the explorer is folded away by
+        // the layout without anyone having closed it, and a tap there means "show me", not
+        // "hide it again".
+        const explorer_visible = if (editor.regionFor(fizzy.sdk.keywords.ide.sidebar)) |r|
+            !r.isClosed() and !r.isFolded()
+        else
+            !editor.explorer.closed;
         if (selected and explorer_visible) {
             ret = .close;
         } else {
-            fizzy.editor.host.setActiveSidebarView(view.id);
+            f.select(keywords, view);
             ret = .open;
         }
         dvui.refresh(null, @src(), null);
@@ -186,7 +219,7 @@ fn drawOption(view: *const SidebarView, index: usize, size: f32) !Action {
             .delay = 350_000,
         }, .{
             .id_extra = index,
-            .color_fill = dvui.themeGet().color(.window, .fill),
+            .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) },
             .border = dvui.Rect.all(0),
             .box_shadow = .{
                 .color = .black,

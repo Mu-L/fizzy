@@ -18,6 +18,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const fizzy = @import("../fizzy.zig");
+const wake = @import("app").watch.wake;
 const dvui = @import("dvui");
 const Allocator = std.mem.Allocator;
 
@@ -86,7 +87,7 @@ const Impl = if (have_impl) struct {
     fn note(h: *Handler) void {
         const impl: *Impl = @fieldParentPtr("handler", h);
         if (impl.raw_dirty) |flag| flag.store(true, .release);
-        wake();
+        wake.now();
     }
 
     fn onChange(h: *Handler, path: []const u8, event_type: nightwatch.EventType, object_type: nightwatch.ObjectType) error{HandlerFailed}!void {
@@ -120,17 +121,13 @@ pub fn start(self: *DocumentWatcher) !void {
 }
 
 /// Safe from the nightwatch handler thread — wakes the blocked event loop for one frame.
-fn wake() void {
-    fizzy.app.window.backend.refresh();
-}
-
 /// Main-thread only. Call after mutating open-doc contents so the editor repaints without
 /// waiting for an unrelated input event. `backend.refresh` alone is enough to wake a sleeping
 /// loop from a background thread, but a mid/end-of-frame reload also needs `dvui.refresh` so
 /// the *next* iterate actually redraws.
 fn requestRepaint() void {
     dvui.refresh(null, @src(), null);
-    wake();
+    wake.now();
 }
 
 /// Stops nightwatch and frees all tracking entries. Safe if `start` never ran, and safe to call
@@ -155,11 +152,11 @@ pub fn stop(self: *DocumentWatcher) void {
 
 /// Begin watching `doc` if it has a real on-disk path. No-op on wasm / when nightwatch isn't
 /// running / when the path can't be hashed (missing untitled, etc.).
-pub fn track(self: *DocumentWatcher, editor: *fizzy.Editor, doc: fizzy.sdk.DocHandle) void {
+pub fn track(self: *DocumentWatcher, doc: fizzy.sdk.DocHandle) void {
     if (comptime !have_impl) return;
     if (self.impl.nw == null) return;
 
-    const path = editor.docPath(doc);
+    const path = doc.owner.documentPath(doc);
     if (path.len == 0) return;
     // Untitled docs (never written) must not be watched — there's nothing on disk yet.
     if (!doc.owner.documentHasRecognizedSaveExtension(doc)) return;
@@ -218,9 +215,9 @@ pub fn untrack(self: *DocumentWatcher, doc_id: u64) void {
 }
 
 /// Retarget watches after Save As (or any `setDocumentPath`).
-pub fn retarget(self: *DocumentWatcher, editor: *fizzy.Editor, doc: fizzy.sdk.DocHandle) void {
+pub fn retarget(self: *DocumentWatcher, doc: fizzy.sdk.DocHandle) void {
     self.untrack(doc.id);
-    self.track(editor, doc);
+    self.track(doc);
 }
 
 /// True when disk changed while this doc was dirty — `Editor.save` must confirm first.
@@ -285,14 +282,14 @@ pub fn notifyPathChanged(self: *DocumentWatcher, editor: *fizzy.Editor, path: []
     }
     // Normalization can disagree with the path stored at track time (symlink / cwd); fall
     // back to comparing against every open doc fizzy knows about.
-    for (editor.open_files.values()) |doc| {
-        const doc_path = editor.docPath(doc);
+    for (editor.app.open_files.values()) |doc| {
+        const doc_path = doc.owner.documentPath(doc);
         if (doc_path.len == 0) continue;
         const doc_norm = normalizePath(self.gpa, doc_path) catch continue;
         defer self.gpa.free(doc_norm);
         if (!std.mem.eql(u8, doc_norm, norm)) continue;
         // Ensure we're tracking it (open before watcher started, or watch() failed).
-        if (self.by_id.get(doc.id) == null) self.track(editor, doc);
+        if (self.by_id.get(doc.id) == null) self.track(doc);
         self.applyEntry(editor, doc.id);
         return;
     }
@@ -303,7 +300,7 @@ fn applyEntry(self: *DocumentWatcher, editor: *fizzy.Editor, doc_id: u64) void {
     const hash = hashFile(self.gpa, entry.path) orelse return;
     if (hash == entry.last_hash) return;
 
-    const doc = editor.docById(doc_id) orelse return;
+    const doc = editor.app.docById(doc_id) orelse return;
 
     if (entry.pending_baseline or doc.owner.isDocumentSaving(doc)) {
         entry.last_hash = hash;
@@ -333,13 +330,13 @@ pub fn tick(self: *DocumentWatcher, editor: *fizzy.Editor) void {
     // Finish baselines for async saves even when no FS event arrived this frame.
     self.refreshPendingBaselines(editor);
 
-    const now = fizzy.perf.nanoTimestamp();
+    const now = fizzy.core.perf.nanoTimestamp();
     if (self.raw_dirty.swap(false, .acquire)) {
         self.coalesce_deadline_ns = now + debounce_ns;
     }
     if (self.coalesce_deadline_ns == 0) return;
     if (now < self.coalesce_deadline_ns) {
-        wake();
+        wake.now();
         return;
     }
     self.coalesce_deadline_ns = 0;
@@ -350,7 +347,7 @@ fn refreshPendingBaselines(self: *DocumentWatcher, editor: *fizzy.Editor) void {
     var it = self.by_id.iterator();
     while (it.next()) |e| {
         if (!e.value_ptr.pending_baseline) continue;
-        const doc = editor.docById(e.key_ptr.*) orelse continue;
+        const doc = editor.app.docById(e.key_ptr.*) orelse continue;
         if (doc.owner.isDocumentSaving(doc)) continue;
         if (doc.owner.isDirty(doc)) continue;
         e.value_ptr.pending_baseline = false;
@@ -387,8 +384,8 @@ fn reconcile(self: *DocumentWatcher, editor: *fizzy.Editor) void {
         self.applyEntry(editor, doc_id);
     }
     if (need_retry) {
-        self.coalesce_deadline_ns = fizzy.perf.nanoTimestamp() + debounce_ns;
-        wake();
+        self.coalesce_deadline_ns = fizzy.core.perf.nanoTimestamp() + debounce_ns;
+        wake.now();
     }
 }
 

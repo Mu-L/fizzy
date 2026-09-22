@@ -1,6 +1,6 @@
 .{
     .name = .fizzy,
-    .version = "0.1.0",
+    .version = "0.2.0",
     .fingerprint = 0x3311781b63706048,
     .minimum_zig_version = "0.16.0",
     // Plugin SDK package — no app-only deps (Velopack, nightwatch, …). Plugins depend on
@@ -15,6 +15,7 @@
         "sdk_version.zig",
         "manifest_identity.zig",
         "paths.zig",
+        "src",
     },
     .dependencies = .{
         .icons = .{
@@ -30,9 +31,14 @@
         // It lives here rather than there because this directory ships standalone as
         // `fizzy-sdk-v*.tar.gz` and cannot reach anything above its own root, while the app can
         // always reach down into it.
+        // Pinned by commit, kept alive by a tag. GitHub serves `/archive/<sha>.tar.gz` only while
+        // that commit is reachable from some ref, so every commit pinned here gets an immutable
+        // `fizzy-sdk-<version>` tag in the fork before the pin lands. `fizzy-dev` itself stays a
+        // working branch and can be rebased freely — the tag, never.
         .dvui = .{
-            .url = "https://github.com/foxnne/dvui-dev/archive/7f0957ef9e2d81b200694b767a1c6459e1d62403.tar.gz",
-            .hash = "dvui-0.5.0-dev-AQFJmbiLAQHGQ1I2OLlY3BgbEn_N9p1bk82yqM-JbOcE",
+            // fizzy-sdk-0.2.0
+            .url = "https://github.com/foxnne/dvui-dev/archive/d71a911e5fa3.tar.gz",
+            .hash = "dvui-0.5.0-dev-AQFJmVn4AwGB_ma1_1H7J1OjyVeGaSfXAiNLoW7XgcVE",
             //.path = "../../dvui-dev",
         },
         .zf = .{

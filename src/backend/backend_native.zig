@@ -1,16 +1,64 @@
 // These are functions specific to the backend, which is currently SDL3
 const fizzy = @import("../fizzy.zig");
+
+/// The application's long-lived allocator, set once at startup.
+///
+/// Everything here that allocates does so on behalf of the app — a dialog's default path, the
+/// recent-folders menu, a plugin-contributed menu item's title — and outlives the frame that
+/// asked for it. Reaching for fizzy's own was the single largest thing keeping this file from
+/// being framework; an app sets it and the rest of this file stops naming fizzy at all.
+var app_gpa: ?std.mem.Allocator = null;
+
+pub fn setAllocator(gpa: std.mem.Allocator) void {
+    app_gpa = gpa;
+}
+
+/// Where a file dialog starts, and what the application learns from where it ended.
+///
+/// A native dialog is platform plumbing; *which directory it opens in* is the application's
+/// memory of what the user was doing. Fizzy answers with its project folder and its last used
+/// save/open directories; an app that remembers nothing returns null and gets the platform
+/// default, which is a perfectly good answer.
+pub const DialogDirs = struct {
+    ctx: *anyopaque,
+    /// The directory a `.save` or `.open` dialog should start in, or null for the platform's
+    /// choice. The returned slice is borrowed for the call only.
+    initial: *const fn (ctx: *anyopaque, mode: DialogMode) ?[]const u8,
+    /// Where the user actually ended up. Called with the chosen file's directory.
+    remember: *const fn (ctx: *anyopaque, mode: DialogMode, dir: []const u8) void,
+};
+
+pub const DialogMode = enum { save, open };
+
+var dialog_dirs: ?DialogDirs = null;
+
+pub fn setDialogDirs(d: DialogDirs) void {
+    dialog_dirs = d;
+}
+
+/// The app's remembered directory for `mode`, or "" when it has none.
+fn initialDir(mode: DialogMode) []const u8 {
+    const d = dialog_dirs orelse return "";
+    return d.initial(d.ctx, mode) orelse "";
+}
+
+fn alloc() std.mem.Allocator {
+    return app_gpa orelse @panic("backend used before the app supplied an allocator");
+}
 const std = @import("std");
 const builtin = @import("builtin");
 const dvui = @import("dvui");
+const core = @import("core");
+const layout_file = @import("layout_file.zig");
 const sdl3 = @import("backend").c;
 const objc = @import("objc");
 const win32 = @import("win32");
-const singleton = @import("singleton.zig");
-const window_layout = @import("window_layout.zig");
+const singleton = @import("app").single_instance;
+const window_layout = @import("app").window.layout;
 const Constants = @import("../editor/Constants.zig");
 const KeybindSettings = @import("../editor/KeybindSettings.zig");
 const menu_model = @import("../editor/menu_model.zig");
+const AppInfo = @import("app").AppInfo;
 
 // AppKit geometry types for NSView frame/bounds (same layout as Foundation).
 const NSPoint = extern struct { x: f64, y: f64 };
@@ -188,6 +236,28 @@ fn macosAppPreBeginSync(back: *@import("backend").SDLBackend) void {
     macosSyncRendererSize(back.window, true);
 }
 
+/// Saved vsync setting while a manual live resize has it switched off.
+var macos_live_resize_saved_vsync: ?c_int = null;
+
+/// Frames during a manual live resize are paced by SDL's 60Hz timer inside AppKit's
+/// resize-tracking loop; a vsync-blocking present there only delays the tracker's next
+/// mouse event, so quick drags fall behind the pointer. Off for the drag, restored after.
+export fn fizzy_macos_window_live_resize_vsync(active: c_int) void {
+    if (comptime builtin.os.tag != .macos) return;
+    const window = macos_monitor_window orelse return;
+    const renderer = sdl3.SDL_GetRenderer(window) orelse return;
+    if (active != 0) {
+        if (macos_live_resize_saved_vsync != null) return;
+        var vsync: c_int = 0;
+        if (!sdl3.SDL_GetRenderVSync(renderer, &vsync)) return;
+        macos_live_resize_saved_vsync = vsync;
+        _ = sdl3.SDL_SetRenderVSync(renderer, 0);
+    } else if (macos_live_resize_saved_vsync) |vsync| {
+        macos_live_resize_saved_vsync = null;
+        _ = sdl3.SDL_SetRenderVSync(renderer, vsync);
+    }
+}
+
 export fn fizzy_macos_window_reset_sync_cache() void {
     macos_last_sync_point = .{ 0, 0 };
     macos_last_sync_pixel = .{ 0, 0 };
@@ -212,104 +282,48 @@ export fn fizzy_macos_window_request_clear_frames(frames: c_int) void {
     _ = frames;
 }
 
-// Frame-based geometry persistence, plus (cross-platform) the explorer/panel split ratios —
-// both are "window shape" state, persisted separately from `settings.zon` so dragging a splitter
-// doesn't touch the user's actual settings file (see docs comment on `Constants.zig`). fizzy's
-// window is a frame == content window (full-size content view), which dvui's content-based
-// `WindowGeometry` can't represent — so fizzy persists the actual NSWindow.frame (AppKit
-// bottom-left points) itself, macOS-only. dvui's own persistence is disabled
-// (persist_window_geometry = false in App.startOptions). Stored next to where dvui would write,
-// in the configured pref_path.
-//
-// Two independent writers touch this same file — the macOS-only geometry save (at shutdown) and
-// the cross-platform ratio save (debounced, on every platform) — so both read-modify-write
-// (`loadWindowFile` then override only their own fields) rather than overwriting the whole file,
-// so neither ever clobbers what the other most recently wrote.
-const SavedFrame = struct {
-    x: f64 = 0,
-    y: f64 = 0,
-    w: f64 = 0,
-    h: f64 = 0,
-    explorer_ratio: f32 = 0.35,
-    panel_ratio: f32 = 0.25,
-};
-const window_file = "window.zon";
-
-fn windowFilePath(buf: []u8, dir: []const u8) ?[:0]const u8 {
-    const sep = std.fs.path.sep_str;
-    if (std.mem.endsWith(u8, dir, sep)) {
-        return std.fmt.bufPrintZ(buf, "{s}{s}", .{ dir, window_file }) catch null;
-    }
-    return std.fmt.bufPrintZ(buf, "{s}{s}{s}", .{ dir, sep, window_file }) catch null;
-}
-
-/// Reads every field of `window.zon`, falling back to `SavedFrame`'s own defaults for whatever
-/// is missing or unparseable (never null — simplifies every caller, which only cares about the
-/// subset of fields it owns).
-fn loadWindowFile(dir: []const u8) SavedFrame {
-    var path_buf: [1024]u8 = undefined;
-    const path = windowFilePath(&path_buf, dir) orelse return .{};
-    const data = std.Io.Dir.cwd().readFileAlloc(dvui.io, path, std.heap.page_allocator, .limited(1024)) catch return .{};
-    defer std.heap.page_allocator.free(data);
-    var nul_buf: [1025]u8 = undefined;
-    if (data.len >= nul_buf.len) return .{};
-    @memcpy(nul_buf[0..data.len], data);
-    nul_buf[data.len] = 0;
-    return std.zon.parse.fromSlice(
-        SavedFrame,
-        std.heap.page_allocator,
-        nul_buf[0..data.len :0],
-        null,
-        .{ .ignore_unknown_fields = true },
-    ) catch .{};
-}
-
-fn writeWindowFile(dir: []const u8, f: SavedFrame) void {
-    var path_buf: [1024]u8 = undefined;
-    const path = windowFilePath(&path_buf, dir) orelse return;
-    var aw = std.Io.Writer.Allocating.init(std.heap.page_allocator);
-    defer aw.deinit();
-    std.zon.stringify.serialize(f, .{}, &aw.writer) catch return;
-    std.Io.Dir.createDirAbsolute(dvui.io, dir, .default_dir) catch {};
-    std.Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = path, .data = aw.written() }) catch {
-        std.log.err("failed to write window.zon", .{});
-    };
-}
+// Frame-based geometry persistence. fizzy's window is a frame == content window (full-size
+// content view), which dvui's content-based `WindowGeometry` can't represent — so fizzy persists
+// the actual NSWindow.frame (AppKit bottom-left points) itself, macOS-only, in `layout.zon`
+// beside the regions. dvui's own persistence is disabled (persist_window_geometry = false in
+// App.startOptions).
+/// `layout.zon` — what a shape's regions and window frame were left as. The file code lives in
+/// `layout_file.zig` over `core.fs`, so the web backend shares it; the macOS geometry save
+/// below is the one native-only writer.
+pub const SavedRegion = layout_file.SavedRegion;
+pub const SavedShows = layout_file.SavedShows;
+pub const saveRegions = layout_file.saveRegions;
+pub const loadRegions = layout_file.loadRegions;
+pub const freeRegions = layout_file.freeRegions;
+pub const saveTree = layout_file.saveTree;
+pub const loadTree = layout_file.loadTree;
+const SavedFrame = layout_file.SavedFrame;
+const loadWindowFile = layout_file.loadWindowFile;
+const writeWindowFile = layout_file.writeWindowFile;
 
 /// The saved NSWindow frame, or null if there's none yet / it's degenerate (w/h < 1) — same
 /// contract `loadSavedFrame` had before the rename. macOS-only caller (`restoreWindowState`).
 fn loadSavedFrame(dir: []const u8) ?SavedFrame {
-    const f = loadWindowFile(dir);
-    if (f.w < 1 or f.h < 1) return null;
+    const gpa = std.heap.page_allocator;
+    const f = loadWindowFile(gpa, dir);
+    if (f.w < 1 or f.h < 1) {
+        std.zon.parse.free(gpa, f);
+        return null;
+    }
     return f;
 }
 
 /// Read-modify-write: preserves whatever ratios are already on disk, overrides only the frame
 /// geometry. macOS-only caller (`saveWindowGeometry`).
 fn writeSavedFrame(dir: []const u8, x: f64, y: f64, w: f64, h: f64) void {
-    var f = loadWindowFile(dir);
+    const gpa = std.heap.page_allocator;
+    var f = loadWindowFile(gpa, dir);
+    defer std.zon.parse.free(gpa, f);
     f.x = x;
     f.y = y;
     f.w = w;
     f.h = h;
     writeWindowFile(dir, f);
-}
-
-/// Read-modify-write: preserves whatever frame geometry is already on disk, overrides only the
-/// explorer/panel split ratios. Cross-platform (called from `Editor`'s debounced autosave on
-/// every OS, not just macOS).
-pub fn saveWindowRatios(dir: []const u8, explorer_ratio: f32, panel_ratio: f32) void {
-    var f = loadWindowFile(dir);
-    f.explorer_ratio = explorer_ratio;
-    f.panel_ratio = panel_ratio;
-    writeWindowFile(dir, f);
-}
-
-/// Explorer/panel split ratios from `window.zon`, or `SavedFrame`'s own defaults if the file
-/// doesn't exist yet (fresh install). Cross-platform; call once at startup.
-pub fn loadWindowRatios(dir: []const u8) struct { explorer_ratio: f32, panel_ratio: f32 } {
-    const f = loadWindowFile(dir);
-    return .{ .explorer_ratio = f.explorer_ratio, .panel_ratio = f.panel_ratio };
 }
 
 /// True if the saved frame's title strip lands on a connected display (guards
@@ -442,8 +456,6 @@ pub const DialogFileFilter = sdl3.SDL_DialogFileFilter;
 /// working. See `setNativeMenuShortcut`.
 var native_menu_items: [menu_model.flat_commands.len]?objc.Object = @splat(null);
 
-
-
 /// Point a menu item at a different chord. `key` is the key-equivalent character (lowercase,
 /// as AppKit expects — the shift modifier is carried in the mask, not the case); passing null
 /// clears the shortcut, which is the right outcome for a chord AppKit can't express.
@@ -491,11 +503,23 @@ pub const modifier_control: c_ulong = NSEventModifierFlagControl;
 // Queue a single pending native action id.
 // This may be written from an AppKit callback thread, so use an atomic.
 var pending_native_menu_action_id: std.atomic.Value(c_int) = .init(-1);
+/// Whether the pending action fired as a key equivalent (see `NativeMenuAction.from_key`).
+var pending_native_menu_action_from_key: std.atomic.Value(bool) = .init(false);
 
 /// Called from FizzyMenuTarget.m when user picks a native menu item. Runs on main thread.
-export fn FizzyNativeMenuAction(id: c_int) void {
+export fn FizzyNativeMenuAction(id: c_int, from_key: bool) void {
+    pending_native_menu_action_from_key.store(from_key, .release);
     pending_native_menu_action_id.store(id, .release);
 }
+
+/// A native menu item the user activated. `from_key` means a ⌘-key equivalent, not a click:
+/// AppKit runs the menu action *and* passes the keystroke on to SDL, so the key event is still
+/// on its way to whatever widget has focus — a command that would otherwise synthesize one
+/// (paste into a text field) must not.
+pub const NativeMenuAction = struct {
+    index: usize,
+    from_key: bool,
+};
 
 // Queue a single pending generic (plugin `NativeMenuItem`) action tag. Same threading note
 // as `pending_native_menu_action_id` above.
@@ -539,50 +563,46 @@ export fn FizzyNativeMenuActionEnabled(tag: c_int) callconv(.c) bool {
     // `visible` items that aren't visible are shown greyed rather than removed — rebuilding the
     // retained NSMenu on every state change isn't worth it for the same information.
     if (item.visible) |f| {
-        if (!f(fizzy.editor)) return false;
+        if (!f(fizzy.editor())) return false;
     }
     const enabled = item.enabled orelse return true;
-    return enabled(fizzy.editor);
+    return enabled(fizzy.editor());
 }
 
 /// Same idea as `FizzyNativeMenuActionEnabled` above, but for a plugin-contributed
 /// `NativeMenuItem` (`tag` indexes `host.native_menu_items`, like `FizzyNativeMenuGenericAction`
-/// resolves). These have no `visible`/`enabled` fields of their own — pixi's Transform/Grid
-/// Layout and text's Format Document used to be always-enabled here regardless of the active
-/// document, which is the other half of why they disagreed with the in-app menu (the dvui side
-/// used to hide the row entirely instead; `Editor.fizzyDrawMenuItem` now greys it the same way
-/// this does). An item names its `Command` via `NativeMenuItem.command` precisely so a shared
-/// enabled state doesn't have to be duplicated per platform; no `command` means "always enabled",
-/// same as a dvui row with no `command_id`.
+/// resolves). These have no `visible`/`enabled` fields of their own: an item names its `Command`
+/// via `NativeMenuItem.command` so the enabled state is the command's, on both menu bars
+/// (`Editor.fizzyDrawMenuItem` greys the in-app row the same way). No `command` means "always
+/// enabled", same as a dvui row with no `command_id`.
 export fn FizzyNativeMenuGenericActionEnabled(tag: c_int) callconv(.c) bool {
     if (KeybindSettings.isRecording()) return false;
     if (tag < 0) return true;
-    const items = fizzy.editor.host.native_menu_items.items;
+    const items = fizzy.editor().app.host.native_menu_items.items;
     if (tag >= items.len) return true;
     const cmd = items[@intCast(tag)].command orelse return true;
-    return fizzy.editor.host.commandEnabled(cmd);
+    return fizzy.editor().app.host.commandEnabled(cmd);
 }
 
 /// Current label for a model item, so state-dependent titles ("Show Explorer" / "Hide
 /// Explorer") track the app. AppKit menus are retained state; validation runs just before a
-/// menu displays, which is when this is called. The macOS View menu used to say "Show
-/// Explorer" permanently, because its title was baked in at construction.
+/// menu displays, which is when this is called.
 export fn FizzyNativeMenuItemTitle(tag: c_int) callconv(.c) ?[*:0]const u8 {
     if (tag < 0) return null;
     const item = menu_model.byTag(@intCast(tag)) orelse return null;
     return switch (item.title) {
         .static => null, // already correct; nothing to rewrite
-        .dynamic => |f| f(fizzy.editor).ptr,
+        .dynamic => |f| f(fizzy.editor()).ptr,
     };
 }
 
-/// The app menu's "About fizzy", which AppKit creates rather than the model.
+/// The app menu's "About <app>", which AppKit creates rather than the model.
 export fn FizzyNativeMenuAboutAction() callconv(.c) void {
     pending_native_menu_about.store(true, .release);
 }
 var pending_native_menu_about: std.atomic.Value(bool) = .init(false);
 
-/// A Recent Folders click. The index is into `editor.recents.folders`, newest last.
+/// A Recent Folders click. The index is into `editor.app.recents.folders`, newest last.
 export fn FizzyNativeRecentFolderAction(index: c_int) callconv(.c) void {
     if (index < 0) return;
     pending_native_recent_folder.store(index, .release);
@@ -824,12 +844,6 @@ pub fn getHoveredTitleBarButton() ?TitleBarButton {
 // Performs the window button action (minimize, maximize/restore, close). The subclass calls this directly
 // on WM_NCLBUTTONDOWN for our registered button rects. Public so callers without a mouse path (e.g. a
 // right-click system menu or keyboard shortcut) can still trigger it. Windows only.
-pub fn performWindowButton(win: *dvui.Window, button: TitleBarButton) void {
-    if (builtin.os.tag != .windows) return;
-    const hwnd = getWin32Hwnd(win) orelse return;
-    performWindowButtonHwnd(@ptrCast(hwnd), button);
-}
-
 fn performWindowButtonHwnd(hwnd_h: win32.foundation.HWND, button: TitleBarButton) void {
     // We strip WS_SYSMENU from the window style to hide the OS-drawn caption buttons,
     // so WM_SYSCOMMAND(SC_MINIMIZE/MAXIMIZE/CLOSE) is no longer reliable. Drive the actions
@@ -1352,7 +1366,7 @@ fn resolveBuiltinNativeMenu(id: []const u8) ?objc.Object {
     return null;
 }
 
-/// Rebuild every plugin-contributed native menu item from the current `fizzy.editor.host`
+/// Rebuild every plugin-contributed native menu item from the current `fizzy.editor().app.host`
 /// registry state. Tears down the previous dynamic set first, so this is safe (and cheap
 /// enough) to call on every plugin load/unload/hide-toggle — a full rebuild avoids diffing
 /// against arbitrary prior state, at the cost of some churn AppKit already expects from
@@ -1373,7 +1387,7 @@ pub fn rebuildDynamicNativeMenus() void {
     }
     dynamic_top_level_menus.clearRetainingCapacity();
 
-    const host = &fizzy.editor.host;
+    const host = &fizzy.editor().app.host;
 
     const NSMenu = objc.getClass("NSMenu") orelse return;
     const NSMenuItem = objc.getClass("NSMenuItem") orelse return;
@@ -1386,7 +1400,7 @@ pub fn rebuildDynamicNativeMenus() void {
     // `MenuContribution` that has at least one visible `NativeMenuItem` targeting it.
     // Menus with no native leaf items (in-app-bar-only, or untitled) are skipped.
     var created: std.StringHashMapUnmanaged(objc.Object) = .empty;
-    defer created.deinit(fizzy.app.allocator);
+    defer created.deinit(alloc());
 
     for (host.menus.items) |mc| {
         if (mc.hidden or mc.title.len == 0) continue;
@@ -1399,8 +1413,8 @@ pub fn rebuildDynamicNativeMenus() void {
         };
         if (!has_items) continue;
 
-        const title_z = fizzy.app.allocator.dupeZ(u8, mc.title) catch continue;
-        defer fizzy.app.allocator.free(title_z);
+        const title_z = alloc().dupeZ(u8, mc.title) catch continue;
+        defer alloc().free(title_z);
         const title_str = NSString.msgSend(objc.Object, "stringWithUTF8String:", .{title_z.ptr});
 
         const menu = NSMenu.msgSend(objc.Object, "alloc", .{}).msgSend(objc.Object, "initWithTitle:", .{title_str.value});
@@ -1425,8 +1439,8 @@ pub fn rebuildDynamicNativeMenus() void {
             main_menu.msgSend(void, "addItem:", .{item.value});
         }
 
-        dynamic_top_level_menus.append(fizzy.app.allocator, .{ .item = item, .menu = menu }) catch {};
-        created.put(fizzy.app.allocator, mc.id, menu) catch {};
+        dynamic_top_level_menus.append(alloc(), .{ .item = item, .menu = menu }) catch {};
+        created.put(alloc(), mc.id, menu) catch {};
     }
 
     // Pass 2: append every visible `NativeMenuItem` into its resolved parent menu (either a
@@ -1437,8 +1451,8 @@ pub fn rebuildDynamicNativeMenus() void {
         const parent_menu: objc.Object = resolveBuiltinNativeMenu(ni.parent_menu_id) orelse
             (created.get(ni.parent_menu_id) orelse continue);
 
-        const title_z = fizzy.app.allocator.dupeZ(u8, ni.title) catch continue;
-        defer fizzy.app.allocator.free(title_z);
+        const title_z = alloc().dupeZ(u8, ni.title) catch continue;
+        defer alloc().free(title_z);
         const title_str = NSString.msgSend(objc.Object, "stringWithUTF8String:", .{title_z.ptr});
 
         const item = parent_menu.msgSend(objc.Object, "addItemWithTitle:action:keyEquivalent:", .{
@@ -1452,13 +1466,13 @@ pub fn rebuildDynamicNativeMenus() void {
         // in `Editor.zig`'s `flushQueuedNativeMenuItems`.
         item.msgSend(void, "setTag:", .{@as(c_long, @intCast(idx))});
         if (ni.sf_symbol) |sym| {
-            if (fizzy.app.allocator.dupeZ(u8, sym)) |sym_z| {
-                defer fizzy.app.allocator.free(sym_z);
+            if (alloc().dupeZ(u8, sym)) |sym_z| {
+                defer alloc().free(sym_z);
                 setMenuItemImage(item, NSImage, NSString, sym_z.ptr, title_z.ptr);
             } else |_| {}
         }
 
-        dynamic_leaf_items.append(fizzy.app.allocator, .{
+        dynamic_leaf_items.append(alloc(), .{
             .parent_menu = parent_menu,
             .item = item,
             .index = idx,
@@ -1470,7 +1484,7 @@ pub fn rebuildDynamicNativeMenus() void {
     // load/unload/hide-toggle) reach it *after* the keymap is rebuilt, so nothing else would —
     // the fixed bar hits the same ordering hazard, which is why `setupMacOSMenuBar` ends with
     // the same call.
-    fizzy.Editor.Keybinds.syncNativeMenuShortcuts(fizzy.editor);
+    fizzy.Editor.Keybinds.syncNativeMenuShortcuts(fizzy.editor());
 }
 
 /// Inserts a "File" menu into the macOS app menu bar (between Apple and Window). Safe to call multiple times; runs once.
@@ -1549,7 +1563,10 @@ pub fn setupMacOSMenuBar() void {
                         }
                     },
 
-                    .plugin_section, .submenu => {},
+                    // Natively an open action is the plugin's own `NativeMenuItem`, appended
+                    // to File with the rest of its native items; the fixed slot is the in-app
+                    // bar's.
+                    .open_actions, .plugin_section, .submenu => {},
                 }
             }
 
@@ -1586,18 +1603,20 @@ pub fn setupMacOSMenuBar() void {
         if (fizzy_get_selector("about:")) |about_sel| {
             const about_item = app_submenu.msgSend(objc.Object, "itemAtIndex:", .{@as(c_ulong, 0)});
             if (about_item.value != 0) {
-                const about_title = NSString.msgSend(objc.Object, "stringWithUTF8String:", .{"About fizzy".ptr});
+                const about_title = NSString.msgSend(objc.Object, "stringWithUTF8String:", .{AppInfo.about_title_z.ptr});
                 about_item.msgSend(void, "setTitle:", .{about_title.value});
                 about_item.msgSend(void, "setAction:", .{about_sel});
                 about_item.msgSend(void, "setTarget:", .{target.value});
             }
         }
 
-        // Patch every remaining "DVUI App Example" → "fizzy" in app-menu item titles.
+        // Patch every remaining "DVUI App Example" → this app's display name in app-menu item
+        // titles (Hide, Quit, Services). The name is the *app's*, not fizzy's — an app built on
+        // fizzy must not offer to quit fizzy.
         // `stringByReplacingOccurrencesOfString:withString:` is a no-op when the substring
         // isn't present, so it's safe to apply unconditionally over the whole menu.
         const search_str = NSString.msgSend(objc.Object, "stringWithUTF8String:", .{"DVUI App Example".ptr});
-        const replacement_str = NSString.msgSend(objc.Object, "stringWithUTF8String:", .{"fizzy".ptr});
+        const replacement_str = NSString.msgSend(objc.Object, "stringWithUTF8String:", .{AppInfo.display_name_z.ptr});
         const item_count = app_submenu.msgSend(c_long, "numberOfItems", .{});
         var idx: c_long = 0;
         while (idx < item_count) : (idx += 1) {
@@ -1624,7 +1643,7 @@ pub fn setupMacOSMenuBar() void {
     // first at boot, so every File/Edit shortcut was stamped onto items that did not exist yet
     // and never restamped. The menus showed no chords, and because `nativeMenuOwnsChord` still
     // told `dispatch` the native menu owned them, nothing handled those keys at all.
-    fizzy.Editor.Keybinds.syncNativeMenuShortcuts(fizzy.editor);
+    fizzy.Editor.Keybinds.syncNativeMenuShortcuts(fizzy.editor());
 }
 
 /// Fill the Recent Folders submenu from the current recents list.
@@ -1642,7 +1661,7 @@ pub fn rebuildNativeRecentFolders() void {
     menu.msgSend(void, "removeAllItems", .{});
 
     const empty = NSString.msgSend(objc.Object, "stringWithUTF8String:", .{"".ptr});
-    const folders = fizzy.editor.recents.folders.items;
+    const folders = fizzy.editor().app.recents.folders.items;
 
     // Newest first, matching the dvui menu's reverse walk.
     var i: usize = folders.len;
@@ -1699,10 +1718,10 @@ fn addNativeMenuItemWithTarget(menu: objc.Object, _: objc.Class, NSStringClass: 
 }
 
 /// Returns and clears a pending native menu action (macOS menu bar). Call once per frame; on non-macOS always returns null.
-pub fn pollPendingNativeMenuAction() ?usize {
+pub fn pollPendingNativeMenuAction() ?NativeMenuAction {
     const id = pending_native_menu_action_id.swap(-1, .acq_rel);
     if (id < 0 or id >= menu_model.flat_commands.len) return null;
-    return @intCast(id);
+    return .{ .index = @intCast(id), .from_key = pending_native_menu_action_from_key.load(.acquire) };
 }
 
 /// Returns and clears a pending generic native menu item tag (plugin `NativeMenuItem`s).
@@ -1713,23 +1732,12 @@ pub fn pollPendingGenericNativeMenuAction() ?usize {
     return @intCast(tag);
 }
 
-pub fn showSimpleMessage(title: [:0]const u8, message: [:0]const u8) void {
-    if (sdl3.SDL_ShowSimpleMessageBox(sdl3.SDL_MESSAGEBOX_INFORMATION, title, message, dvui.currentWindow().backend.impl.window)) {
-        std.log.debug("true!", .{});
-    }
-}
-
 pub fn showSaveFileDialog(cb: *const fn (?[][:0]const u8) void, filters: []const DialogFileFilter, default_filename: []const u8, default_folder: ?[]const u8) void {
     const default: [:0]const u8 = blk: {
-        if (default_folder) |folder| {
-            break :blk std.fs.path.joinZ(fizzy.app.allocator, &.{ folder, default_filename }) catch "untitled";
-        } else if (fizzy.editor.recents.last_save_folder) |last_save_folder| {
-            break :blk std.fs.path.joinZ(fizzy.app.allocator, &.{ last_save_folder, default_filename }) catch "untitled";
-        } else {
-            break :blk std.fs.path.joinZ(fizzy.app.allocator, &.{ fizzy.editor.folder orelse "", default_filename }) catch "untitled";
-        }
+        const dir = default_folder orelse initialDir(.save);
+        break :blk std.fs.path.joinZ(alloc(), &.{ dir, default_filename }) catch "untitled";
     };
-    defer fizzy.app.allocator.free(default);
+    defer alloc().free(default);
     // Do not use our borderless/custom-frame main window as the dialog parent on Windows: the shell
     // may inherit extended style and the picker loses normal frame/close affordances.
     const parent: ?*sdl3.SDL_Window = if (builtin.os.tag == .windows) null else dvui.currentWindow().backend.impl.window;
@@ -1738,32 +1746,20 @@ pub fn showSaveFileDialog(cb: *const fn (?[][:0]const u8) void, filters: []const
 
 pub fn showOpenFileDialog(cb: *const fn (?[][:0]const u8) void, filters: []const DialogFileFilter, default_filename: []const u8, default_folder: ?[]const u8) void {
     const default: [:0]const u8 = blk: {
-        if (default_folder) |folder| {
-            break :blk std.fs.path.joinZ(fizzy.app.allocator, &.{ folder, default_filename }) catch "untitled";
-        } else if (fizzy.editor.recents.last_open_folder) |last_open_folder| {
-            break :blk std.fs.path.joinZ(fizzy.app.allocator, &.{ last_open_folder, default_filename }) catch "untitled";
-        } else {
-            break :blk std.fs.path.joinZ(fizzy.app.allocator, &.{ fizzy.editor.folder orelse "", default_filename }) catch "untitled";
-        }
+        const dir = default_folder orelse initialDir(.open);
+        break :blk std.fs.path.joinZ(alloc(), &.{ dir, default_filename }) catch "untitled";
     };
-    defer fizzy.app.allocator.free(default);
+    defer alloc().free(default);
     const parent: ?*sdl3.SDL_Window = if (builtin.os.tag == .windows) null else dvui.currentWindow().backend.impl.window;
     sdl3.SDL_ShowOpenFileDialog(GenericOpenDialogCallback, @ptrCast(@alignCast(@constCast(cb))), parent, filters.ptr, @intCast(filters.len), default.ptr, true);
 }
 
 pub fn showOpenFolderDialog(cb: *const fn (?[][:0]const u8) void, default_folder: ?[]const u8) void {
     const default: [:0]const u8 = blk: {
-        if (default_folder) |folder| {
-            break :blk std.fmt.allocPrintSentinel(fizzy.app.allocator, "{s}", .{folder}, 0) catch "untitled";
-        } else {
-            if (fizzy.editor.recents.last_open_folder) |last_open_folder| {
-                break :blk std.fmt.allocPrintSentinel(fizzy.app.allocator, "{s}", .{last_open_folder}, 0) catch "untitled";
-            } else {
-                break :blk std.fmt.allocPrintSentinel(fizzy.app.allocator, "{s}", .{fizzy.editor.folder orelse ""}, 0) catch "untitled";
-            }
-        }
+        const dir = default_folder orelse initialDir(.open);
+        break :blk std.fmt.allocPrintSentinel(alloc(), "{s}", .{dir}, 0) catch "untitled";
     };
-    defer fizzy.app.allocator.free(default);
+    defer alloc().free(default);
     const parent: ?*sdl3.SDL_Window = if (builtin.os.tag == .windows) null else dvui.currentWindow().backend.impl.window;
     sdl3.SDL_ShowOpenFolderDialog(GenericOpenDialogCallback, @ptrCast(@alignCast(@constCast(cb))), parent, default.ptr, false);
 }
@@ -1804,10 +1800,10 @@ pub fn pollPendingDialogResult() ?PendingDialogResult {
 /// `dvui.refresh` with an explicit window is the outside-`begin`/`end` form: it marks a frame
 /// needed *and* wakes the backend's event wait.
 fn wakeForDialogResult() void {
-    dvui.refresh(fizzy.app.window, @src(), null);
+    dvui.refresh(fizzy.entry().window, @src(), null);
 }
 
-fn GenericDialogCallback(cb: ?*anyopaque, files: [*c]const [*c]const u8, mode: enum { save, open }) void {
+fn GenericDialogCallback(cb: ?*anyopaque, files: [*c]const [*c]const u8, mode: DialogMode) void {
     const callback: *const fn (?[][:0]const u8) void = @ptrCast(@alignCast(@constCast(cb)));
 
     // Try to count the number of files until we hit a null pointer.
@@ -1815,7 +1811,7 @@ fn GenericDialogCallback(cb: ?*anyopaque, files: [*c]const [*c]const u8, mode: e
     while (files[path_count] != null) : (path_count += 1) {}
 
     if (path_count == 0) {
-        pending_dialog_results.append(fizzy.app.allocator, .{ .callback = callback, .files = null }) catch {
+        pending_dialog_results.append(alloc(), .{ .callback = callback, .files = null }) catch {
             dvui.log.err("Failed to queue dialog result", .{});
             return;
         };
@@ -1825,47 +1821,31 @@ fn GenericDialogCallback(cb: ?*anyopaque, files: [*c]const [*c]const u8, mode: e
 
     // Dupe every path (and the slice holding them) into memory that outlives this callback,
     // since the `files` pointers are only valid for the duration of this call.
-    const zig_files: [][:0]const u8 = fizzy.app.allocator.alloc([:0]const u8, path_count) catch {
+    const zig_files: [][:0]const u8 = alloc().alloc([:0]const u8, path_count) catch {
         dvui.log.err("Failed to allocate dialog result paths", .{});
         return;
     };
     var allocated: usize = 0;
     for (0..path_count) |i| {
-        zig_files[i] = fizzy.app.allocator.dupeZ(u8, std.mem.span(files[i])) catch {
+        zig_files[i] = alloc().dupeZ(u8, std.mem.span(files[i])) catch {
             dvui.log.err("Failed to dupe dialog result path", .{});
-            for (zig_files[0..allocated]) |f| fizzy.app.allocator.free(f);
-            fizzy.app.allocator.free(zig_files);
+            for (zig_files[0..allocated]) |f| alloc().free(f);
+            alloc().free(zig_files);
             return;
         };
         allocated += 1;
     }
 
-    { // Save the open or save folder for the next time the dialog is shown
+    { // Tell the app where the user ended up, so the next dialog starts there.
         if (std.fs.path.dirname(zig_files[0])) |dir| {
-            if (mode == .save) {
-                if (fizzy.editor.recents.last_save_folder) |last_save_folder| {
-                    fizzy.app.allocator.free(last_save_folder);
-                }
-                fizzy.editor.recents.last_save_folder = fizzy.app.allocator.dupe(u8, dir) catch {
-                    dvui.log.err("Failed to dupe directory {s}", .{dir});
-                    return;
-                };
-            } else {
-                if (fizzy.editor.recents.last_open_folder) |last_open_folder| {
-                    fizzy.app.allocator.free(last_open_folder);
-                }
-                fizzy.editor.recents.last_open_folder = fizzy.app.allocator.dupe(u8, dir) catch {
-                    dvui.log.err("Failed to dupe directory {s}", .{dir});
-                    return;
-                };
-            }
+            if (dialog_dirs) |d| d.remember(d.ctx, mode, dir);
         }
     }
 
-    pending_dialog_results.append(fizzy.app.allocator, .{ .callback = callback, .files = zig_files }) catch {
+    pending_dialog_results.append(alloc(), .{ .callback = callback, .files = zig_files }) catch {
         dvui.log.err("Failed to queue dialog result", .{});
-        for (zig_files) |f| fizzy.app.allocator.free(f);
-        fizzy.app.allocator.free(zig_files);
+        for (zig_files) |f| alloc().free(f);
+        alloc().free(zig_files);
         return;
     };
     wakeForDialogResult();

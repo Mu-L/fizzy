@@ -25,18 +25,17 @@ const icons = @import("icons");
 const assets = @import("assets");
 const core = @import("core");
 const fizzy = @import("../fizzy.zig");
-const PluginSettingsPane = @import("PluginSettingsPane.zig");
-const SettingRow = @import("SettingRow.zig");
-const PluginStore = @import("PluginStore.zig");
+const PluginSettingsPane = @import("app").settings.PluginPane;
+const SettingRow = @import("app").settings.Row;
+const PluginStore = @import("app").store.Store;
 const fizzy_settings = @import("explorer/settings.zig");
 
 const fuzzy = core.fuzzy;
-const wdvui = core.dvui;
 const settings = fizzy.sdk.settings;
 
 /// Fizzy's own branch. Named for the app so it reads as a peer of the plugin branches
 /// rather than as a special case.
-const fizzy_branch_title = "Fizzy";
+const fizzy_branch_title = @import("app").AppInfo.current.display_name;
 
 /// Expand/collapse state, keyed by a hash of the branch's path through the tree
 /// ("Fizzy/Appearance", a plugin id, …) rather than by its widget id.
@@ -65,7 +64,7 @@ fn isOpen(key: u64) bool {
 
 fn setOpen(key: u64, open: bool) void {
     if (open) {
-        open_branches.put(fizzy.app.allocator, key, {}) catch return;
+        open_branches.put(fizzy.entry().allocator, key, {}) catch return;
     } else {
         _ = open_branches.remove(key);
     }
@@ -153,7 +152,7 @@ fn lowerLeaf(_: void, a: Leaf, b: Leaf) bool {
 /// scratch every frame, which is cheap (tens of leaves) and keeps zero state to invalidate.
 fn collect(arena: std.mem.Allocator, query: *const fuzzy.Query) std.ArrayListUnmanaged(Branch) {
     var roots: std.ArrayListUnmanaged(Branch) = .empty;
-    const editor = fizzy.editor;
+    const editor = fizzy.editor();
 
     // --- fizzy's own settings, one child branch per category
     var fizzy_branch: Branch = .{
@@ -189,17 +188,17 @@ fn collect(arena: std.mem.Allocator, query: *const fuzzy.Query) std.ArrayListUnm
             if (s < child.score) child.score = s;
         }
         if (child.leaves.items.len == 0) continue;
-        std.sort.block(Leaf, child.leaves.items, {}, lowerLeaf);
+        if (!query.isEmpty()) std.sort.block(Leaf, child.leaves.items, {}, lowerLeaf);
         if (child.score < fizzy_branch.score) fizzy_branch.score = child.score;
         fizzy_branch.children.append(arena, child) catch {};
     }
     if (fizzy_branch.children.items.len > 0) {
-        std.sort.block(Branch, fizzy_branch.children.items, {}, lowerBranch);
+        if (!query.isEmpty()) std.sort.block(Branch, fizzy_branch.children.items, {}, lowerBranch);
         roots.append(arena, fizzy_branch) catch {};
     }
 
     // --- one branch per plugin that registered a schema
-    for (editor.host.settings_schemas.items, 0..) |*schema, si| {
+    for (editor.app.host.settings_schemas.items, 0..) |*schema, si| {
         // Branch title is the plugin's display name (store / sidebar), not `schema.title` —
         // that field is a leftover section label (e.g. "Text Editor") and reads as a different
         // product from the plugin itself ("Text").
@@ -232,18 +231,18 @@ fn collect(arena: std.mem.Allocator, query: *const fuzzy.Query) std.ArrayListUnm
             if (s < branch.score) branch.score = s;
         }
         if (branch.leaves.items.len == 0) continue;
-        std.sort.block(Leaf, branch.leaves.items, {}, lowerLeaf);
+        if (!query.isEmpty()) std.sort.block(Leaf, branch.leaves.items, {}, lowerLeaf);
         roots.append(arena, branch) catch {};
     }
 
     // --- plugins that failed to load: one branch each, carrying the failure reason
-    for (editor.failed_user_plugins.items, 0..) |f, fi| {
+    for (editor.app.failed_user_plugins.items, 0..) |f, fi| {
         const title = PluginStore.displayName(f.id);
         const s = fuzzy.scoreBest(&.{ title, f.id, f.reason }, query, .{ .plain = true }) orelse continue;
         var branch: Branch = .{
             .title = title,
             .score = s,
-            .tie = editor.host.settings_schemas.items.len + fi + 1,
+            .tie = editor.app.host.settings_schemas.items.len + fi + 1,
             .failed = f,
             // Distinct from a loaded plugin's key: the same id can legitimately appear in both
             // lists, and the two rows expand independently.
@@ -262,16 +261,26 @@ fn collect(arena: std.mem.Allocator, query: *const fuzzy.Query) std.ArrayListUnm
 // ---- drawing ------------------------------------------------------------------------------
 
 pub fn draw() !void {
-    // Cap the pane at the explorer's viewport width.
+    // The pane carries its own scrolling. Settings is a surface, so the user can put it
+    // anywhere a region accepts it — a split of the main area as readily as the sidebar rail —
+    // and only the sidebar happened to wrap what it shows in a scroll area. Everywhere else the
+    // tree simply expanded past the bottom edge with no way to reach the rest of it.
+    var scroll = dvui.scrollArea(@src(), .{ .vertical_bar = .auto_overlay }, .{
+        .expand = .both,
+        .background = false,
+    });
+    defer scroll.deinit();
+
+    // Cap the pane at that viewport's width.
     //
-    // Two things depend on this. The explorer scrolls horizontally (long file paths need it), so
-    // it sizes itself to the widest child min size — and `TextLayoutWidget` documents that with
+    // Two things depend on this. Nothing here scrolls horizontally, so the pane's min width is
+    // a demand on whatever holds it — and `TextLayoutWidget` documents that with
     // `break_lines = true` its min *width* is still the width the text would need **unwrapped**.
     // Left uncapped, every description therefore both widened the pane and, having been handed
     // that width, never wrapped. Clamping the pane's own reported min size (`max_size_content`
     // is what `minSizeSetAndRefresh` clamps against) stops descriptions from driving the width,
     // which in turn gives them a bounded width to wrap inside.
-    const viewport_w = fizzy.editor.explorer.scroll_info.viewport.w;
+    const viewport_w = scroll.si.viewport.w;
     const right_gap: f32 = 20; // clear of the pane's right edge (scrollbar / clip)
 
     var vbox = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -293,7 +302,7 @@ pub fn draw() !void {
     if (roots.items.len == 0) {
         dvui.labelNoFmt(@src(), "No matching settings", .{}, .{
             .margin = .{ .x = 4, .y = 12, .w = 4, .h = 4 },
-            .color_text = dvui.themeGet().color(.control, .text),
+            .color_text = .{ .color = dvui.themeGet().color(.control, .text) },
         });
         return;
     }
@@ -301,7 +310,9 @@ pub fn draw() !void {
     // Two trees, one per mode. A search force-expands branches, and `TreeWidget` stores expansion
     // per widget id — sharing one id space would bleed "expanded because searching" into the
     // browsing tree's animation state. Separate `id_extra` keeps them cleanly apart.
-    var tree = wdvui.TreeWidget.tree(@src(), .{}, .{
+    // No focus group of its own: the Keybinds and File Types sections are grids, whose column
+    // headers open one, and a subwindow holds one group.
+    var tree = core.widgets.TreeWidget.tree(@src(), .{ .focus_group = false }, .{
         .id_extra = @intFromBool(searching),
         .expand = .horizontal,
         .background = false,
@@ -328,11 +339,11 @@ fn drawSearchRow() []const u8 {
     var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer hbox.deinit();
 
-    dvui.icon(
+    core.icon.icon(
         @src(),
         "SettingsSearchIcon",
         icons.tvg.lucide.search,
-        .{ .stroke_color = dvui.themeGet().color(.window, .text) },
+        .{ .stroke_color = .{ .color = dvui.themeGet().color(.window, .text) } },
         .{ .gravity_y = 0.5, .padding = dvui.Rect.all(0) },
     );
     const entry = dvui.textEntry(@src(), .{ .placeholder = "Search settings..." }, .{
@@ -344,7 +355,7 @@ fn drawSearchRow() []const u8 {
 }
 
 fn drawBranch(
-    tree: *wdvui.TreeWidget,
+    tree: *core.widgets.TreeWidget,
     branch: *const Branch,
     query: *const fuzzy.Query,
     searching: bool,
@@ -366,9 +377,9 @@ fn drawBranch(
     }, .{
         .id_extra = id_extra,
         .expand = .horizontal,
-        .color_fill_hover = theme.color(.control, .fill).opacity(0.5),
-        .color_fill_press = theme.color(.control, .fill_press),
-        .color_fill = core.dvui.hoverRestFill(theme.color(.control, .fill)),
+        .color_fill_hover = .{ .color = theme.color(.control, .fill).opacity(0.5) },
+        .color_fill_press = .{ .color = theme.color(.control, .fill_press) },
+        .color_fill = .{ .color = core.widgets.hoverRestFill(theme.color(.control, .fill)) },
         .padding = dvui.Rect.all(1),
     });
     defer b.deinit();
@@ -377,7 +388,7 @@ fn drawBranch(
 
     const expanded = switch (style) {
         .root => b.expander(@src(), .{ .indent = 24 }, .{
-            .color_fill = theme.color(.control, .fill),
+            .color_fill = .{ .color = theme.color(.control, .fill) },
             .corners = .all(8),
             .expand = .horizontal,
             .margin = .{ .x = 10, .w = 5 },
@@ -486,46 +497,55 @@ fn drawFailure(f: fizzy.Editor.FailedPlugin) void {
         .padding = .{ .x = 3, .w = 3, .y = 1, .h = 3 },
         .font = dvui.Font.theme(.body),
     });
-    tl.addText(text, .{ .color_text = dvui.themeGet().color(.err, .text) });
+    tl.addText(text, .{ .color_text = .{ .color = dvui.themeGet().color(.err, .text) } });
     tl.deinit();
 }
 
 /// A branch's own row: the same caret + identity icon + label the file tree draws, with the
 /// characters the query matched tinted so it's obvious *why* a row survived the filter.
-fn drawRow(b: *wdvui.TreeWidget.Branch, branch: *const Branch, query: *const fuzzy.Query, style: RowStyle) void {
+fn drawRow(b: *core.widgets.TreeWidget.Branch, branch: *const Branch, query: *const fuzzy.Query, style: RowStyle) void {
     // Same tint the file tree uses for every caret (project root *and* folder) — `control.fill`.
     // `fill_hover` reads as a washed-out caret on top-level settings branches.
     const icon_color = dvui.themeGet().color(.control, .fill);
 
     {
-        var slot = wdvui.treeRowGlyph(@src(), .{});
+        var slot = core.widgets.treeRowGlyph(@src(), .{});
         defer slot.deinit();
-        _ = dvui.icon(
+        _ = core.icon.icon(
             @src(),
             "BranchCaret",
             if (b.expanded) icons.tvg.entypo.@"down-open" else icons.tvg.entypo.@"right-open",
-            .{ .fill_color = icon_color, .stroke_color = icon_color },
-            wdvui.treeRowIconOptions(.{}),
+            .{ .fill_color = .{ .color = icon_color }, .stroke_color = .{ .color = icon_color } },
+            core.widgets.treeRowIconOptions(.{}),
         );
     }
 
     {
         // Same trailing gap as the file tree's folder/file icon slot (`files.zig`).
-        var slot = wdvui.treeRowGlyph(@src(), .{ .margin = .{ .w = 2 } });
+        var slot = core.widgets.treeRowGlyph(@src(), .{ .margin = .{ .w = 2 } });
         defer slot.deinit();
         drawIdentityIcon(branch, style, icon_color);
     }
 
     // Label chrome matches the file tree's folder rows (`editableLabel`): 3px padding, no
     // margin, expanding. Roots keep the heading font (project-name weight); categories use body.
-    var tl = dvui.textLayout(@src(), .{ .break_lines = false }, .{
+    const title_opts: dvui.Options = .{
         .gravity_y = 0.5,
         .background = false,
         .expand = .horizontal,
         .margin = dvui.Rect.all(0),
         .padding = dvui.Rect.all(3),
         .font = if (style == .root) dvui.Font.theme(.heading) else dvui.Font.theme(.body),
-    });
+    };
+    if (query.isEmpty()) {
+        // A text layout exists to colour the matched bytes; with nothing to match it is a
+        // label that costs several times what a label does, on every row, every frame.
+        dvui.labelNoFmt(@src(), branch.title, .{}, title_opts.override(.{
+            .color_text = .{ .color = dvui.themeGet().color(.control, .text) },
+        }));
+        return;
+    }
+    var tl = dvui.textLayout(@src(), .{ .break_lines = false }, title_opts);
     addHighlighted(tl, branch.title, query);
     tl.deinit();
 }
@@ -539,12 +559,12 @@ fn drawIdentityIcon(branch: *const Branch, style: RowStyle, color: dvui.Color) v
         // bug for Debugging — so the row says what it configures. A folder would only say
         // "there are more rows under here", which the caret already does.
         const glyph = if (branch.group) |g| g.icon else icons.tvg.entypo.folder;
-        _ = dvui.icon(
+        _ = core.icon.icon(
             @src(),
             "CategoryIcon",
             glyph,
-            .{ .fill_color = color, .stroke_color = color },
-            wdvui.treeRowIconOptions(.{}),
+            .{ .fill_color = .{ .color = color }, .stroke_color = .{ .color = color } },
+            core.widgets.treeRowIconOptions(.{}),
         );
         return;
     }
@@ -557,14 +577,14 @@ fn drawIdentityIcon(branch: *const Branch, style: RowStyle, color: dvui.Color) v
             .name = "icon.png",
             .interpolation = .nearest,
         } };
-        _ = dvui.image(@src(), .{ .source = logo, .shrink = .ratio }, wdvui.treeRowIconOptions(.{}));
+        _ = dvui.image(@src(), .{ .source = logo, .shrink = .ratio }, core.widgets.treeRowIconOptions(.{}));
         return;
     }
 
     // Plugin branch. `drawPluginIcon` is the same hook the plugin store's cards use, so a plugin
     // that ships an icon is recognisable in both places.
     const plugin_id = if (branch.schema) |s| s.owner.id else if (branch.failed) |f| f.id else "";
-    if (plugin_id.len > 0 and fizzy.editor.host.drawPluginIcon(plugin_id)) return;
+    if (plugin_id.len > 0 and fizzy.editor().app.host.drawPluginIcon(plugin_id)) return;
 
     // No icon of its own: fall back to the plugin's initial in the theme's *text* color, the same
     // stand-in `Host`'s plugin button uses. A generic package glyph tinted with a row *fill*
@@ -576,7 +596,7 @@ fn drawIdentityIcon(branch: *const Branch, style: RowStyle, color: dvui.Color) v
         .padding = dvui.Rect.all(0),
         .margin = dvui.Rect.all(0),
         .font = dvui.Font.theme(.heading),
-        .color_text = dvui.themeGet().color(.window, .text),
+        .color_text = .{ .color = dvui.themeGet().color(.window, .text) },
     });
 }
 
@@ -585,14 +605,14 @@ fn drawIdentityIcon(branch: *const Branch, style: RowStyle, color: dvui.Color) v
 fn addHighlighted(tl: *dvui.TextLayoutWidget, text: []const u8, query: *const fuzzy.Query) void {
     const plain = dvui.themeGet().color(.control, .text);
     if (query.isEmpty()) {
-        tl.addText(text, .{ .color_text = plain });
+        tl.addText(text, .{ .color_text = .{ .color = plain } });
         return;
     }
 
     var buf: [fuzzy.highlight_buf_len]usize = undefined;
     const hits = fuzzy.highlight(text, query, &buf, .{ .plain = true });
     if (hits.len == 0) {
-        tl.addText(text, .{ .color_text = plain });
+        tl.addText(text, .{ .color_text = .{ .color = plain } });
         return;
     }
 
@@ -604,12 +624,12 @@ fn addHighlighted(tl: *dvui.TextLayoutWidget, text: []const u8, query: *const fu
             // Consume the whole contiguous run of matched bytes in one addText.
             const start = i;
             while (h < hits.len and hits[h] == i) : (h += 1) i += 1;
-            tl.addText(text[start..i], .{ .color_text = matched });
+            tl.addText(text[start..i], .{ .color_text = .{ .color = matched } });
         } else {
             const start = i;
             const next = if (h < hits.len) hits[h] else text.len;
             i = next;
-            tl.addText(text[start..i], .{ .color_text = plain });
+            tl.addText(text[start..i], .{ .color_text = .{ .color = plain } });
         }
     }
 }
