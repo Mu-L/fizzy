@@ -3,9 +3,8 @@
 //! Fetches a plugin's `README.md` from its repository over HTTPS on a worker thread, then
 //! renders it read-only via the bundled markdown plugin (`drawPreview`).
 //!
-//! One value per README being shown. It used to be a module singleton — "only one plugin is
-//! selected at a time" — which was true of the center takeover and is not true of a store page
-//! opened as a document: those are tabs, and there can be as many as the user opens.
+//! One value per README being shown: store pages are tabs, and there can be as many as the
+//! user opens.
 const std = @import("std");
 const builtin = @import("builtin");
 const dvui = @import("dvui");

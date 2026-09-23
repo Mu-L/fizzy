@@ -104,9 +104,8 @@ pub fn addHighlightedText(
 /// line up in the same column instead of the label shifting left to fill the gap. Dimmed to half
 /// opacity when `enabled` is false, matching `labelWithKeybind`'s greying of the label beside it.
 ///
-/// Shared by fizzy's own menu rows (`Menu.menuItemWithHotkey`, from `menu_model.CommandItem`)
-/// and plugin-contributed ones (`Editor.fizzyDrawMenuItem`, from `sdk.Command`) so both draw the
-/// same slot the same way.
+/// Shared by `core.widgets.menuRow` (every menu's rows) and the command palette, so both draw
+/// the same slot the same way.
 pub fn menuRowIcon(bytes: ?[]const u8, base_color: dvui.Color, enabled: bool, id_extra: usize) void {
     var glyph = widgets.treeRowGlyph(@src(), .{ .id_extra = id_extra, .margin = .{ .w = 6 } });
     defer glyph.deinit();
@@ -122,10 +121,8 @@ pub fn menuRowIcon(bytes: ?[]const u8, base_color: dvui.Color, enabled: bool, id
 /// right after the icon column, and the shortcut sits against the right edge — so down a whole
 /// menu the shortcuts line up in their own column instead of trailing each label at a different x.
 ///
-/// The row always fills the width it is given and the label takes the slack. That is not left to
-/// `opts`: the row used to be exactly as wide as the options a caller passed said, and the menu
-/// bar's said nothing about expanding, so its rows shrink-wrapped and every shortcut landed
-/// immediately after its label.
+/// The row always fills the width it is given and the label takes the slack, whatever `opts`
+/// says: a row that shrink-wraps puts every shortcut right after its label.
 pub fn labelWithKeybind(label_str: []const u8, hotkey: dvui.enums.Keybind, enabled: bool, label_opts: dvui.Options, opts: dvui.Options) void {
     const box = dvui.box(@src(), .{ .dir = .horizontal }, opts.override(.{ .expand = .horizontal }));
     defer box.deinit();
@@ -152,9 +149,7 @@ pub fn labelWithKeybind(label_str: []const u8, hotkey: dvui.enums.Keybind, enabl
 }
 
 /// A menu row's shortcut, drawn the way the OS's own menus draw one — `keycaps.draw` in `.plain`
-/// style. Kept as the entry point the menu rows already call, so every one of them changes at once:
-/// this used to spell `ctrl` and `shift` as words beside ⌘ and ⌥ as glyphs, and the key as its enum
-/// tag (`enter`, `page_up`).
+/// style.
 pub fn keybindLabels(self: *const dvui.enums.Keybind, enabled: bool, opts: dvui.Options) void {
     const stroke = keycaps.Stroke.fromKeybind(self.*) orelse return;
     keycaps.draw(@src(), stroke, .{

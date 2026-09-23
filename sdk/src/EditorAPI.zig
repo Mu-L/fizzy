@@ -28,10 +28,8 @@ pub const OpenMode = enum(u8) {
     preview,
 };
 
-/// What to open, and how. An options struct rather than a pair of arguments because the answer
-/// to "where does it land" has grown twice already — once for panes (`grouping`), once for
-/// preview — and each time it was a parameter, the callers that did not know about it silently
-/// did the wrong thing (see `setDocumentGroupingOnBuffer`, which exists because of exactly that).
+/// What to open, and how. An options struct rather than arguments so the next answer to "where
+/// does it land" is a defaulted field, not a parameter every caller must learn about.
 pub const OpenOptions = struct {
     path: []const u8,
     /// The pane. 0 is the one the user is in.

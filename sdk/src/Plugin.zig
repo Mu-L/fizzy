@@ -58,8 +58,8 @@ display_name: []const u8,
 /// verbs mean anything for it: it is part of the binary.
 ///
 /// The app registers a few of these so its own things can use the plugin machinery — the store
-/// page owner is a document owner, which *is* a plugin as far as document routing is concerned,
-/// and appeared in the installed list the moment it existed. A flag rather than an id
+/// page owner is a document owner, which *is* a plugin as far as document routing is concerned.
+/// A flag rather than an id
 /// convention: "starts with fizzy." is a rule nothing enforces and an app built on fizzy would
 /// not share.
 internal: bool = false,

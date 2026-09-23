@@ -520,6 +520,7 @@ draw: *const fn (ctx: ?*anyopaque) anyerror!dvui.App.Result,
 takeover_when: ?[]const u8 = null,           // shown only while this other surface id is selected
 hidden: bool = false,                        // runtime state, set via Host.setSurfaceHidden
 persistent: bool = false,                    // keep the region drawn with no active document
+scrolls_itself: bool = false,                // has its own scroll area: the region must not wrap it in one
 ```
 
 The app's layout shape is a tree of **regions**, each declaring which keywords it accepts. A
@@ -820,6 +821,39 @@ carries no accelerator. `drawMenuItem` is the only way to draw a row from a `reg
 callback — it goes through `EditorAPI` so the row is fizzy's own menu widget, chord and icon
 included.
 
+### 3.4.1 Context menus
+
+A context menu is a menu with an id, extended with the same `host.registerMenuSection` every
+other menu uses. Fizzy and the workbench open these:
+
+| id | opened by | `host.menuContext().?.subject` |
+|---|---|---|
+| `fizzy.menu.tab` | right-click on a tab | `.document` |
+| `fizzy.menu.filetree.file` / `.folder` / `.root` | right-click on a tree row / blank space | `.path` |
+| whatever `documentContextMenu` returns | right-click inside a document | `.document` |
+
+Inside a section's draw, `host.menuContext()` says what the menu is about — `MenuContext.path()`
+for "the file, whatever was clicked". It is null outside a context-menu draw. Draw rows with
+`host.drawMenuItem`, as in any menu.
+
+A right-click inside a document opens nothing unless its owner implements
+`documentContextMenu` and returns an id; the owner then fills that menu through its own
+sections. The default is no menu, because the right-click may already mean something there
+(pixi's colour dropper). Anything that opens a menu of its own calls
+`host.drawMenuSections(ctx, after_rows)` after its rows so contributions land in it.
+
+### 3.4.2 Opening documents, and preview tabs
+
+`host.openFile(.{ .path, .grouping = 0, .mode = .keep })` opens a file; `grouping` 0 is the
+pane the user is in. `.mode = .preview` opens a *preview* tab: shown in italic, and replaced by
+the next preview in that pane instead of accumulating. A preview is kept when the user edits
+it, drags its tab, or chooses **Keep Open** from the tab menu; `host.setDocumentPreview` and
+`host.documentIsPreview` do the same from code. The file tree opens on a single click with
+`.preview`.
+
+A document whose path is an address rather than a name implements `documentTitle` to name its
+tab (a store page lives at `store://pages/<id>.fizzyplugin` and reads "Google Drive").
+
 **Command palette flattening.** Document verbs that Fizzy forwards (`copy`, `paste`, `undo`,
 `redo`, `deleteSelection`, `acceptEdit`, `cancelEdit`) appear **once** in the palette as the
 Fizzy stub (`fizzy.copy`, …) — greyed when no active document offers that action. Plugin
@@ -1014,11 +1048,11 @@ The SDK ships definitions for the services in this ecosystem, in
 | Service | Provider | What it's for |
 |---|---|---|
 | `"files"` | the application (fizzy: `src/editor/FilesService.zig`) | `createFile` / `createDir` / `rename` / `delete` / `move` on disk, with open documents rewritten or closed in step. Absent on web |
-| `"workbench"` | `workbench` | Only what the thing drawing tabs is the authority on: `currentGrouping` / `newGrouping` (which pane a new document lands in — pass to `host.openFilePath`) and `registerBranchDecorator` (draw on every file-tree row) |
+| `"workbench"` | `workbench` | Only what the thing drawing tabs is the authority on: `currentGrouping` / `newGrouping` (which pane a new document lands in — pass as `host.openFile`'s `grouping`) and `registerBranchDecorator` (draw on every file-tree row) |
 | `"markdown"` | `markdown` | Render a markdown byte slice into the current dvui parent (native only — absent on web) |
 | `"wikilink"` | any indexer (e.g. `brain`) | Resolve `[[Note]]` to a file, plus completion candidates and index state |
 
-Everything a plugin might reasonably ask *fizzy* for lives on `Host` instead — `openFilePath`,
+Everything a plugin might reasonably ask *fizzy* for lives on `Host` instead — `openFile`,
 `closeDocById`, `docFromPath`, `revealPosition`, `setProjectFolder`, `isPathIgnored`, … — where it
 degrades to a no-op in an app that ships no workbench rather than being unreachable.
 
@@ -1140,6 +1174,10 @@ command reports enabled. A submenu row on the account ("Open Drive Folder", "Sig
 drawn through `Host.drawMenuItem`, never dvui's menu widgets: a dylib's dvui has no open
 menu to put an item in.
 
+An `Fs` that talks to a network sets `remote = true`. Anything that crawls a tree —
+indexing, search, prefetch — asks `host.isRemotePath(path)` first and paces itself: a window
+that suits a disk is a spent API quota on a cloud mount.
+
 `fizzyedit/drive` (Google Drive) is the worked example; `plugins/archive` mounts a `.zip`
 through `core.vfs.Mem` in a few dozen lines. The design and its remaining edges are in
 `docs/CLOUD_FS_PLAN.md`.
@@ -1175,7 +1213,7 @@ editor plugin.
 user clicks foo.fiz in workbench's Files tree
         │
         ▼
-host.openFilePath(path, grouping)  ──►  host.pluginForExtension(".fiz") = pixi
+host.openFile(.{ .path, .grouping })  ──►  host.pluginForExtension(".fiz") = pixi
         │                                (user's assignment, else sole claimant)
         ▼
 pixi.loadDocument(path)            ──►  builds its File into the staging buffer (load-worker thread)

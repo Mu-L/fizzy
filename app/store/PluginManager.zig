@@ -56,10 +56,8 @@ config_folder: []const u8,
 /// The plugin ids this executable links in statically, as its build listed them. Borrowed
 /// comptime strings.
 ///
-/// Build data, like the two fields above, and for the same reason: the store used to answer
-/// "is this built in" from four hardcoded names, so the fifth bundled plugin — archive — was
-/// shown as a stray local build with an Uninstall button, for something compiled into the
-/// binary. An app built on fizzy bundles whatever it likes; only its build can say.
+/// Build data, like the two fields above: an app built on fizzy bundles whatever it likes, and
+/// only its build can say what that is.
 bundled_plugin_ids: []const []const u8 = &.{},
 /// Where this app's plugin registry lives. `plugins.yourapp.com` is a config value, not a
 /// fork — the store is the same code pointed somewhere else.

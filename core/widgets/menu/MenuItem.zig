@@ -123,10 +123,9 @@ pub fn drawBackground(self: *MenuItem) void {
         // `hover_t` is the only input, except that the title of an open submenu holds at full
         // strength: it is the one row that should stay lit while the pointer is away from it.
         //
-        // That hold used to be `self.highlight` — true on any hover, but only on frames that
-        // delivered this row a pointer event. The fade animates by scheduling frames, and those
-        // frames carry no pointer event, so each one read "not hovered", started fading out, and
-        // the next mouse motion snapped it back to full: moving inside a row made it pulse.
+        // Not `self.highlight`: that is true only on frames that delivered this row a pointer
+        // event, and the frames the fade schedules carry none — so each would read "not
+        // hovered" and the row would pulse while the pointer moved inside it.
         const open_submenu = self.init_opts.submenu and focused and menu().?.submenus_activated;
         const t: f32 = if (open_submenu) 1.0 else self.hover_t;
         if (t > 0) {

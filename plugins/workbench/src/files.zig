@@ -315,9 +315,7 @@ fn drawRoot(path: []const u8, kind: RootKind, tree: *core.widgets.TreeWidget, fi
 /// Context menu for the project root directory: close project, reveal on disk, new file / folder.
 fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u8, kind: RootKind, tree: *core.widgets.TreeWidget) !void {
     // `core.widgets.contextMenu`, not `dvui.floatingMenu`: the same frosted, rounded surface
-    // the menu bar drops down and the command palette lists rows in. A menu opened from the
-    // tree used to be a different object — square, opaque, its own shadow — which read as a
-    // different app depending on where you right-clicked.
+    // the menu bar drops down and the command palette lists rows in.
     var fw2 = core.widgets.contextMenu(@src(), point, .{});
     defer fw2.deinit();
 

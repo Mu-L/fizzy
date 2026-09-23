@@ -90,19 +90,7 @@ fn frostPane() ?fizzy.core.widgets.BlurBackdrop.Pane {
     return .{ .radius = f.radius, .refresh_ms = f.refresh_ms, .tint = f.tint, .mix = f.mix, .lift = f.lift };
 }
 
-/// A menu row, drawn the way the command palette draws its rows: `row_corners`, and `rowHover`
-/// under the pointer.
-///
-/// The rest fill is that same hover colour at zero alpha, not a transparent background colour.
-/// dvui fades a row by lerping `color_fill` → `color_fill_hover` across all four channels, so
-/// starting from a different hue made the fade travel through it — a row darkening on the way
-/// in, and again on the way out after the pointer had left. From the hover colour itself, the
-/// fade is alpha alone.
-///
-/// It also stops the row the pointer *last* crossed from sitting there filled: dvui paints a
-/// menu row when it is hovered **or focused**, and a menu leaves focus behind it.
-/// The menu bar's top-level titles wear the same fills as every row — see
-/// `core.widgets.menuRowOptions`, which this used to be a copy of.
+/// The menu bar's top-level titles wear the same fills as every row.
 pub const rowOptions = widgets.menuRowOptions;
 
 /// File menu (workbench contribution).
@@ -174,11 +162,7 @@ fn drawModelItem(
         .submenu => |nested| {
             // No nested submenus in the bar today; the model allows them, so handle rather
             // than silently drop.
-            if (menuItemWithChevron(@src(), nested.title, .{ .submenu = true }, .{
-                .expand = .horizontal,
-                .id_extra = id_extra,
-                .color_text = .{ .color = dvui.themeGet().color(.window, .text) },
-            })) |r| {
+            if (widgets.menuRow(@src(), nested.title, .{ .submenu = true, .id_extra = id_extra })) |r| {
                 const nested_fw = menuPopup(@src(), r, id_extra);
                 defer nested_fw.deinit();
                 for (nested.items, 0..) |nested_item, j| {
@@ -199,10 +183,11 @@ fn drawModelItem(
             // way instead of each menu item duplicating an icon assignment of its own.
             const icon: ?[]const u8 = if (editor.app.host.command(c.id)) |cmd| cmd.icon else null;
 
-            if (menuItemWithHotkey(@src(), c.title.resolve(editor), icon, hotkey, enabled, .{}, .{
-                .expand = .horizontal,
+            if (widgets.menuRow(@src(), c.title.resolve(editor), .{
+                .icon = icon,
+                .keybind = hotkey,
+                .enabled = enabled,
                 .id_extra = id_extra,
-                .color_text = .{ .color = dvui.themeGet().color(.window, .text) },
             }) != null) {
                 run(c.id);
                 fw.close();
@@ -222,11 +207,7 @@ fn hotkeyFor(editor: *Editor, command_id: []const u8) dvui.enums.Keybind {
 fn drawRecentFolders(editor: *Editor, id_extra: usize) !void {
     if (editor.app.recents.folders.items.len == 0) return;
 
-    if (menuItemWithChevron(@src(), "Recent Folders", .{ .submenu = true }, .{
-        .expand = .horizontal,
-        .id_extra = id_extra,
-        .color_text = .{ .color = dvui.themeGet().color(.window, .text) },
-    })) |recents_item| {
+    if (widgets.menuRow(@src(), "Recent Folders", .{ .submenu = true, .id_extra = id_extra })) |recents_item| {
         var recents_anim = dvui.animate(@src(), .{
             .kind = .alpha,
             .duration = 250_000,
@@ -253,25 +234,6 @@ fn drawRecentFolders(editor: *Editor, id_extra: usize) !void {
             }
         }
     }
-}
-
-/// A menu leaf with a trailing keybind hint. `enabled = false` both greys the label (see
-/// `labelWithKeybind`) *and* swallows the click here — dvui's `MenuItemWidget` has no built-in
-/// disabled state, so without this a "greyed out" item was still fully clickable and silently
-/// ran its action.
-///
-/// `icon` is optional TVG bytes (`menu_model.CommandItem.icon`) drawn in a fixed
-/// `treeRowGlyph`-sized slot ahead of the label — reserved even when a particular row has no
-/// icon, so rows with and without one still line up in the same column rather than the label
-/// shifting left to fill the gap.
-pub fn menuItemWithHotkey(src: std.builtin.SourceLocation, label_str: []const u8, icon: ?[]const u8, hotkey: dvui.enums.Keybind, enabled: bool, init_opts: widgets.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
-    return widgets.menuRow(src, label_str, .{
-        .icon = icon,
-        .keybind = hotkey,
-        .enabled = enabled,
-        .submenu = init_opts.submenu,
-        .id_extra = opts.id_extra orelse 0,
-    });
 }
 
 pub fn menuItem(src: std.builtin.SourceLocation, label_str: []const u8, init_opts: widgets.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
@@ -306,12 +268,6 @@ pub fn menuItem(src: std.builtin.SourceLocation, label_str: []const u8, init_opt
     return ret;
 }
 
-/// A submenu's row: `core.widgets.menuRow` with its chevron, so it keeps the icon column and its
-/// label lines up with the command rows around it — it used to start at the left edge.
-pub fn menuItemWithChevron(src: std.builtin.SourceLocation, label_str: []const u8, init_opts: widgets.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
-    _ = init_opts;
-    return widgets.menuRow(src, label_str, .{ .submenu = true, .id_extra = opts.id_extra orelse 0 });
-}
 
 /// Draw registered menu sections for an open parent menu.
 ///

@@ -1,9 +1,6 @@
 //! How a keybind is drawn — the one place that decides it.
 //!
-//! A chord used to be spelled in whatever way the code in front of it found easiest: `ctrl` and
-//! `shift` as words beside ⌘ and ⌥ as glyphs in the menus, `ctrl+shift+p` in the command palette
-//! and the keybind settings, and the key itself as its enum tag (`enter`, `page_up`, `grave`).
-//! Here every key has one face — a glyph where there is a good one, a short label where there is
+//! Every key has one face — a glyph where there is a good one, a short label where there is
 //! not — and modifiers come in the order each platform's own menus use.
 //!
 //! This draws; it does not spell. `Keymap.formatKeys` is still the text form, because that is also

@@ -1081,10 +1081,9 @@ test "reopening a shut region restores the extent it was shut at" {
 }
 
 test "opening something already open leaves the width the user dragged it to" {
-    // The bug this exists for: clicking a rail icon for another sidebar view is "make sure the
-    // sidebar is open", and that used to run the reopen path — which restores the width from the
-    // last *close*. A sidebar dragged wider snapped back the moment you switched tabs, while
-    // closing and reopening it kept the new width, because closing records it first.
+    // Clicking a rail icon for another sidebar view is "make sure the sidebar is open". That
+    // must not run the reopen path, which restores the width from the last *close* — a sidebar
+    // dragged wider would snap back on every tab switch.
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 400, .h = 300 } });
     defer t.deinit();
 

@@ -2075,7 +2075,7 @@ fn fizzyLogLine(ctx: *anyopaque, level: std.log.Level, scope: []const u8, messag
 ///
 /// `enabled` is read straight off the registered `Command` (absent `isEnabled` = enabled) rather
 /// than threaded through the vtable as its own parameter, so a plugin section's row can be greyed
-/// out — same as fizzy's own menu rows (`Menu.menuItemWithHotkey`) — without an SDK/ABI
+/// out — same as fizzy's own menu rows (`core.widgets.menuRow`) — without an SDK/ABI
 /// change: `Host.commandEnabled` already existed for the command palette. A plugin draws its
 /// row unconditionally and gets correct greying for free, on both menu bars.
 ///
@@ -2100,9 +2100,6 @@ fn fizzyDrawMenuItem(ctx: *anyopaque, title: []const u8, command_id: ?[]const u8
         .{};
     // A row in the account flyout (`Accounts`) is a popover row, not a dvui menu item.
     if (Accounts.drawing_rows) return Accounts.drawMenuRow(title, icon, kb, enabled);
-    // `Menu.rowOptions`, so a plugin's row in the menu bar is the same shape and the same pair of
-    // fills as a fizzy row beside it — including the transparent rest fill that keeps the row the
-    // pointer just left from sitting there as a dark block.
     // The same row every menu draws (`core.widgets.menuRow`), so a plugin's row in the menu bar
     // is the same shape as a fizzy row beside it. `Wyhash.hash` returns `u64`; `id_extra` is
     // `usize`, 32-bit on wasm32 — truncated rather than relying on a width that only matches

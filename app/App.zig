@@ -78,10 +78,8 @@ host: Host,
 /// `build/sdk.zig`'s `bundledPluginsModule`. Borrowed comptime strings; the runtime fills this
 /// in when it registers them.
 ///
-/// Here rather than in the store, which used to keep its own hardcoded list of four and so
-/// called the fifth bundled plugin (archive) a stray local build: offering to uninstall
-/// something that is compiled into the binary. An app built on fizzy bundles whatever it likes,
-/// so nothing may have a list of its own.
+/// The only answer to "is this plugin built in": an app built on fizzy bundles whatever it
+/// likes, so nothing else may keep a list of its own.
 bundled_plugin_ids: []const []const u8 = &.{},
 
 /// Fizzy's implementation of the `files` service, registered in `postInit`. A field rather than

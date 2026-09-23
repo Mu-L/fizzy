@@ -56,12 +56,10 @@ persistent: bool = false,
 /// This surface brings its own scrolling. A region that would otherwise wrap what it shows in a
 /// scroll area gives it exactly the space it has instead — on both axes — and lets it decide.
 ///
-/// Without it a surface with its own scroll area had two policies fighting over one direction.
-/// Vertically that was a second bar on top of its own; horizontally it was worse: the pane
-/// capped its width at its own viewport, the chrome made room for that width, and so the
-/// viewport could never get narrower than it had just been told to be — widen the sidebar once
-/// and the pane never shrank back. The chrome used to guess which surfaces needed sparing by
-/// matching two ids; a surface can say it now.
+/// Leave it unset on a surface with its own scroll area and two policies fight over one
+/// direction: vertically a second bar on top of its own, horizontally a ratchet — the pane caps
+/// its width at its viewport, the chrome makes room for that width, and a widened sidebar never
+/// shrinks back.
 scrolls_itself: bool = false,
 
 /// How a surface asks to be depicted where an app chooses to list it (an icon rail, a tab

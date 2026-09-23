@@ -1347,9 +1347,8 @@ pub fn tick() void {
 }
 
 /// Select `entry`, or clear the selection if it is already the selected card. Selection is a
-/// card highlight and which card's flyout is open — nothing more. It used to also decide what the
-/// center showed, which is why clicking a card had to fight the panel that selection opened over
-/// the list; the page is a document now (`PluginPage`), opened deliberately from that panel.
+/// card highlight and which card's flyout is open — nothing more. The page is a document
+/// (`PluginPage`), opened deliberately from that flyout.
 fn toggleSelect(entry: StoreEntry) void {
     if (selectedId()) |sid| {
         if (std.mem.eql(u8, sid, entry.id)) {
@@ -2524,20 +2523,17 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
 
 // ---- per-card flyout, beside the selected card -----------------------------
 
-/// Which card's toggle flyout is showing, by id. A fixed buffer rather than an allocation: this
-/// changes on every mouse move across the list, and plugin ids are short by construction
-/// (`Editor.isValidPluginId`). An over-long id simply never gets a flyout.
+/// Which card's toggle flyout is showing, by id. A fixed buffer rather than an allocation:
+/// plugin ids are short by construction (`Editor.isValidPluginId`). An over-long id simply never
+/// gets a flyout.
 var flyout_id_buf: [96]u8 = undefined;
 var flyout_id_len: usize = 0;
-/// Last drawn flyout rect. Kept for the panel's own size animation bookkeeping; nothing gates
-/// on the pointer being inside it any more, now that selection decides what is showing.
-var flyout_rect: dvui.Rect.Physical = .{};
 /// The popover's own rect, which it animates its size through across frames. Zeroed whenever the
 /// flyout moves to another card, so each one grows from its anchor rather than sliding over.
 var flyout_win_rect: dvui.Rect = .{};
 
-/// How far the flyout overlaps the card's right edge (natural px). Non-zero deliberately: a gap
-/// here is a dead strip the pointer crosses on the way over, and the flyout would close in it.
+/// How far the flyout overlaps the card's right edge (natural px), so it reads as attached to
+/// the card rather than floating beside it.
 const flyout_overlap: f32 = 6;
 
 fn flyoutIsFor(id: []const u8) bool {
@@ -2551,13 +2547,11 @@ fn flyoutSet(id: []const u8) void {
     }
     @memcpy(flyout_id_buf[0..id.len], id);
     flyout_id_len = id.len;
-    flyout_rect = .{};
     flyout_win_rect = .{};
 }
 
 fn flyoutClear() void {
     flyout_id_len = 0;
-    flyout_rect = .{};
     flyout_win_rect = .{};
 }
 
@@ -2568,10 +2562,9 @@ fn flyoutClear() void {
 /// controls in a row without squeezing the title and description into nothing. Putting them
 /// beside the card the user has chosen keeps the resting card readable and costs one tap.
 ///
-/// Selection rather than hover, which is what this used to be: a hover-only control does not
-/// exist on a touch screen. There is no hover to give, the panel never appeared, and the two
-/// settings were unreachable — on the web build, which is the one most likely to be used from a
-/// phone. Selection is the same gesture on both: a click or a tap.
+/// Selection rather than hover, because a hover-only control does not exist on a touch screen —
+/// and the web build is the one most likely to be used from a phone. Selection is the same
+/// gesture on both: a click or a tap.
 fn drawSelectionToggles(
     entry: StoreEntry,
     card_r: dvui.Rect.Physical,
@@ -2592,7 +2585,7 @@ fn drawSelectionToggles(
     // A card is wider than a narrow sidebar (`card_min_w` + horizontal scroll), so its own right
     // edge is often somewhere out under the center pane — anchoring there would leave the panel
     // floating in the middle of the editor, detached from the row it belongs to. Clipping is also
-    // what the pointer sees: the user can only hover the part of the card that is actually drawn.
+    // what the user sees: only the drawn part of the card can be clicked.
     const clip = dvui.clipGet();
     const right = @min(card_r.x + card_r.w, clip.x + clip.w);
     const anchor: dvui.Point.Physical = .{
@@ -2658,9 +2651,6 @@ fn drawSelectionToggles(
         defer actions.deinit();
         controls(entry);
     }
-
-    // Recorded *after* the contents so the rect matches what was actually laid out this frame.
-    flyout_rect = panel.rect;
 }
 
 /// The two per-plugin settings shared by the selected card's flyout and the detail page header: whether the
@@ -3134,9 +3124,8 @@ fn drawCardControls(entry: StoreEntry) void {
 /// pane's job (`drawCardControls`) — those are settings for a plugin you have, and this pane is
 /// for deciding whether to have it.
 ///
-/// It used to offer Install whatever the local state was, on the grounds that the store pane
-/// only browses. But a button that says Install beside something already installed is not
-/// browsing, it is a wrong answer: pressing it re-fetches a build the app is already running.
+/// Never Install beside something already installed: that would re-fetch a build the app is
+/// already running.
 fn drawStoreCardControls(entry: StoreEntry) void {
     const theme = dvui.themeGet();
     const muted = theme.color(.window, .text).opacity(0.7);
@@ -3245,11 +3234,8 @@ fn readmeSource(entry: StoreEntry) ?RepoSource {
 /// Where a bundled built-in's source sits in the fizzy repo: `plugins/<id>`, which is the shape
 /// every one of them has (`plugins/text/`, `plugins/archive/`, …).
 ///
-/// This used to be four `if`s and an `unreachable`, which held only while `isBundled` was the
-/// same four names written out somewhere else. The moment it started asking the build — and so
-/// answered yes for archive — drawing that card walked into the `unreachable` and took the
-/// process with it. Derived from the id now, so a plugin added to the bundle is a plugin this
-/// already knows about.
+/// Derived from the id, never a list: `isBundled` asks the build, so any plugin it says yes to
+/// must resolve here too.
 fn builtinSubpath(arena: std.mem.Allocator, id: []const u8) ?[]const u8 {
     return std.fmt.allocPrint(arena, "plugins/{s}", .{id}) catch null;
 }

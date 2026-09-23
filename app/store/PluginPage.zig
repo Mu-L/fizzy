@@ -1,11 +1,6 @@
 //! A plugin's store page, as a document.
 //!
-//! The page used to be a *takeover*: one surface in the main region that swapped the whole
-//! center out while a card was selected. That made selection do two jobs at once — choose what
-//! the page shows, and choose what the card's own controls act on — and there was only ever one
-//! page, because there was only ever one selection.
-//!
-//! A page is a document instead. Opening one is `openFilePath` on a path under this module's
+//! A page is a document. Opening one is `openFile` on a path under this module's
 //! mount, so everything a document already has comes for free: a tab, a split, focus, close,
 //! restore, and as many open at once as the user opens. Nothing in the app knows a store page is
 //! special; the tab strip is the workbench's, the markdown under the header is the bundled
@@ -182,8 +177,7 @@ pub fn open(host: *sdk.Host, id: []const u8, grouping: u64) !void {
     const path = try pathFor(gpa, id);
     defer gpa.free(path);
     // `.preview`: the page takes the tab of whatever preview is in that pane, so clicking down
-    // a list of plugins reads them one after another in place. The store used to do that itself,
-    // for its own pages only; it is the app's now and applies to every document.
+    // a list of plugins reads them one after another in place.
     _ = try host.openFile(.{ .path = path, .grouping = grouping, .mode = .preview });
 }
 
