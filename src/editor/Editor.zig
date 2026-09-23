@@ -1858,6 +1858,9 @@ pub fn postInit(editor: *Editor) !void {
     // Fizzy built-in: Settings (owner = null; not a plugin).
     try editor.app.host.registerSurface(.{
         .id = view_settings,
+        // `SettingsTree.draw` has its own scroll area and caps its width at that area's viewport
+        // — which only works if nothing outside it scrolls sideways.
+        .scrolls_itself = true,
         .icon = .{ .tvg = dvui.entypo.cog },
         .title = "Settings",
         .keywords = sdk.keywords.ide.sidebar,

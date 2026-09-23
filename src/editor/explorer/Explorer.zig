@@ -91,26 +91,24 @@ pub fn draw(
         .background = false,
     });
 
-    // Some surfaces carry their own vertical scrolling, because a surface can be put in any
-    // region and only this one supplies a scroll area: the Plugins tab (installed and store
-    // panes inside a paned widget) and Settings. With the default `.auto` vertical mode, each
-    // inner scrollArea reports its full content height as min_size, which bubbles up here and
-    // triggers a second explorer-level bar on top of theirs. Pin vertical scroll to `.given`
-    // for those, so we fill the viewport and let the surface scroll.
-    const self_vert_scroll = blk: {
-        if (f.selected(keywords)) |view| {
-            break :blk std.mem.eql(u8, view.id, PluginStore.view_id) or
-                std.mem.eql(u8, view.id, fizzy.Editor.view_settings);
-        }
-        break :blk false;
-    };
-    if (self_vert_scroll) {
+    // A surface that scrolls itself (`Surface.scrolls_itself`) gets exactly the space this region
+    // has, on both axes, and decides for itself. Scrolling it here as well meant two policies on
+    // one direction: a second vertical bar on top of its own, and horizontally a ratchet — the
+    // pane capped its width at its viewport, this made room for that width, and the viewport
+    // could then never be narrower than it had just been told to be.
+    const self_scrolling = if (f.selected(keywords)) |view| view.scrolls_itself else false;
+    if (self_scrolling) {
         explorer.scroll_info.vertical = .given;
+        explorer.scroll_info.horizontal = .none;
+        // Left over from a surface that did scroll sideways; a pane that cannot scroll has
+        // nowhere to be scrolled to.
+        explorer.scroll_info.viewport.x = 0;
         if (explorer.scroll_info.viewport.h > 0) {
             explorer.scroll_info.virtual_size.h = explorer.scroll_info.viewport.h;
         }
     } else {
         explorer.scroll_info.vertical = .auto;
+        explorer.scroll_info.horizontal = .auto;
     }
 
     var scroll = dvui.scrollArea(@src(), .{ .scroll_info = &explorer.scroll_info, .horizontal_bar = .auto_overlay, .vertical_bar = .auto_overlay }, .{
@@ -138,8 +136,8 @@ pub fn draw(
 
     scroll.deinit();
 
-    if (self_vert_scroll) {
-        explorer.scroll_info.virtual_size.h = explorer.scroll_info.viewport.h;
+    if (self_scrolling) {
+        explorer.scroll_info.virtual_size = .{ .w = explorer.scroll_info.viewport.w, .h = explorer.scroll_info.viewport.h };
     }
 
     // Two calls rather than one: `pane_vbox` has to deinit between the vertical and horizontal

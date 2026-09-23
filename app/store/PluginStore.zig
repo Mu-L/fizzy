@@ -413,6 +413,9 @@ pub fn register(manager: PluginManager) !void {
 
     try host.registerSurface(.{
         .id = view_id,
+        // Its two panes carry their own scroll areas, horizontal included (a card has a floor
+        // width and scrolls sideways below it).
+        .scrolls_itself = true,
         .icon = .{ .tvg = dvui.entypo.shop },
         .title = "Plugins",
         .keywords = sdk.keywords.ide.sidebar,
