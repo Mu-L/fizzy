@@ -323,9 +323,7 @@ fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u
 
     const root_branch_id = dvui.Id.update(tree.data().id, project_path);
 
-    if ((core.widgets.menuItemLabel(@src(), "Close", .{}, .{
-        .expand = .horizontal,
-    })) != null) {
+    if ((core.widgets.menuRow(@src(), "Close", .{ .icon = icons.tvg.lucide.@"x" })) != null) {
         runtime.host().closeProjectFolder();
 
         fw2.close();
@@ -334,7 +332,7 @@ fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
     if (kind == .disk) {
-        if ((core.widgets.menuItemLabel(@src(), open_message, .{}, .{ .expand = .horizontal })) != null) {
+        if ((core.widgets.menuRow(@src(), open_message, .{ .icon = icons.tvg.lucide.@"folder-open" })) != null) {
             runtime.host().openInFileBrowser(project_path) catch {
                 dvui.log.err("Failed to open file browser", .{});
             };
@@ -343,13 +341,13 @@ fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u
         }
     }
 
-    if ((core.widgets.menuItemLabel(@src(), "New File...", .{}, .{ .expand = .horizontal })) != null) {
+    if ((core.widgets.menuRow(@src(), "New File...", .{ .icon = icons.tvg.lucide.@"file-plus", .keybind = dvui.currentWindow().keybinds.get("new_file") orelse .{} })) != null) {
         defer fw2.close();
 
         runtime.host().requestNewDocument(project_path, root_branch_id.asUsize());
     }
 
-    if ((core.widgets.menuItemLabel(@src(), "New Folder...", .{}, .{ .expand = .horizontal })) != null) {
+    if ((core.widgets.menuRow(@src(), "New Folder...", .{ .icon = icons.tvg.lucide.@"folder-plus" })) != null) {
         createFolderInteractive(project_path);
 
         fw2.close();
@@ -906,9 +904,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                         }
 
                         if (entry.kind == .file) {
-                            if ((core.widgets.menuItemLabel(@src(), "Open", .{}, .{
-                                .expand = .horizontal,
-                            })) != null) {
+                            if ((core.widgets.menuRow(@src(), "Open", .{ .icon = icons.tvg.lucide.@"file" })) != null) {
                                 const arena = dvui.currentWindow().arena();
                                 const to_open = selectionTopMostOpenableFilesForOpenActions(arena) catch |err| blk: {
                                     dvui.log.err("Failed to collect files to open: {any}", .{err});
@@ -923,9 +919,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                                 fw2.close();
                             }
 
-                            if ((core.widgets.menuItemLabel(@src(), "Open to the side", .{}, .{
-                                .expand = .horizontal,
-                            })) != null) {
+                            if ((core.widgets.menuRow(@src(), "Open to the side", .{ .icon = icons.tvg.lucide.@"panel-right" })) != null) {
                                 const arena = dvui.currentWindow().arena();
                                 const to_open = selectionTopMostOpenableFilesForOpenActions(arena) catch |err| blk: {
                                     dvui.log.err("Failed to collect files to open: {any}", .{err});
@@ -958,7 +952,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                         // the path is a path either way, so the same row works for `gdrive://…`
                         // and for a directory on disk.
                         if (entry.kind == .directory) {
-                            if ((core.widgets.menuItemLabel(@src(), "Set Root Here", .{}, .{ .expand = .horizontal })) != null) {
+                            if ((core.widgets.menuRow(@src(), "Set Root Here", .{ .icon = icons.tvg.lucide.@"folder-root" })) != null) {
                                 runtime.host().setProjectFolder(abs_path) catch |err| {
                                     dvui.log.err("Failed to set root to {s}: {t}", .{ abs_path, err });
                                 };
@@ -969,7 +963,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                             _ = dvui.separator(@src(), .{ .expand = .horizontal });
                         }
 
-                        if ((core.widgets.menuItemLabel(@src(), open_message, .{}, .{ .expand = .horizontal })) != null) {
+                        if ((core.widgets.menuRow(@src(), open_message, .{ .icon = icons.tvg.lucide.@"folder-open" })) != null) {
                             runtime.host().openInFileBrowser(if (entry.kind == .file) std.fs.path.dirname(abs_path) orelse abs_path else abs_path) catch {
                                 dvui.log.err("Failed to open file browser", .{});
                             };
@@ -977,14 +971,14 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                             fw2.close();
                         }
 
-                        if ((core.widgets.menuItemLabel(@src(), "New File...", .{}, .{ .expand = .horizontal })) != null) {
+                        if ((core.widgets.menuRow(@src(), "New File...", .{ .icon = icons.tvg.lucide.@"file-plus", .keybind = dvui.currentWindow().keybinds.get("new_file") orelse .{} })) != null) {
                             defer fw2.close();
 
                             const parent_dir: []const u8 = if (entry.kind == .directory) abs_path else entry_dir;
                             runtime.host().requestNewDocument(parent_dir, branch_id.asUsize());
                         }
 
-                        if ((core.widgets.menuItemLabel(@src(), "New Folder...", .{}, .{ .expand = .horizontal })) != null) {
+                        if ((core.widgets.menuRow(@src(), "New Folder...", .{ .icon = icons.tvg.lucide.@"folder-plus" })) != null) {
                             switch (entry.kind) {
                                 .directory => createFolderInteractive(abs_path),
                                 .file => createFolderInteractive(entry_dir),
@@ -994,17 +988,13 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                             fw2.close();
                         }
 
-                        if ((core.widgets.menuItemLabel(@src(), "Rename", .{}, .{
-                            .expand = .horizontal,
-                        })) != null) {
+                        if ((core.widgets.menuRow(@src(), "Rename", .{ .icon = icons.tvg.lucide.@"pencil" })) != null) {
                             edit_id = inner_id_extra.*;
                             fw2.close();
                         }
 
                         {
-                            if ((core.widgets.menuItemLabel(@src(), "Delete", .{}, .{
-                                .expand = .horizontal,
-                            })) != null) {
+                            if ((core.widgets.menuRow(@src(), "Delete", .{ .icon = icons.tvg.lucide.@"trash-2" })) != null) {
                                 defer fw2.close();
 
                                 const arena = dvui.currentWindow().arena();

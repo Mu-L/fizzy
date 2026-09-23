@@ -101,17 +101,9 @@ fn frostPane() ?fizzy.core.widgets.BlurBackdrop.Pane {
 ///
 /// It also stops the row the pointer *last* crossed from sitting there filled: dvui paints a
 /// menu row when it is hovered **or focused**, and a menu leaves focus behind it.
-pub fn rowOptions(opts: dvui.Options) dvui.Options {
-    const hover = chrome.rowHover();
-    return opts.override(.{
-        .corners = chrome.row_corners,
-        .color_fill = .{ .color = hover.opacity(0) },
-        .color_fill_hover = .{ .color = hover },
-        // The label does not change colour under the pointer: a row that both lights up and
-        // rewrites its text reads as two things happening.
-        .color_text_hover = opts.color_text orelse .{ .color = dvui.themeGet().color(.window, .text) },
-    });
-}
+/// The menu bar's top-level titles wear the same fills as every row — see
+/// `core.widgets.menuRowOptions`, which this used to be a copy of.
+pub const rowOptions = widgets.menuRowOptions;
 
 /// File menu (workbench contribution).
 /// Run the command a menu item stands for.
@@ -273,27 +265,13 @@ fn drawRecentFolders(editor: *Editor, id_extra: usize) !void {
 /// icon, so rows with and without one still line up in the same column rather than the label
 /// shifting left to fill the gap.
 pub fn menuItemWithHotkey(src: std.builtin.SourceLocation, label_str: []const u8, icon: ?[]const u8, hotkey: dvui.enums.Keybind, enabled: bool, init_opts: widgets.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
-    var mi = widgets.menuItem(src, init_opts, rowOptions(opts));
-
-    var ret: ?dvui.Rect.Natural = null;
-    if (enabled) {
-        if (mi.activeRect()) |r| {
-            ret = r;
-        }
-    }
-
-    // Deinit order matters to dvui's widget stack (strictly LIFO, parent last): `row` is a child
-    // of `mi`, so it must close before `mi.deinit()` below, not after — a `defer row.deinit()`
-    // here would fire at function exit, *after* the explicit `mi.deinit()` call, closing the
-    // parent before its child and panicking ("widget is not closed within its parent").
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = opts.id_extra orelse 0 });
-    fizzy.core.draw.menuRowIcon(icon, if (opts.color_text) |c| c.toColor() else dvui.themeGet().color(.window, .text), enabled, opts.id_extra orelse 0);
-    fizzy.core.draw.labelWithKeybind(label_str, hotkey, enabled, opts, opts);
-    row.deinit();
-
-    mi.deinit();
-
-    return ret;
+    return widgets.menuRow(src, label_str, .{
+        .icon = icon,
+        .keybind = hotkey,
+        .enabled = enabled,
+        .submenu = init_opts.submenu,
+        .id_extra = opts.id_extra orelse 0,
+    });
 }
 
 pub fn menuItem(src: std.builtin.SourceLocation, label_str: []const u8, init_opts: widgets.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
@@ -328,38 +306,11 @@ pub fn menuItem(src: std.builtin.SourceLocation, label_str: []const u8, init_opt
     return ret;
 }
 
+/// A submenu's row: `core.widgets.menuRow` with its chevron, so it keeps the icon column and its
+/// label lines up with the command rows around it — it used to start at the left edge.
 pub fn menuItemWithChevron(src: std.builtin.SourceLocation, label_str: []const u8, init_opts: widgets.MenuItemWidget.InitOptions, opts: dvui.Options) ?dvui.Rect.Natural {
-    var mi = widgets.menuItem(src, init_opts, rowOptions(opts));
-
-    var ret: ?dvui.Rect.Natural = null;
-    if (mi.activeRect()) |r| {
-        ret = r;
-    }
-
-    var label_opts = opts;
-    label_opts.margin = dvui.Rect.all(0);
-    label_opts.padding = dvui.Rect.all(0);
-
-    if (fizzy.core.widgets.hovered(mi.data())) {
-        label_opts.color_text = .{ .color = dvui.themeGet().color(.window, .text) };
-    }
-
-    dvui.labelNoFmt(@src(), label_str, .{}, label_opts);
-
-    fizzy.core.icon.icon(@src(), "chevron_right", dvui.entypo.chevron_small_right, .{
-        .stroke_color = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.5) },
-        .fill_color = .{ .color = dvui.themeGet().color(.control, .text).opacity(0.5) },
-    }, .{
-        .expand = .none,
-        .gravity_x = 1.0,
-        .gravity_y = 0.5,
-        .margin = dvui.Rect.all(0),
-        .padding = dvui.Rect.all(0),
-    });
-
-    mi.deinit();
-
-    return ret;
+    _ = init_opts;
+    return widgets.menuRow(src, label_str, .{ .submenu = true, .id_extra = opts.id_extra orelse 0 });
 }
 
 /// Draw registered menu sections for an open parent menu.

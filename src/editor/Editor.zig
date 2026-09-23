@@ -2103,20 +2103,16 @@ fn fizzyDrawMenuItem(ctx: *anyopaque, title: []const u8, command_id: ?[]const u8
     // `Menu.rowOptions`, so a plugin's row in the menu bar is the same shape and the same pair of
     // fills as a fizzy row beside it — including the transparent rest fill that keeps the row the
     // pointer just left from sitting there as a dark block.
-    var mi = fizzy.core.widgets.menuItem(@src(), .{}, Menu.rowOptions(.{
-        .expand = .horizontal,
-        // `Wyhash.hash` always returns `u64`; `id_extra` is `usize`, which is 32-bit on
-        // wasm32 — truncate rather than relying on the width match that only holds natively.
+    // The same row every menu draws (`core.widgets.menuRow`), so a plugin's row in the menu bar
+    // is the same shape as a fizzy row beside it. `Wyhash.hash` returns `u64`; `id_extra` is
+    // `usize`, 32-bit on wasm32 — truncated rather than relying on a width that only matches
+    // natively.
+    return fizzy.core.widgets.menuRow(@src(), title, .{
+        .icon = icon,
+        .keybind = kb,
+        .enabled = enabled,
         .id_extra = @truncate(std.hash.Wyhash.hash(0, title)),
-    }));
-    defer mi.deinit();
-    const clicked = enabled and mi.activeRect() != null;
-    const id_extra: usize = @truncate(std.hash.Wyhash.hash(0, title));
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = id_extra });
-    defer row.deinit();
-    fizzy.core.draw.menuRowIcon(icon, dvui.themeGet().color(.window, .text), enabled, id_extra);
-    fizzy.core.draw.labelWithKeybind(title, kb, enabled, .{ .expand = .horizontal }, .{ .expand = .horizontal });
-    return clicked;
+    }) != null;
 }
 
 /// See `EditorAPI.VTable.loadPluginSettingsFile`'s doc comment for why this must run here

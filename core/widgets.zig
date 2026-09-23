@@ -20,6 +20,8 @@ const builtin = @import("builtin");
 const icons = @import("icons");
 const platform = @import("platform.zig");
 const dialogs = @import("dialogs.zig");
+const draw = @import("draw.zig");
+const icon_tex = @import("gfx/icon.zig");
 
 pub const CanvasWidget = @import("widgets/CanvasWidget.zig");
 pub const ReorderWidget = @import("widgets/ReorderWidget.zig");
@@ -63,22 +65,72 @@ pub fn floatingMenu(src: std.builtin.SourceLocation, init_opts: FloatingMenuWidg
     return ret;
 }
 
-/// `dvui.menuItemLabel` over the copies above: a row with a label, returning the rect a submenu
-/// would open from. The one call a context menu is written in — every menu in the app is a list
-/// of these, so they had to come from the same place the menu bar's do or two menus opened from
-/// two regions would not look like the same app.
+/// The fills a menu row wears: nothing at rest, `core.dialogs`' hover wash under the pointer, and
+/// the same rounded corners every flyout row has. Resting at the hover colour with zero alpha
+/// rather than at a different colour, because dvui lerps between the two and a rest fill of
+/// another hue made every hover cross through a third one on its way.
+pub fn menuRowOptions(opts: dvui.Options) dvui.Options {
+    const hover = dialogs.rowHover();
+    return opts.override(.{
+        .corners = dialogs.row_corners,
+        .color_fill = .{ .color = hover.opacity(0) },
+        .color_fill_hover = .{ .color = hover },
+        // The label does not change colour under the pointer: a row that both lights up and
+        // rewrites its text reads as two things happening.
+        .color_text_hover = opts.color_text orelse .{ .color = dvui.themeGet().color(.window, .text) },
+    });
+}
+
+pub const MenuRowOptions = struct {
+    /// TVG bytes for the icon column. The column is kept either way, so rows with and without an
+    /// icon start their labels at the same x.
+    icon: ?[]const u8 = null,
+    /// The shortcut drawn against the right edge. Empty draws none.
+    keybind: dvui.enums.Keybind = .{},
+    /// False greys the row and swallows its click — dvui's menu item has no disabled state of its
+    /// own, so a greyed row was otherwise still clickable.
+    enabled: bool = true,
+    submenu: bool = false,
+    id_extra: usize = 0,
+};
+
+/// One menu row, the same everywhere: an icon column, the label straight after it, and the
+/// shortcut against the right edge — how macOS lays out a menu. The menu bar, a plugin's row in
+/// it, the file tree's and tab strip's context menus, and a text field's all draw this, so no
+/// two menus in the app can disagree about what a row is.
+///
+/// Returns the rect a submenu would open from, or null when not activated.
+pub fn menuRow(src: std.builtin.SourceLocation, label: []const u8, opts: MenuRowOptions) ?dvui.Rect.Natural {
+    var mi = menuItem(src, .{ .submenu = opts.submenu }, menuRowOptions(.{ .expand = .horizontal, .id_extra = opts.id_extra }));
+    const ret: ?dvui.Rect.Natural = if (opts.enabled) mi.activeRect() else null;
+
+    // Closed before `mi`: it is `mi`'s child, and dvui's widget stack is strictly LIFO.
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = opts.id_extra });
+    draw.menuRowIcon(opts.icon, dvui.themeGet().color(.window, .text), opts.enabled, opts.id_extra);
+    draw.labelWithKeybind(label, opts.keybind, opts.enabled, .{}, .{ .id_extra = opts.id_extra });
+    // A submenu's row ends in a chevron where a command's shortcut would be — the same right-hand
+    // column, so it reads as "more this way" rather than as a row with a stray mark after it.
+    if (opts.submenu) {
+        const muted = dvui.themeGet().color(.control, .text).opacity(0.5);
+        icon_tex.icon(@src(), "submenu_chevron", icons.tvg.lucide.@"chevron-right", .{
+            .stroke_color = .{ .color = muted },
+        }, .{ .gravity_y = 0.5, .id_extra = opts.id_extra, .min_size_content = .{ .w = 12, .h = 12 } });
+    }
+    row.deinit();
+
+    mi.deinit();
+    return ret;
+}
+
+/// A row with a label and nothing else — `menuRow` with no icon or shortcut. Kept for the callers
+/// that only name a verb; it is the same row, so it sits in the same column as its neighbours.
 pub fn menuItemLabel(
     src: std.builtin.SourceLocation,
     label_str: []const u8,
     init_opts: MenuItemWidget.InitOptions,
     opts: dvui.Options,
 ) ?dvui.Rect.Natural {
-    var mi = menuItem(src, init_opts, opts);
-    const label_opts = mi.style().strip().override(.{ .label = .{ .for_id = mi.data().id } });
-    const ret: ?dvui.Rect.Natural = mi.activeRect();
-    dvui.labelNoFmt(@src(), label_str, .{}, label_opts);
-    mi.deinit();
-    return ret;
+    return menuRow(src, label_str, .{ .submenu = init_opts.submenu, .id_extra = opts.id_extra orelse 0 });
 }
 
 /// A context menu's surface, opened at the point the pointer was pressed. Every right-click
@@ -106,11 +158,14 @@ pub fn textEntryMenu(te: *dvui.TextEntryWidget) bool {
 
     var popup = contextMenu(@src(), point, .{});
     defer popup.deinit();
-    if (menuItemLabel(@src(), "Copy", .{}, .{ .expand = .horizontal }) != null) {
+    // With the chords the field itself answers to: ⌘C in a focused field does exactly what this
+    // row does, so showing it is the truth, not decoration.
+    const keybinds = &dvui.currentWindow().keybinds;
+    if (menuRow(@src(), "Copy", .{ .icon = icons.tvg.lucide.copy, .keybind = keybinds.get("copy") orelse .{} }) != null) {
         te.copy();
         popup.close();
     }
-    if (menuItemLabel(@src(), "Paste", .{}, .{ .expand = .horizontal }) != null) {
+    if (menuRow(@src(), "Paste", .{ .icon = icons.tvg.lucide.@"clipboard-paste", .keybind = keybinds.get("paste") orelse .{} }) != null) {
         te.paste();
         popup.close();
         dvui.focusWidget(te.data().id, null, null);

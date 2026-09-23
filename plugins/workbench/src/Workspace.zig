@@ -876,21 +876,21 @@ fn drawTabMenu(tabs: []const *const sdk.Surface, index: usize, doc: sdk.DocHandl
 
     // Only while it is one: a kept tab has nothing to keep.
     if (host.documentIsPreview(doc.id)) {
-        if (core.widgets.menuItemLabel(@src(), "Keep Open", .{}, .{ .expand = .horizontal }) != null) {
+        if (core.widgets.menuRow(@src(), "Keep Open", .{ .icon = icons.tvg.lucide.@"pin" }) != null) {
             host.setDocumentPreview(doc.id, false);
             menu.close();
         }
         _ = dvui.separator(@src(), .{ .expand = .horizontal });
     }
-    if (core.widgets.menuItemLabel(@src(), "Close", .{}, .{ .expand = .horizontal }) != null) close = .this;
+    if (core.widgets.menuRow(@src(), "Close", .{ .icon = icons.tvg.lucide.@"x" }) != null) close = .this;
     if (tabs.len > 1) {
-        if (core.widgets.menuItemLabel(@src(), "Close Others", .{}, .{ .expand = .horizontal }) != null) close = .others;
+        if (core.widgets.menuRow(@src(), "Close Others", .{ .icon = icons.tvg.lucide.@"copy-x" }) != null) close = .others;
     }
     if (index + 1 < tabs.len) {
-        if (core.widgets.menuItemLabel(@src(), "Close to the Right", .{}, .{ .expand = .horizontal }) != null) close = .right;
+        if (core.widgets.menuRow(@src(), "Close to the Right", .{ .icon = icons.tvg.lucide.@"arrow-right-to-line" }) != null) close = .right;
     }
     if (index > 0) {
-        if (core.widgets.menuItemLabel(@src(), "Close to the Left", .{}, .{ .expand = .horizontal }) != null) close = .left;
+        if (core.widgets.menuRow(@src(), "Close to the Left", .{ .icon = icons.tvg.lucide.@"arrow-left-to-line" }) != null) close = .left;
     }
 
     // What plugins add. The subject is the document, with its path and pane, so a row that works
