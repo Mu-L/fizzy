@@ -442,16 +442,12 @@ pub const Transition = struct {
     /// Latch: hold at peak-blur outgoing until the incoming view is ready. Cleared by
     /// the caller; `transition` also accepts a per-frame flag.
     pending: bool = false,
-    /// A swap was asked for ahead of time (`prev_*` set by the caller) and has not run yet.
-    /// `transition` clears it on the frame it captures.
-    armed: bool = false,
 
     pub fn discard(self: *Transition) void {
         self.cross_fade.discard();
         self.prev_key = null;
         self.prev_id = "";
         self.pending = false;
-        self.armed = false;
     }
 };
 
@@ -497,12 +493,11 @@ pub const Backdrop = struct {
     corners: dvui.CornerRect.Physical = .{},
 };
 
-/// Start a snapshot of `rect` for a region with a backdrop: the frame's own pixels under it when
-/// they can be read (exact — and the region's surroundings, its corners included, match the
-/// frame, so `blit`'s lerp is exact over them), else the `Backdrop` rebuilt from colours, which
-/// only `blitOpaque` blends correctly. Returns which one it did.
+/// Start a snapshot of `rect` over what is behind it: the frame's own pixels under it when they
+/// can be read (exact whoever painted them — the region, or a card further out — and its
+/// corners match the frame, so `blit`'s lerp is exact over them), else the `Backdrop` rebuilt
+/// from colours, which only `blitOpaque` blends correctly, else nothing.
 fn beginBackdropCapture(cf: *CrossFade, rect: dvui.Rect.Physical, backdrop: ?Backdrop) ?dvui.Picture {
-    if (backdrop == null) return CrossFade.beginCapture(rect);
     const under = copyFrame(rect);
     var pic = CrossFade.beginCapture(rect) orelse {
         if (under) |u| dvui.textureDestroyLater(u);
@@ -514,7 +509,7 @@ fn beginBackdropCapture(cf: *CrossFade, rect: dvui.Rect.Physical, backdrop: ?Bac
         defer dvui.alphaSet(prev_alpha);
         dvui.renderTexture(u, .{ .r = rect, .s = 1 }, .{}) catch {};
         cf.opaque_snapshots = false;
-    } else {
+    } else if (backdrop != null) {
         fillBackdrop(rect, backdrop);
         cf.opaque_snapshots = true;
     }
@@ -596,7 +591,6 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
     }
 
     state.prev_key = opts.key;
-    state.armed = false;
 
     // A blur swap also photographs the incoming view once, a settle frame after the swap (the
     // first frame it draws has no sizes from last frame and is not what it will look like),

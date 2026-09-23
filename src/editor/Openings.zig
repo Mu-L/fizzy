@@ -141,11 +141,10 @@ pub fn land(self: *Openings, editor: *Editor, path: []const u8, doc: sdk.DocHand
         const region_key = editor.tabRegionKey(o.surface_id);
         if (wb.swapTabId(o.surface_id, doc_id)) |ws| {
             if (was_selected) {
+                // The pane blurs from the placeholder (still registered — see `linger_frames`)
+                // into the document, as it does for any change of what it shows.
                 var buf: [32]u8 = undefined;
                 host.selectInRegion(Editor.Workspace.name(&buf, ws.grouping), doc_id);
-                // The one swap that blurs: the placeholder (still registered — see
-                // `linger_frames`) into the document.
-                if (region_key) |k| editor.app.layout.armSwap(editor.app.gpa, k, o.surface_id);
             } else if (region_key) |k| {
                 // Landed out of sight (a restored background tab): draw it once now, unseen,
                 // so a view that measures itself on its first draw does it while loading

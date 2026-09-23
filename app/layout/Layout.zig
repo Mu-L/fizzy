@@ -643,18 +643,31 @@ fn drawSwapped(self: *Layout, slot: u64, s: *Surface) !dvui.App.Result {
 
     var ctx: Ctx = .{ .layout = self, .id = tr.prev_id };
     const had = tr.prev_id.len > 0;
+    // Nothing to swap from — the first thing this place shows: fade it in instead.
+    if (!had) {
+        tr.prev_id = s.id;
+        tr.prev_key = std.hash.Wyhash.hash(0, s.id);
+        return self.draw(s);
+    }
     // The region's own fill, when it has one, over the window base (`Backdrop`): the view drawn
     // into it may not paint its whole area, and a snapshot without it has holes the blur turns
     // grey.
-    const parent = dvui.parentGet().data();
-    const backdrop: ?core.anim.Backdrop = if (parent.options.backgroundGet())
-.{
-            .base = core.dialogs.style().chromeColor(),
-            .fill = parent.options.color(.fill).toColor(),
-            .corners = parent.options.cornersGet().scale(parent.rectScale().s, dvui.CornerRect.Physical),
+    // The nearest enclosing box that paints one: a document draws no background of its own —
+    // the pane's card behind it is — so the direct parent is often bare.
+    const backdrop: ?core.anim.Backdrop = blk: {
+        var w: dvui.Widget = dvui.parentGet();
+        while (true) {
+            const wd = w.data();
+            if (wd.options.backgroundGet()) break :blk .{
+                .base = core.dialogs.style().chromeColor(),
+                .fill = wd.options.color(.fill).toColor(),
+                .corners = wd.options.cornersGet().scale(wd.rectScale().s, dvui.CornerRect.Physical),
+            };
+            const up = wd.parent;
+            if (up.data().id == wd.id) break :blk null;
+            w = up;
         }
-    else
-        null;
+    };
     var frame = core.anim.transition(tr, .{
         .key = std.hash.Wyhash.hash(0, s.id),
         .rect = rs.r,
@@ -805,8 +818,9 @@ pub fn beginPluginRegion(self: *Layout, spec: sdk.RegionSpec) ?sdk.RegionSpec.To
 pub fn drawPluginRegionContents(self: *Layout, token: sdk.RegionSpec.Token) !dvui.App.Result {
     const r = self.pluginRegion(token) orelse return .ok;
     const s = self.selectedIn(r) orelse return .ok;
-    // Contents fade in on a switch; a swap someone asked for (`State.armSwap` — a document
-    // landing over its loading placeholder) blurs from one to the other instead.
+    // Blurs from one surface to the next like every other region: a tab switch, and a document
+    // landing over its loading placeholder. Capturing the outgoing view means drawing it once
+    // more, which a large document can afford because it keeps its layout while hidden.
     const key = r.selectionKey();
     // One waiting warm-up a frame (`State.warmIn`), under the parent the surface will be shown
     // in, clipped to nothing, then the parent's packing reset — the same pass a swap's capture
@@ -823,8 +837,7 @@ pub fn drawPluginRegionContents(self: *Layout, token: sdk.RegionSpec.Token) !dvu
             dvui.refresh(null, @src(), null);
         };
     }
-    if (self.state.swapping(key)) return self.drawSwapped(key, s);
-    return self.draw(s);
+    return self.drawSwapped(key, s);
 }
 
 /// A plugin region's contents and selection, by token — what a plugin's own chooser (a tab
