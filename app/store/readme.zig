@@ -173,59 +173,13 @@ fn placeholder(text: []const u8, is_error: bool) void {
     });
 }
 
-// ---- the store pane's own one ---------------------------------------------------------------
-//
-// The sidebar's detail view shows one README at a time, so it keeps a single instance behind the
-// same module-level calls it always used. A store page opened as a document owns its own
-// `Readme` instead — that is the whole reason the type above is instantiable.
+// ---- the markdown engine's shared teardown ---------------------------------------------------
 
-var current: ?Readme = null;
-
-/// Select `id` as the README the store pane shows. No-op if already selected.
-pub fn select(id: []const u8, repo: []const u8, subpath: []const u8) void {
-    if (current) |*c| {
-        if (std.mem.eql(u8, c.id, id)) return;
-        clearCurrent();
-    }
-    current = Readme.init(id, repo, subpath) orelse return;
-    current.?.start();
-}
-
-/// The id currently selected (or null). Lets the store highlight the active card.
-pub fn selectedId() ?[]const u8 {
-    return if (current) |*c| c.id else null;
-}
-
+/// Joins the markdown engine's remote-image fetch threads. Fizzy links its *own* copy of the
+/// markdown module for store pages (the plugin's dylib copy has separate globals and is torn
+/// down by the plugin's own `deinit`), so this copy has no plugin lifecycle to ride on.
 pub fn deinit() void {
-    clearCurrent();
-    // Joins the markdown engine's remote-image fetch threads. Fizzy links its *own* copy of the
-    // markdown module for this pane (the plugin's dylib copy has separate globals and is torn
-    // down by the plugin's own `deinit`), so this copy has no plugin lifecycle to ride on.
     markdown.deinitShared();
-}
-
-/// Drop the current selection (e.g. the store "back" button).
-pub fn clear() void {
-    clearCurrent();
-}
-
-fn clearCurrent() void {
-    if (current) |*c| c.deinit();
-    current = null;
-}
-
-/// Advance the store pane's in-flight fetch.
-pub fn pump() void {
-    if (current) |*c| c.pump();
-}
-
-/// Render the store pane's selection, or an invitation when there is none.
-pub fn draw() void {
-    const c = if (current) |*cur| cur else {
-        placeholder("Select a plugin to read its README.", false);
-        return;
-    };
-    c.draw();
 }
 
 fn fillWasmCandidates(self: *Readme) void {

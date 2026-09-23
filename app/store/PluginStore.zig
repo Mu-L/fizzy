@@ -44,18 +44,6 @@ else
     };
 
 pub const view_id = "fizzy.store";
-/// Center provider that renders the selected plugin's README. Mirrors the way the workbench
-/// center renders the active document: while the store tab is active and a plugin is selected,
-/// `tick` swaps the active center to this provider; deselecting (or leaving the tab) restores
-/// the previous center.
-pub const readme_center_id = "fizzy.store.readme";
-
-/// Which sub-view the detail center shows below the header — VSCode marketplace-style. Reset to
-/// `.details` whenever the selection changes (`toggleSelect`), so switching plugins never leaves
-/// you stranded on a tab the new selection didn't ask for.
-const DetailTab = enum { details, changelog };
-var selected_detail_tab: DetailTab = .details;
-
 var catalog: ?store.Catalog = null;
 var registry_url_owned: ?[]u8 = null;
 var first_draw_done = false;
@@ -415,7 +403,12 @@ pub fn register(manager: PluginManager) !void {
     catalog = try store.Catalog.init(manager.gpa, dvui.io, url, fp_hex);
     // The owner of `store://…` pages, and the mount they live on. Registered before the store's
     // own surface so a layout restored with a page open finds its owner already there.
-    try Page.register(host, .{ .header = drawPageHeader, .source = pageSource });
+    try Page.register(host, .{
+        .header = drawPageHeader,
+        .source = pageSource,
+        .tabs = drawPageTabs,
+        .otherTab = drawPageOtherTab,
+    });
 
     try host.registerSurface(.{
         .id = view_id,
@@ -424,75 +417,6 @@ pub fn register(manager: PluginManager) !void {
         .keywords = sdk.keywords.ide.sidebar,
         .draw = draw,
     });
-    // The README takes the main area over while the store is the sidebar's tab
-    // (`takeover_when`); `tick` hides it while no card is selected, which is the other half of
-    // "only while there is something to show".
-    try host.registerSurface(.{
-        .id = readme_center_id,
-        .title = "Plugin README",
-        .keywords = sdk.keywords.ide.main,
-        .takeover_when = view_id,
-        .hidden = true,
-        .draw = drawReadmeCenter,
-    });
-}
-
-/// Center provider: a VSCode marketplace-style detail page for the selected plugin. Active only
-/// while `tick` has swapped us in (store tab active + a plugin selected). The region is the
-/// card; this is only the vertical stack (header/tabs/content).
-fn drawReadmeCenter(_: ?*anyopaque) anyerror!dvui.App.Result {
-    var pane = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .both,
-        .background = false,
-        .id_extra = hashId(readme_center_id),
-    });
-    defer pane.deinit();
-
-    const cat = if (catalog) |*c| c else return .ok;
-    const snapshot = cat.acquire();
-    defer cat.release();
-
-    // Switching pages swaps the whole subtree (header, tabs, README), so hide the settle frame
-    // and cross-fade rather than letting it flash. Keyed on the selection, so re-rendering the
-    // same page every frame costs nothing.
-    const rv = core.anim.reveal(pane.data().id, revealKey(), .{});
-    defer rv.deinit();
-
-    const entry = selectedEntry(snapshot) orelse {
-        dvui.labelNoFmt(@src(), "Select a plugin to see its details.", .{}, .{
-            .expand = .both,
-            .gravity_x = 0.5,
-            .gravity_y = 0.5,
-            .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.7) },
-        });
-        return .ok;
-    };
-
-    drawDetailHeader(entry);
-    drawDetailTabs();
-
-    switch (selected_detail_tab) {
-        .details => {
-            var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(16) });
-            defer body.deinit();
-            Readme.draw();
-        },
-        .changelog => {
-            // A plain wrapper, packed normally below the header/tabs like `.details`'s `body`
-            // above — `drawChangelogPlaceholder`'s own box centers itself via `gravity_y = 0.5`,
-            // which only a *normally-packed* parent can safely allow: `pane` is a vertical box
-            // with the header and tabs as earlier siblings, so a gravity-in-(0,1) direct child of
-            // *that* is treated as positioned/overlay (see `BoxWidget.rectFor`'s
-            // `child_positioned` check) and placed relative to `pane`'s *full* content rect —
-            // ignoring the space the header/tabs already consumed, i.e. drawn at the very top of
-            // the pane, over everything above it. Routing through this intermediate box first
-            // means the centering is relative to *its* (correctly, normally-packed) rect instead.
-            var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
-            defer body.deinit();
-            drawChangelogPlaceholder();
-        },
-    }
-    return .ok;
 }
 
 /// VSCode-marketplace-style header: logo, then a stacked name/id/author/description column, with
@@ -717,17 +641,6 @@ fn drawCreditLink(src: std.builtin.SourceLocation, text: []const u8, url: ?[]con
 /// separate bar), regular body text, and the selected tab marked by a `window`-text-colored
 /// underline rather than a filled pill. No drag/drop and no scroll area — there are only ever
 /// two tabs here.
-fn drawDetailTabs() void {
-    var strip = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .padding = .{ .x = 12, .y = 6, .h = 12 },
-    });
-    defer strip.deinit();
-
-    if (tabButton(@src(), "DETAILS", 0, selected_detail_tab == .details)) selected_detail_tab = .details;
-    if (tabButton(@src(), "CHANGELOG", 1, selected_detail_tab == .changelog)) selected_detail_tab = .changelog;
-}
-
 fn tabButton(src: std.builtin.SourceLocation, label: []const u8, id_extra: usize, selected: bool) bool {
     const theme = dvui.themeGet();
 
@@ -809,6 +722,7 @@ fn resolveRegistryUrl() []const u8 {
 pub fn deinit() void {
     if (comptime builtin.target.cpu.arch == .wasm32) {
         Readme.deinit();
+        Page.deinit();
         StoreIcon.deinit();
         if (catalog) |*c| c.deinit();
         catalog = null;
@@ -848,6 +762,7 @@ pub fn deinit() void {
     freeDiskIds();
     disk_ids.deinit(app.gpa);
     Readme.deinit();
+    Page.deinit();
     StoreIcon.deinit();
     if (catalog) |*c| c.deinit();
     catalog = null;
@@ -1347,9 +1262,7 @@ fn offerPendingUpdates() void {
 pub fn tick() void {
     if (comptime builtin.target.cpu.arch == .wasm32) {
         if (catalog) |*c| c.pump(web_fetch);
-        Readme.pump();
         StoreIcon.pump();
-        syncReadmeCenter();
         // Enable, Disable, Uninstall and the auto-update toggle all queue here and are applied
         // nowhere else — without this the web store's buttons lit up and did nothing. The
         // download queue below is the desktop's alone: on the web a plugin arrives through the
@@ -1358,7 +1271,6 @@ pub fn tick() void {
         return;
     }
 
-    syncReadmeCenter();
     autoUpdateTick();
 
     applyPendingActions();
@@ -1430,38 +1342,55 @@ pub fn tick() void {
     }
 }
 
-/// The README exists only while a card is selected; the layout handles "and the store tab is
-/// active" through `takeover_when`. Idempotent — safe to call every frame.
-fn syncReadmeCenter() void {
-    app.host.setSurfaceHidden(readme_center_id, Readme.selectedId() == null);
-}
-
-/// Select `entry` (showing its README in the center), or clear the selection if it is already the
-/// selected card. Only one plugin is selectable at a time.
+/// Select `entry`, or clear the selection if it is already the selected card. Selection is a
+/// card highlight and which card's flyout is open — nothing more. It used to also decide what the
+/// center showed, which is why clicking a card had to fight the panel that selection opened over
+/// the list; the page is a document now (`PluginPage`), opened deliberately from that panel.
 fn toggleSelect(entry: StoreEntry) void {
-    if (Readme.selectedId()) |sid| {
+    if (selectedId()) |sid| {
         if (std.mem.eql(u8, sid, entry.id)) {
-            Readme.clear();
+            selected_id_len = 0;
             return;
         }
     }
-    selected_detail_tab = .details;
-    const src = readmeSource(entry) orelse RepoSource{ .repo = "" };
-    Readme.select(entry.id, src.repo, src.subpath);
-
-    // On a collapsed (phone / narrow web) layout the detail page we just selected renders in the
-    // center, hidden behind the peeked-open explorer — so get out of its way: close the peek and
-    // swing the bottom panel shut. No-op on a desktop-width window (see `Editor.revealCenter`).
-    app.revealMain();
+    if (entry.id.len > selected_id_buf.len) {
+        selected_id_len = 0;
+        return;
+    }
+    @memcpy(selected_id_buf[0..entry.id.len], entry.id);
+    selected_id_len = entry.id.len;
 }
 
-/// Reconstruct the `StoreEntry` for whichever plugin is currently selected in the detail center
-/// (`Readme.selectedId()`), in the same priority order the install/store lists build theirs
-/// (`draw`'s entry-building pass) — just for one id instead of the whole list. `snapshot` is the
-/// caller's already-acquired catalog snapshot (or null when the catalog has never loaded); this
-/// makes no locking decisions of its own.
-fn selectedEntry(snapshot: ?store.Catalog.Snapshot) ?StoreEntry {
-    return entryFor(Readme.selectedId() orelse return null, snapshot);
+/// The selected card's id, if any. A fixed buffer rather than an allocation: plugin ids are short
+/// by construction (`Editor.isValidPluginId`), and this changes on every click across the list.
+var selected_id_buf: [96]u8 = undefined;
+var selected_id_len: usize = 0;
+
+fn selectedId() ?[]const u8 {
+    return if (selected_id_len == 0) null else selected_id_buf[0..selected_id_len];
+}
+
+/// A page's tab strip, drawn with `tab` selected; returns the tab after any click. The store
+/// draws it because the styling is the store's, and the page holds the answer because which tab
+/// is open belongs to the page being looked at.
+fn drawPageTabs(tab: u8) u8 {
+    var strip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .padding = .{ .x = 12, .y = 6, .h = 12 },
+    });
+    defer strip.deinit();
+
+    var chosen = tab;
+    if (tabButton(@src(), "DETAILS", 0, tab == 0)) chosen = 0;
+    if (tabButton(@src(), "CHANGELOG", 1, tab == 1)) chosen = 1;
+    return chosen;
+}
+
+/// Everything a page can show that is not the README. One tab today.
+fn drawPageOtherTab(_: u8) void {
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
+    defer body.deinit();
+    drawChangelogPlaceholder();
 }
 
 /// A store page's header, drawn into the page document (`PluginPage`). False when the store has
@@ -1789,14 +1718,6 @@ const StoreEntry = struct {
 /// ids that shifted as rows were added/removed).
 fn hashId(id: []const u8) usize {
     return @truncate(std.hash.Wyhash.hash(0, id));
-}
-
-/// What the detail page is currently showing, as a reveal key: the selected plugin *and* the
-/// open tab, since switching tabs swaps the body subtree just as much as switching plugins does.
-fn revealKey() u64 {
-    var h = std.hash.Wyhash.init(@intFromEnum(selected_detail_tab));
-    h.update(Readme.selectedId() orelse "");
-    return h.final();
 }
 
 fn containsId(entries: []const StoreEntry, id: []const u8) bool {
@@ -2349,7 +2270,7 @@ const CardOptions = struct {
 
 fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_text: []const u8, opts: CardOptions) void {
     const theme = dvui.themeGet();
-    const selected = if (Readme.selectedId()) |sid| std.mem.eql(u8, sid, entry.id) else false;
+    const selected = if (selectedId()) |sid| std.mem.eql(u8, sid, entry.id) else false;
     // Disabled plugins read as a faded card: half the surface fill opacity and half the shadow.
     //const disabled = app.isDisabled(entry.id);
 

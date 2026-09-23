@@ -47,7 +47,16 @@ pub const PageDraw = struct {
     /// Where this plugin's README lives: the repo URL and the path within it. Null when the
     /// store cannot say, which shows the "no README" state rather than fetching nothing.
     source: *const fn (plugin_id: []const u8) ?Source,
+    /// Draw the page's tab strip with `tab` selected; returns the tab after any click. Drawn by
+    /// the store because it is the store's styling, chosen per page because the tab is a
+    /// property of the page you are looking at, not of the app.
+    tabs: *const fn (tab: u8) u8,
+    /// Draw the body of a tab that is not the README.
+    otherTab: *const fn (tab: u8) void,
 };
+
+/// The README tab, by the index the store's tab strip gives it.
+pub const readme_tab: u8 = 0;
 
 pub const Source = struct {
     repo: []const u8,
@@ -67,6 +76,8 @@ pub const Document = struct {
     /// and a page can be restored from a saved layout before the catalog has been fetched.
     readme: ?readme.Readme = null,
     readme_started: bool = false,
+    /// Which of the page's tabs is showing.
+    tab: u8 = readme_tab,
     /// A page the user has said to keep. An unkept page is *temporary*: the next page opened
     /// takes its tab, so clicking down a list of plugins reads one after another in place
     /// instead of leaving a tab behind for every card touched.
@@ -293,6 +304,12 @@ fn drawDocument(_: *anyopaque, handle: DocHandle) anyerror!void {
         return;
     }
 
+    doc.tab = draw.tabs(doc.tab);
+    if (doc.tab != readme_tab) {
+        draw.otherTab(doc.tab);
+        return;
+    }
+
     if (doc.readme == null and !doc.readme_started) {
         if (draw.source(doc.plugin)) |src| {
             doc.readme = readme.Readme.init(doc.plugin, src.repo, src.subpath);
@@ -300,7 +317,18 @@ fn drawDocument(_: *anyopaque, handle: DocHandle) anyerror!void {
             doc.readme_started = true;
         }
     }
-    if (doc.readme) |*r| r.draw();
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(16) });
+    defer body.deinit();
+    if (doc.readme) |*r| r.draw() else placeholderText("No README for this plugin.");
+}
+
+fn placeholderText(text: []const u8) void {
+    dvui.labelNoFmt(@src(), text, .{}, .{
+        .expand = .both,
+        .gravity_x = 0.5,
+        .gravity_y = 0.5,
+        .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.7) },
+    });
 }
 
 /// Whether `id`'s page is open at all.
