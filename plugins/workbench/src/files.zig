@@ -952,6 +952,23 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                             _ = dvui.separator(@src(), .{ .expand = .horizontal });
                         }
 
+                        // Re-root at a folder, which is the one thing only the tree can offer:
+                        // fizzy's "Open Folder" is the OS dialog, and that cannot reach inside a
+                        // mount — a cloud drive's folders are not on disk for it to browse. Here
+                        // the path is a path either way, so the same row works for `gdrive://…`
+                        // and for a directory on disk.
+                        if (entry.kind == .directory) {
+                            if ((dvui.menuItemLabel(@src(), "Set Root Here", .{}, .{ .expand = .horizontal })) != null) {
+                                runtime.host().setProjectFolder(abs_path) catch |err| {
+                                    dvui.log.err("Failed to set root to {s}: {t}", .{ abs_path, err });
+                                };
+
+                                fw2.close();
+                            }
+
+                            _ = dvui.separator(@src(), .{ .expand = .horizontal });
+                        }
+
                         if ((dvui.menuItemLabel(@src(), open_message, .{}, .{ .expand = .horizontal })) != null) {
                             runtime.host().openInFileBrowser(if (entry.kind == .file) std.fs.path.dirname(abs_path) orelse abs_path else abs_path) catch {
                                 dvui.log.err("Failed to open file browser", .{});
