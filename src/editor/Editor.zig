@@ -2016,7 +2016,6 @@ const fizzy_api_vtable: sdk.EditorAPI.VTable = .{
     .openFile = fizzyOpenFile,
     .documentIsPreview = fizzyDocumentIsPreview,
     .setDocumentPreview = fizzySetDocumentPreview,
-    .menuContext = fizzyMenuContext,
     .isRemotePath = fizzyIsRemotePath,
     .openOrFocusFileAtGrouping = fizzyOpenOrFocusFileAtGrouping,
     .revealPosition = fizzyRevealPosition,
@@ -2243,10 +2242,6 @@ fn fizzyDocumentIsPreview(ctx: *anyopaque, doc_id: u64) bool {
 }
 fn fizzySetDocumentPreview(ctx: *anyopaque, doc_id: u64, preview: bool) void {
     fizzyCtx(ctx).setDocumentPreview(doc_id, preview);
-}
-fn fizzyMenuContext(ctx: *anyopaque) ?sdk.EditorAPI.MenuContext {
-    _ = ctx;
-    return menu_context;
 }
 fn fizzyIsRemotePath(ctx: *anyopaque, path: []const u8) bool {
     return fizzyCtx(ctx).app.file_table.isRemote(path);
@@ -4382,22 +4377,6 @@ pub fn clearFileTreeTabDragDropState(editor: *Editor) void {
 /// `Host.openFilePath`). Canonicalizes `path_in` once so `loading_jobs`, the document's stored
 /// path, and later `docFromPath` lookups all agree — otherwise `foo/./bar.zig` and `foo/bar.zig`
 /// would open as two documents. See `fizzy.core.paths.normalize`.
-/// What `Host.menuContext` answers: set by whoever opens a context menu, for as long as its
-/// rows are being drawn. A plain global because there is exactly one menu open at a time and
-/// the answer is only ever read from inside that draw — a field on the Editor would suggest it
-/// outlives the frame.
-var menu_context: ?sdk.EditorAPI.MenuContext = null;
-
-/// Draw a context menu's contributed sections with `ctx` as the answer to `Host.menuContext`.
-/// The only way to set it: a plugin reads the context while its own section draws, and nothing
-/// should be able to leave a stale one behind.
-pub fn withMenuContext(ctx: sdk.EditorAPI.MenuContext, body: *const fn () void) void {
-    const prev = menu_context;
-    menu_context = ctx;
-    defer menu_context = prev;
-    body();
-}
-
 /// Whether this document is a preview tab. See `EditorAPI.OpenMode`.
 pub fn documentIsPreview(editor: *Editor, doc_id: u64) bool {
     return editor.preview_docs.contains(doc_id);

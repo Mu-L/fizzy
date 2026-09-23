@@ -69,17 +69,27 @@ during a context-menu draw:
 
 ```zig
 pub const MenuContext = struct {
-    /// The menu id this is being drawn for.
     menu_id: []const u8,
-    /// The path the menu was opened on, empty when it is not about one.
-    path: []const u8 = "",
-    /// The document the menu was opened on, 0 when it is not about one.
-    doc_id: u64 = 0,
-    /// The pane, for a menu opened on a tab.
-    grouping: u64 = 0,
+    subject: Subject = .none,
+
+    pub const Subject = union(enum) {
+        none,
+        path: []const u8,                                    // a tree row, the project root
+        document: struct { id: u64, path: []const u8, grouping: u64 },  // a tab, a document pane
+    };
+    pub fn path(self: MenuContext) ?[]const u8;
 };
 pub fn menuContext(self: *Host) ?MenuContext;
+pub fn drawMenuSections(self: *Host, ctx: MenuContext) void;
 ```
+
+A union over the *subject*, not the fields: they are not exclusive (an open document always has
+a path and a pane) but not independent either (a tree row has only a path), and a flat struct
+with `0` / `""` for "absent" let a plugin check one sentinel and forget the other.
+
+The context lives on the Host, set by `drawMenuSections` while contributed rows draw — not in the
+app — because the workbench opens the tab and tree menus and is a plugin with no reach into app
+globals.
 
 ### 3. A plugin can decline
 

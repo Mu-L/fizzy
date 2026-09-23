@@ -43,14 +43,42 @@ pub const OpenOptions = struct {
 /// draw: a plugin asks the host while its `registerMenuSection` callback runs, and the answer
 /// is whichever tab, file row or document the press landed on.
 pub const MenuContext = struct {
-    /// The menu being drawn, e.g. `"fizzy.menu.tab"`.
+    /// The menu being drawn, e.g. `"fizzy.menu.tab"`. Which menu it is says what the owner put
+    /// there; `subject` says what it is about, which is the part a contributed row acts on.
     menu_id: []const u8,
-    /// The path it was opened on; empty when the menu is not about one.
-    path: []const u8 = "",
-    /// The document it was opened on; 0 when it is not about one.
-    doc_id: u64 = 0,
-    /// The pane, for a menu opened on a tab.
-    grouping: u64 = 0,
+    subject: Subject = .none,
+
+    /// A union over what was pressed, not over the fields it carries. The fields are not
+    /// exclusive — an open document always has a path and a pane — but they are not independent
+    /// either: a file-tree row has a path and nothing else. A flat struct allowed the pairings that
+    /// cannot happen (a document with no path) and spelled "absent" as `0` and `""`, which is the
+    /// kind of sentinel a plugin checks one of and forgets the other.
+    pub const Subject = union(enum) {
+        /// Nothing in particular: blank space, a region's own chrome.
+        none,
+        /// A path with no open document behind it: a file-tree row, the project root.
+        path: []const u8,
+        /// An open document — its tab, or its own pane.
+        document: Document,
+    };
+
+    pub const Document = struct {
+        id: u64,
+        /// Every document has one, so a section adding "Copy Path" to a tab never looks it up.
+        path: []const u8,
+        /// The pane it sits in: what "Close Others" and "Close to the Right" are relative to.
+        grouping: u64,
+    };
+
+    /// The path this menu is about, from whichever kind of subject carries one — for a row that
+    /// works on a file whether it was reached from the tree or from a tab.
+    pub fn path(self: MenuContext) ?[]const u8 {
+        return switch (self.subject) {
+            .none => null,
+            .path => |p| p,
+            .document => |d| d.path,
+        };
+    }
 };
 
 pub const SaveDialogFilter = extern struct {
@@ -158,8 +186,6 @@ pub const VTable = struct {
     /// Keep a preview (or make a kept document one again). Editing keeps it on its own; this is
     /// the explicit answer — "Keep Open" on a tab.
     setDocumentPreview: *const fn (ctx: *anyopaque, doc_id: u64, preview: bool) void,
-    /// What the context menu being drawn is about, or null outside one — see `MenuContext`.
-    menuContext: *const fn (ctx: *anyopaque) ?MenuContext,
     /// Whether `path` is reached over a network (a cloud mount), rather than from a disk or
     /// memory. A crawler asks before deciding how hard to pull: sixteen parallel listings is a
     /// pool of reads on a disk and a spent API quota on a drive.
@@ -475,10 +501,6 @@ pub fn documentIsPreview(self: EditorAPI, doc_id: u64) bool {
 
 pub fn setDocumentPreview(self: EditorAPI, doc_id: u64, preview: bool) void {
     self.vtable.setDocumentPreview(self.ctx, doc_id, preview);
-}
-
-pub fn menuContext(self: EditorAPI) ?MenuContext {
-    return self.vtable.menuContext(self.ctx);
 }
 
 pub fn isRemotePath(self: EditorAPI, path: []const u8) bool {

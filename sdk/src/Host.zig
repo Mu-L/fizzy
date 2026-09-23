@@ -232,6 +232,11 @@ settings_schemas: std.ArrayListUnmanaged(SettingsSchema) = .empty,
 menus: std.ArrayListUnmanaged(MenuContribution) = .empty,
 /// Nested items contributed into an open parent menu (e.g. View > Example).
 menu_sections: std.ArrayListUnmanaged(MenuSectionContribution) = .empty,
+/// What the context menu being drawn is about — set by `drawMenuSections` for exactly as long as
+/// its sections draw, and read back through `menuContext`. On the Host rather than the app so
+/// that whoever opens a menu can set it: the workbench opens the tab and tree menus, and it is a
+/// plugin with no way to reach an app global.
+menu_context: ?EditorAPI.MenuContext = null,
 /// Plugin-drawn items at the bottom of the rail (`RailItemContribution`).
 rail_items: std.ArrayListUnmanaged(RailItemContribution) = .empty,
 /// More ways to open something, listed beside fizzy's own (`OpenAction`).
@@ -512,9 +517,34 @@ pub fn setDocumentPreview(self: *Host, doc_id: u64, preview: bool) void {
 }
 
 /// What the context menu currently being drawn is about — see `EditorAPI.MenuContext`. Null
-/// outside a context-menu draw, which is also what a plugin gets when the host predates this.
+/// outside a context-menu draw.
 pub fn menuContext(self: *Host) ?EditorAPI.MenuContext {
-    return if (self.fizzy_api) |a| a.menuContext() else null;
+    return self.menu_context;
+}
+
+/// Draw every section contributed to `ctx.menu_id`, with `ctx` as the answer to `menuContext`
+/// while they draw. What whoever opens a context menu calls after its own rows, so a plugin's
+/// "Reveal in Finder" and fizzy's "Rename" sit in one menu instead of two competing ones.
+///
+/// A separator goes before the first contributed row and nowhere else: one line between what
+/// the menu's owner put there and what others added, not one per contributor.
+pub fn drawMenuSections(self: *Host, ctx: EditorAPI.MenuContext) void {
+    const prev = self.menu_context;
+    self.menu_context = ctx;
+    defer self.menu_context = prev;
+
+    var drew_separator = false;
+    for (self.menu_sections.items) |*section| {
+        if (section.hidden) continue;
+        if (!std.mem.eql(u8, section.parent_menu_id, ctx.menu_id)) continue;
+        if (!drew_separator) {
+            _ = dvui.separator(@src(), .{ .expand = .horizontal });
+            drew_separator = true;
+        }
+        section.draw(section.ctx) catch |err| {
+            dvui.log.err("menu section '{s}' failed: {t}", .{ section.id, err });
+        };
+    }
 }
 
 /// Whether `path` is reached over a network. Ask before crawling: a window that suits a disk
