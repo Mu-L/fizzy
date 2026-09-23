@@ -62,6 +62,8 @@ pub fn addSteps(
     // pixels back through these.
     web_exe.root_module.export_symbol_names = &[_][]const u8{
         "FizzyWebTrackpadMagnification",
+        "FizzyWebKeyBuffer",
+        "FizzyWebKeyBound",
         "FizzyWebImageAlloc",
         "FizzyWebImageReady",
         "FizzyWebImageFailed",

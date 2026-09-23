@@ -258,6 +258,13 @@ pub fn resolve(self: *Keymap, c: Chord, ctx: When, active_owner: ?[]const u8) Re
     return .none;
 }
 
+/// What `resolve` would answer for `c`, leaving the chord state as it was — for asking about a
+/// key before it is delivered (the web page's `keydown`) without feeding it twice.
+pub fn peek(self: Keymap, c: Chord, ctx: When, active_owner: ?[]const u8) Resolution {
+    var copy = self;
+    return copy.resolve(c, ctx, active_owner);
+}
+
 /// Every binding currently mapped to `command` — for rendering shortcut hints and the
 /// Keyboard Shortcuts pane.
 pub fn bindingsFor(self: Keymap, gpa: Allocator, command: []const u8) ![]Binding {
@@ -452,6 +459,20 @@ test "chord needs both strokes" {
     const r = k.resolve(keys("ctrl+c").first, .{}, null);
     try t.expectEqualStrings("text.addLineComment", r.command);
     try t.expectEqual(@as(?Chord, null), k.pending);
+}
+
+test "peeking at a key does not feed the chord" {
+    const a = t.allocator;
+    var k = try km(a, &.{
+        .{ .stroke = keys("ctrl+k ctrl+c"), .command = "text.addLineComment" },
+    });
+    defer k.deinit(a);
+
+    try t.expect(k.peek(keys("ctrl+k").first, .{}, null) == .pending);
+    try t.expectEqual(@as(?Chord, null), k.pending);
+    try t.expect(k.resolve(keys("ctrl+k").first, .{}, null) == .pending);
+    try t.expectEqualStrings("text.addLineComment", k.peek(keys("ctrl+c").first, .{}, null).command);
+    try t.expect(k.pending != null);
 }
 
 test "an unmatched second stroke is swallowed, not misfired" {

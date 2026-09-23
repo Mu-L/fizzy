@@ -8,6 +8,7 @@ const dvui = @import("dvui");
 const builtin = @import("builtin");
 const core = @import("core");
 const layout_file = @import("layout_file.zig");
+const fizzy = @import("../fizzy.zig");
 
 const WebFileIo = if (builtin.target.cpu.arch == .wasm32)
     @import("../editor/WebFileIo.zig")
@@ -64,6 +65,32 @@ pub fn setWindowStyle(_: *dvui.Window) void {}
 /// Symmetric with the native API: a browser tab cannot take focus for itself, and the OAuth
 /// popup already returns to the page that opened it.
 pub fn raiseWindow() void {}
+
+/// The page's `keydown` check (`web/index.html`): it writes `KeyboardEvent.key` here, then asks
+/// `FizzyWebKeyBound` whether the app binds it — see `Keybinds.webKeyBound`.
+export fn FizzyWebKeyBuffer() [*]u8 {
+    return &fizzy.Editor.Keybinds.web_key_buf;
+}
+
+export fn FizzyWebKeyBound(key_len: usize, mods: u32) bool {
+    return fizzy.Editor.Keybinds.webKeyBound(key_len, mods);
+}
+
+/// The page's own functions. Only a wasm build has a page; the integration tests compile this
+/// backend natively.
+const page = if (builtin.target.cpu.arch == .wasm32) struct {
+    extern "fizzy" fn fizzy_web_toggle_fullscreen() void;
+} else struct {
+    fn fizzy_web_toggle_fullscreen() void {}
+};
+
+/// The page's Fullscreen API (`web/index.html`), which also takes the keyboard lock so the
+/// shortcuts a browser keeps for itself (⌘W, ⌘T, Ctrl+Tab) reach the app while full screen.
+/// Runs a frame after the key press or click that asked for it, which is inside the browser's
+/// user-activation window.
+pub fn toggleFullscreen() void {
+    page.fizzy_web_toggle_fullscreen();
+}
 
 /// Symmetric with the native API: no window state to restore on web.
 pub fn restoreWindowState(_: *dvui.Window) void {}

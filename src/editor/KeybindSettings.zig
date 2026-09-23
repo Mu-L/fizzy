@@ -20,7 +20,6 @@
 //! explorer is a horizontally scrolling area; a grid sized from its parent's width that also
 //! asked for that width would ratchet the pane wider every frame.
 const std = @import("std");
-const builtin = @import("builtin");
 const dvui = @import("dvui");
 const icons = @import("icons");
 const core = @import("core");
@@ -206,10 +205,6 @@ fn lowerRow(_: void, a: Row, b: Row) bool {
 /// Settings-tree search hook: the best score among the commands this pane would draw, or null
 /// when nothing matches (the whole "Keyboard Shortcuts" row then disappears from the tree).
 pub fn score(query: *const fuzzy.Query) ?f64 {
-    if (comptime builtin.target.cpu.arch == .wasm32) {
-        // No keybinds on web — the pane draws an explanatory line, so only match its own name.
-        return fuzzy.scoreBest(&table_keywords, query, .{ .plain = true });
-    }
     if (query.isEmpty()) return 0;
 
     const platform: Keymap.Platform = if (fizzy.core.platform.isMacOS()) .mac else .other;
@@ -224,12 +219,6 @@ pub fn score(query: *const fuzzy.Query) ?f64 {
 // ---- drawing ------------------------------------------------------------------------------
 
 pub fn draw(query: *const fuzzy.Query) void {
-    if (comptime builtin.target.cpu.arch == .wasm32) {
-        dvui.label(@src(), "Keybindings are not available on the web build.", .{}, .{
-            .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) },
-        });
-        return;
-    }
 
     const editor = fizzy.editor();
     const theme = dvui.themeGet();

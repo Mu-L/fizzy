@@ -346,6 +346,15 @@
               if (dvuiApp) dvuiApp.requestRender();
             });
           },
+          // View › Toggle Full Screen. The request runs a frame after the key press or click
+          // that asked for it, which is still inside the browser's user-activation window.
+          fizzy_web_toggle_fullscreen() {
+            if (document.fullscreenElement) {
+              document.exitFullscreen().catch(() => {});
+            } else if (document.documentElement.requestFullscreen) {
+              document.documentElement.requestFullscreen().catch((err) => console.warn("fizzy: full screen refused:", err));
+            }
+          },
           // `core.fs` on the web: the app's own small files (settings.zon, recents.zon,
           // keybinds.zon) live in localStorage, keyed by the path the app would have used.
           fizzy_web_storage_get(keyPtr, keyLen, bufPtr, bufLen) {
@@ -716,6 +725,31 @@
       // "pinch fingers together = zoom out".
       let dvuiApp = null;
       const dvuiCanvas = document.getElementById("dvui-canvas");
+
+      // Shortcuts the app binds are the app's, not the browser's: ⌘S must not also save the
+      // page. Capture phase, so this runs before dvui's own listener (which still receives the
+      // key — preventDefault stops the browser, not the event). The app answers synchronously
+      // from its keymap (`Keybinds.webKeyBound`), which also keeps typing, copy/cut/paste and
+      // unbound chords with the browser.
+      window.addEventListener("keydown", (ev) => {
+        const ex = wasmInstance && wasmInstance.exports;
+        if (!ex || !ex.FizzyWebKeyBound) return;
+        const bytes = utf8encode(ev.key);
+        if (bytes.length === 0 || bytes.length > 16) return;
+        new Uint8Array(ex.memory.buffer, ex.FizzyWebKeyBuffer(), bytes.length).set(bytes);
+        const mods = (ev.metaKey << 3) | (ev.altKey << 2) | (ev.ctrlKey << 1) | (ev.shiftKey << 0);
+        if (ex.FizzyWebKeyBound(bytes.length, mods)) ev.preventDefault();
+      }, { capture: true });
+
+      // Some shortcuts never reach a page at all (⌘W, ⌘T, ⌘N, Ctrl+Tab). The Keyboard Lock API
+      // hands them over, but only in full screen and only in Chromium; elsewhere this is a no-op
+      // and those chords stay the browser's.
+      document.addEventListener("fullscreenchange", () => {
+        const kb = navigator.keyboard;
+        if (!kb || !kb.lock) return;
+        if (document.fullscreenElement) kb.lock().catch(() => {});
+        else kb.unlock();
+      });
       dvuiCanvas.addEventListener("wheel", (ev) => {
         if (ev.ctrlKey && ev.deltaMode === 0) {
           ev.preventDefault();

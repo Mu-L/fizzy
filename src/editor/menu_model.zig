@@ -198,6 +198,7 @@ const edit_items = [_]Item{
 const view_items = [_]Item{
     .{ .command = .{ .id = "fizzy.toggleExplorer", .title = .{ .dynamic = explorerTitle } } },
     .{ .command = .{ .id = "fizzy.resetLayout", .title = .{ .static = "Reset Layout" }, .sf_symbol = "arrow.counterclockwise" } },
+    .{ .command = .{ .id = "fizzy.toggleFullScreen", .title = .{ .static = "Toggle Full Screen" }, .sf_symbol = "arrow.up.left.and.arrow.down.right" } },
     .{ .plugin_section = "fizzy.menu.view" },
     .separator,
     .{ .command = .{ .id = "fizzy.showDvuiDemo", .title = .{ .static = "Show DVUI Demo" } } },

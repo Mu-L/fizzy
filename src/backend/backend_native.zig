@@ -1877,6 +1877,19 @@ var captured_sdl_window: ?*sdl3.SDL_Window = null;
 /// does not make the *application* active, so the app has to ask as well; the ask is rejected
 /// while another app is genuinely in the foreground for user input, which is the OS protecting
 /// the user and not something to work around.
+/// Enter or leave full screen. On macOS that is the green button's own Space transition, which
+/// the window monitor (`FizzyWindowMonitor.m`) already follows; elsewhere SDL's.
+pub fn toggleFullscreen() void {
+    const w = captured_sdl_window orelse return;
+    if (builtin.os.tag == .macos) {
+        const ns = cocoaWindowOf(w) orelse return;
+        objc.Object.fromId(ns).msgSend(void, "toggleFullScreen:", .{@as(?*anyopaque, null)});
+        return;
+    }
+    const on = (sdl3.SDL_GetWindowFlags(w) & sdl3.SDL_WINDOW_FULLSCREEN) != 0;
+    _ = sdl3.SDL_SetWindowFullscreen(w, !on);
+}
+
 pub fn raiseWindow() void {
     if (captured_sdl_window) |w| _ = sdl3.SDL_RaiseWindow(w);
     if (builtin.os.tag == .macos) activateApp();

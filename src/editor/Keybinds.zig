@@ -153,6 +153,7 @@ const fizzy_commands = [_]FizzyCommand{
     .{ .id = "fizzy.paste", .title = "Paste", .bind = "paste", .run = cmdPaste, .isEnabled = cmdPasteEnabled, .icon = icons.tvg.lucide.@"clipboard-paste" },
     .{ .id = "fizzy.toggleExplorer", .title = "Toggle Explorer", .bind = "explorer", .run = cmdToggleExplorer, .icon = icons.tvg.lucide.@"panel-left" },
     .{ .id = "fizzy.resetLayout", .title = "Reset Layout", .bind = null, .run = cmdResetLayout, .icon = icons.tvg.lucide.@"rotate-ccw" },
+    .{ .id = "fizzy.toggleFullScreen", .title = "Toggle Full Screen", .bind = null, .run = cmdToggleFullScreen, .icon = icons.tvg.lucide.maximize },
     .{ .id = "fizzy.deleteSelection", .title = "Delete Selection", .bind = "delete_selection_contents", .run = cmdDeleteSelection, .isEnabled = cmdDeleteSelectionEnabled, .icon = icons.tvg.lucide.@"trash-2" },
     .{ .id = "fizzy.accept", .title = "Accept", .bind = "activate", .run = cmdAccept, .isEnabled = cmdAcceptEnabled, .icon = icons.tvg.lucide.check },
     .{ .id = "fizzy.cancel", .title = "Cancel", .bind = "cancel", .run = cmdCancel, .isEnabled = cmdCancelEnabled, .icon = icons.tvg.lucide.x },
@@ -344,6 +345,10 @@ fn cmdResetLayout(state: *anyopaque) anyerror!void {
     editorFromState(state).resetLayout();
 }
 
+fn cmdToggleFullScreen(_: *anyopaque) anyerror!void {
+    fizzy.backend.toggleFullscreen();
+}
+
 fn cmdShowDvuiDemo(_: *anyopaque) anyerror!void {
     dvui.Examples.show_demo_window = !dvui.Examples.show_demo_window;
 }
@@ -366,6 +371,7 @@ fn cmdReportBug(_: *anyopaque) anyerror!void {
 /// Register every fizzy action in the Host command registry. Called once during `Editor.init`.
 pub fn registerCommands(editor: *Editor) !void {
     fizzy_plugin.state = editor;
+    web_keys_ready = true;
     inline for (fizzy_commands) |c| {
         try editor.app.host.registerCommand(.{
             .id = c.id,
@@ -417,6 +423,8 @@ const vscode_defaults = [_]DefaultBind{
     .{ .command = "fizzy.redo", .keys = "ctrl+y", .keys_mac = "mod+shift+z" },
     .{ .command = "fizzy.quickOpen", .keys = "mod+p" },
     .{ .command = "fizzy.commandPalette", .keys = "mod+shift+p" },
+    // The platform's own: F11 in VSCode and browsers, ⌃⌘F in every macOS app.
+    .{ .command = "fizzy.toggleFullScreen", .keys = "f11", .keys_mac = "ctrl+cmd+f" },
 };
 
 /// C2-lite bridge: owner-scoped plugin defaults that still can't live on `Command.default_keys`
@@ -913,6 +921,62 @@ fn currentContext(editor: *Editor) Keymap.When {
 fn activeOwnerId(editor: *Editor) ?[]const u8 {
     const doc = editor.activeDoc() orelse return null;
     return doc.owner.id;
+}
+
+// ---- the web: keys the browser would otherwise act on ------------------------------------------
+
+/// Where the page writes `KeyboardEvent.key` before asking `webKeyBound` — a fixed buffer, so
+/// asking allocates nothing. Every key name a keymap can bind fits. Exported to the page by
+/// `backend_web.zig`, with the other web exports.
+pub var web_key_buf: [16]u8 = undefined;
+/// Set once the commands are registered: the page's listener is live from load, before the
+/// editor exists.
+var web_keys_ready = false;
+
+
+/// Asked by `web/index.html` from inside a `keydown` listener, before the browser acts on the key:
+/// true means "this key is the app's", and the page cancels the browser's default (⌘S saving the
+/// page, ⌘P printing it, ⌘O opening a file of the browser's own). It has to be answered here and
+/// synchronously — by the time dvui sees the event on the next frame the browser has already
+/// acted — so it peeks at the same keymap and context `tick` will resolve against.
+///
+/// Only chords with Ctrl or ⌘, and function keys: a bare key is typing, and cancelling it would
+/// stop the text input under it from receiving the character. Copy, cut and paste stay the
+/// browser's, because the web clipboard only arrives through the browser's own events for them.
+///
+/// The key is `KeyboardEvent.key`, which is also what dvui's web backend turns into its key, so
+/// both sides agree on what was pressed. `mods` is dvui's packing: ⌘ 8, Alt 4, Ctrl 2, Shift 1.
+pub fn webKeyBound(key_len: usize, mods_bits: u32) bool {
+    if (!web_keys_ready or key_len > web_key_buf.len) return false;
+    const editor = fizzy.editor();
+    const mods: Keymap.Mods = .{
+        .command = mods_bits & 8 != 0,
+        .alt = mods_bits & 4 != 0,
+        .ctrl = mods_bits & 2 != 0,
+        .shift = mods_bits & 1 != 0,
+    };
+    var buf: [16]u8 = undefined;
+    const key = webKey(web_key_buf[0..key_len], &buf) orelse return false;
+    const function_key = @intFromEnum(key) >= @intFromEnum(Keymap.Key.f1) and @intFromEnum(key) <= @intFromEnum(Keymap.Key.f25);
+    if (!mods.ctrl and !mods.command and !function_key) return false;
+
+    // Recording a new binding: every such chord is data for the settings pane, not the browser's.
+    if (KeybindSettings.isRecording()) return true;
+    if (editor.command_palette.open) return false;
+
+    return switch (editor.app.keymap.peek(.{ .key = key, .mods = mods }, currentContext(editor), activeOwnerId(editor))) {
+        .none, .unbound => false,
+        .pending => true,
+        .command => |id| !(std.mem.endsWith(u8, id, ".copy") or std.mem.endsWith(u8, id, ".cut") or std.mem.endsWith(u8, id, ".paste")),
+    };
+}
+
+/// `KeyboardEvent.key` → keymap key: `"s"`, `"S"`, `"Enter"`, `"ArrowUp"`, `"PageUp"`, `"F11"`, `" "`.
+fn webKey(name: []const u8, buf: []u8) ?Keymap.Key {
+    if (std.mem.eql(u8, name, " ")) return .space;
+    const bare = if (std.mem.startsWith(u8, name, "Arrow")) name["Arrow".len..] else name;
+    if (bare.len == 0 or bare.len > buf.len) return null;
+    return @import("app").keymap.key.fromSpelling(std.ascii.lowerString(buf, bare));
 }
 
 // These keybinds are available regardless of the currently focused widget.
