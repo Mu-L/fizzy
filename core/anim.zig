@@ -143,8 +143,14 @@ pub const CrossFade = struct {
     /// boundaries; blitting a smaller rect would sample the wrong UVs).
     rect: dvui.Rect.Physical = .{},
     incoming_rect: dvui.Rect.Physical = .{},
+    /// The place itself, when the snapshots take in a margin around it for the blur to bleed
+    /// into (`TransitionOptions.bleed`): the overlay covers this fully and fades out across the
+    /// margin. Null — the overlay covers `rect` edge to edge.
+    inner: ?dvui.Rect.Physical = null,
     start_ns: i128 = 0,
     duration_ns: i128 = crossfade.fade_ns,
+    /// Shapes the clock before the kind's curves read it (`TransitionOptions.easing`).
+    easing: *const fn (f32) f32 = dvui.easing.linear,
     kind: Kind = .fade,
     /// The snapshots carry their region's backdrop, so they are opaque wherever they cover and
     /// blend exactly with plain source-over (`blitOpaque`).
@@ -210,14 +216,14 @@ pub const CrossFade = struct {
             return;
         }
 
-        const s = crossfade.sample(self.kind, t, pending);
+        const s = crossfade.sample(self.kind, std.math.clamp(self.easing(t), 0, 1), pending);
         // Bottom to top: the live incoming view (drawn by the caller), its own frost thinning
         // over it, then the outgoing snapshot. Both snapshots carry the region's backdrop
         // (`TransitionOptions.backdrop`), so neither has transparent holes for the blur to
         // spread into — which is what once made a second layer read as grey glare.
-        const draw_snapshot = if (self.opaque_snapshots) &blitOpaque else &blit;
-        if (self.incoming) |tex| draw_snapshot(tex, &self.incoming_frost, self.incoming_rect, s.in_blur, s.in_alpha);
-        if (self.texture) |tex| draw_snapshot(tex, &self.frost, self.rect, s.out_blur, s.out_alpha);
+        const mode: BlitMode = if (self.opaque_snapshots) .over else .lerp;
+        if (self.incoming) |tex| blitWith(tex, &self.incoming_frost, self.incoming_rect, self.inner, s.in_blur, s.in_alpha, mode);
+        if (self.texture) |tex| blitWith(tex, &self.frost, self.rect, self.inner, s.out_blur, s.out_alpha, mode);
 
         // Nothing else is animating, so without this an idle app would sleep mid-fade.
         dvui.refresh(null, @src(), null);
@@ -229,9 +235,11 @@ pub const CrossFade = struct {
             // Park the clock at the pose `sample(..., pending)` will report, so when the
             // hold lifts the remaining timeline starts from there rather than from wherever
             // wall time has wandered.
+            // The clock is eased before it is read, so park where the *eased* clock is at the
+            // hold.
             const parked: f32 = switch (self.kind) {
                 .fade => 0,
-                .blur, .frost => crossfade.hold,
+                .blur, .frost => easedTimeOf(self.easing, crossfade.hold),
             };
             const parked_ns: i128 = @intFromFloat(@as(f64, parked) * @as(f64, @floatFromInt(self.duration_ns)));
             self.start_ns = now - parked_ns;
@@ -282,6 +290,33 @@ pub fn blurRadius() f32 {
     return dialogs.style().blur;
 }
 
+/// The clock time at which `easing` reaches `v`: bisected, so any monotonic curve works (an
+/// overshooting one gives its first crossing).
+fn easedTimeOf(easing: *const fn (f32) f32, v: f32) f32 {
+    var lo: f32 = 0;
+    var hi: f32 = 1;
+    for (0..24) |_| {
+        const mid = (lo + hi) / 2;
+        if (easing(mid) < v) lo = mid else hi = mid;
+    }
+    return (lo + hi) / 2;
+}
+
+test "a held swap parks where the eased clock is at the hold" {
+    const t = easedTimeOf(dvui.easing.outCubic, crossfade.hold);
+    try testing.expectApproxEqAbs(crossfade.hold, dvui.easing.outCubic(t), 1e-4);
+    try testing.expectApproxEqAbs(crossfade.hold, easedTimeOf(dvui.easing.linear, crossfade.hold), 1e-4);
+}
+
+/// The app's swap curve — every `transition` unless it asks for another.
+pub const swap_easing = dvui.easing.outCubic;
+
+/// How far past its place a bleeding blur spreads (`TransitionOptions.bleed`), in physical
+/// pixels: about as far as the blur itself reaches.
+pub fn bleedWidth() f32 {
+    return 2 * blurRadius();
+}
+
 /// `kind` as the blur setting allows it: a blur or frost with the blur off is a fade.
 pub fn effectiveKind(kind: Kind) Kind {
     return if (kind != .fade and blurRadius() < 1) .fade else kind;
@@ -290,7 +325,7 @@ pub fn effectiveKind(kind: Kind) Kind {
 /// Draw a captured overlay. `blur` 0 is a sharp blit. Above that, mix the
 /// snapshot with its one Kawase frost so the ramp is a defocus, not a snap.
 pub fn blit(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f32, alpha: f32) void {
-    blitWith(tex, frost, dest, blur, alpha, .lerp);
+    blitWith(tex, frost, dest, null, blur, alpha, .lerp);
 }
 
 /// `blit` for a snapshot that is opaque wherever it covers (it carries its backdrop —
@@ -299,10 +334,15 @@ pub fn blit(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f
 /// snapshots, and it scales *every* pixel of the rect — including a rounded region's corners,
 /// where the snapshot has nothing, which then flashed as square corners at the start of a swap.
 pub fn blitOpaque(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f32, alpha: f32) void {
-    blitWith(tex, frost, dest, blur, alpha, .over);
+    blitWith(tex, frost, dest, null, blur, alpha, .over);
 }
 
-fn blitWith(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f32, alpha: f32, mode: enum { lerp, over }) void {
+const BlitMode = enum { lerp, over };
+
+/// `inner`, when set, is the part of `dest` covered fully; across the margin between them the
+/// snapshot fades out to nothing, so a blur that bleeds past its place feathers into what is
+/// there instead of ending at a hard edge.
+fn blitWith(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, inner: ?dvui.Rect.Physical, blur: f32, alpha: f32, mode: BlitMode) void {
     if (alpha <= 0.001) return;
     if (frost) |f| {
         if (blur > 0.001) f.prepare(tex);
@@ -331,19 +371,21 @@ fn blitWith(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f
     // then add `a * snapshot`. Only immediate rendering can do it — a deferred draw would
     // queue the blend changes out of order — so a floating card's sharp blit takes the
     // plain path below, where alpha 1 over an opaque card is exact anyway.
-    if (mode == .lerp) if (lerpUnder(r, alpha)) |under| {
+    if (mode == .lerp) if (lerpUnder(r, inner, alpha)) |under| {
         defer dvui.textureDestroyLater(under);
         const a = alpha * dvui.currentWindow().alpha;
         const prev_alpha = dvui.alpha(1);
         defer dvui.alphaSet(prev_alpha);
         if (!use_frost) {
-            addOne(tex, r, a);
+            addOne(tex, r, inner, a);
         } else {
-            addOne(frost_tex.?, r, a * mix);
-            addOne(tex, r, a * (1 - mix));
+            addOne(frost_tex.?, r, inner, a * mix);
+            addOne(tex, r, inner, a * (1 - mix));
         }
         return;
     };
+    // Deferred or without blend control: no feathering, the place alone.
+    if (inner) |in| dvui.clipSet(dvui.clipGet().intersect(in));
 
     if (!use_frost) {
         blitOne(tex, r, alpha);
@@ -356,7 +398,7 @@ fn blitWith(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f
 /// The first half of the lerp: `r` of the bound target, copied out and written back scaled by
 /// `1 - alpha`. Null (nothing drawn) when the backend cannot: no target bound, no blend
 /// control, or rendering deferred. The returned copy is the caller's to destroy.
-fn lerpUnder(r: dvui.Rect.Physical, alpha: f32) ?dvui.Texture {
+fn lerpUnder(r: dvui.Rect.Physical, inner: ?dvui.Rect.Physical, alpha: f32) ?dvui.Texture {
     if (!dvui.Backend.support_texture_blend) return null;
     const under = copyFrame(r) orelse return null;
     const cw = dvui.currentWindow();
@@ -368,7 +410,8 @@ fn lerpUnder(r: dvui.Rect.Physical, alpha: f32) ?dvui.Texture {
     const prev_alpha = dvui.alpha(1);
     defer dvui.alphaSet(prev_alpha);
     const keep = 1 - std.math.clamp(alpha * prev_alpha, 0, 1);
-    dvui.renderTexture(under, .{ .r = r, .s = 1 }, .{ .colormod = dvui.Color.white.opacity(keep) }) catch {};
+    // Across a feathered margin the frame is kept more and more, all of it at the outer edge.
+    drawFeathered(under, r, inner, keep, 1);
     return under;
 }
 
@@ -405,12 +448,41 @@ fn copyFrame(r: dvui.Rect.Physical) ?dvui.Texture {
 }
 
 /// `weight * tex` added onto the target. The texture's blend is put back to source-over after.
-fn addOne(tex: dvui.Texture, dest: dvui.Rect.Physical, weight: f32) void {
+fn addOne(tex: dvui.Texture, dest: dvui.Rect.Physical, inner: ?dvui.Rect.Physical, weight: f32) void {
     if (weight <= 0.001) return;
     const cw = dvui.currentWindow();
     cw.backend.textureBlend(tex, .add) catch return;
     defer cw.backend.textureBlend(tex, .over) catch {};
-    dvui.renderTexture(tex, .{ .r = dest, .s = 1 }, .{ .colormod = dvui.Color.white.opacity(weight) }) catch {};
+    drawFeathered(tex, dest, inner, weight, 0);
+}
+
+/// `tex` over `outer`, every channel scaled by `in_w` over `inner` and ramping linearly to
+/// `out_w` at `outer`'s edge. No `inner`: `in_w` over all of `outer`. Immediate rendering only.
+fn drawFeathered(tex: dvui.Texture, outer: dvui.Rect.Physical, inner: ?dvui.Rect.Physical, in_w: f32, out_w: f32) void {
+    const in = inner orelse {
+        dvui.renderTexture(tex, .{ .r = outer, .s = 1 }, .{ .colormod = dvui.Color.white.opacity(in_w) }) catch {};
+        return;
+    };
+    const lifo = dvui.currentWindow().lifo();
+    var b = dvui.Triangles.Builder.init(lifo, 8, 30) catch return;
+    defer b.deinit(lifo);
+    const rects = [2]dvui.Rect.Physical{ in, outer };
+    const weights = [2]f32{ in_w, out_w };
+    // Inner corners 0…3, outer 4…7, each clockwise from the top left.
+    for (rects, weights) |rr, w| {
+        const c: u8 = @intFromFloat(@round(255 * std.math.clamp(w, 0, 1)));
+        const col: dvui.Color.PMA = .{ .r = c, .g = c, .b = c, .a = c };
+        for ([4]dvui.Point.Physical{ rr.topLeft(), rr.topRight(), rr.bottomRight(), rr.bottomLeft() }) |p| {
+            b.appendVertex(.{ .pos = p, .col = col, .uv = .{ (p.x - outer.x) / outer.w, (p.y - outer.y) / outer.h } });
+        }
+    }
+    b.appendTriangles(&.{ 0, 1, 2, 0, 2, 3 });
+    for (0..4) |i| {
+        const j = (i + 1) % 4;
+        const idx = [6]dvui.Vertex.Index{ @intCast(4 + i), @intCast(4 + j), @intCast(j), @intCast(4 + i), @intCast(j), @intCast(i) };
+        b.appendTriangles(&idx);
+    }
+    dvui.renderTriangles(b.build_unowned(), tex) catch {};
 }
 
 /// `top` over `bottom` at mix `t` (1 = only top), covering exactly `alpha`
@@ -476,6 +548,10 @@ pub const TransitionOptions = struct {
     pending: bool = false,
     /// Override the kind's default duration. Null uses `crossfade.durationNs`.
     duration_ns: ?i128 = null,
+    /// Any `dvui.easing` curve, applied to the clock before the blur and fade read it. Out-curves
+    /// front-load the swap: the old view is gone quickly and the new one spends the rest of
+    /// the duration sharpening. Overshooting curves are clamped.
+    easing: *const fn (f32) f32 = swap_easing,
     /// How to draw the *outgoing* screen. Called only on the swap frame, and only when the
     /// backend supports render targets. Ignored when `key` is unchanged or this is the first
     /// frame for the region.
@@ -488,11 +564,10 @@ pub const TransitionOptions = struct {
     /// it, so a view that paints only part of its area (the region's fill is not its own)
     /// photographs as it looks on screen rather than with transparent holes.
     backdrop: ?Backdrop = null,
-    /// More of the screen the snapshots take in beyond `rect`, as it is already drawn this frame
-    /// — a neighbour the change belongs with (the explorer's icon rail), so the blur runs over
-    /// the edge between them rather than stopping at it. Only the frame is copied there; the
-    /// outgoing view still draws within `rect`.
-    reach: ?dvui.Rect.Physical = null,
+    /// Let the blur spread past `rect`'s edge and feather into what is around it, rather than
+    /// stop at it. The snapshots take in a margin of the frame as it stands (`bleedWidth`), the
+    /// views still draw only within `rect`, and the overlay fades out across the margin.
+    bleed: bool = false,
     /// Called after a successful capture, before the incoming screen packs. Use it to clear the
     /// parent's pack state so the capture's expanded child does not make the incoming one trip
     /// `rectFor() got child after expanded child`.
@@ -520,9 +595,9 @@ fn beginBackdropCapture(cf: *CrossFade, rect: dvui.Rect.Physical, backdrop: ?Bac
         if (under) |u| dvui.textureDestroyLater(u);
         return null;
     };
-    // Under the snapshot's own rect, not the caller's clip: a transition that reaches past its
-    // place (`TransitionOptions.reach`) is called from inside that place's clip, and pasting
-    // the frame under it left the reach transparent — the blur then pulled that in, and the
+    // Under the snapshot's own rect, not the caller's clip: a transition that bleeds past its
+    // place (`TransitionOptions.bleed`) is called from inside that place's clip, and pasting
+    // the frame under it left the margin transparent — the blur then pulled that in, and the
     // window showed through as a lighter band.
     const prev_clip = dvui.clipGet();
     dvui.clipSet(pic.r);
@@ -558,7 +633,7 @@ pub const TransitionFrame = struct {
     incoming: ?dvui.Picture = null,
     prev_clip: ?dvui.Rect.Physical = null,
     pending: bool = false,
-    /// The snapshots' rect when it reaches past the caller's clip (`TransitionOptions.reach`):
+    /// The snapshots' rect when it bleeds past the caller's clip (`TransitionOptions.bleed`):
     /// the overlay is drawn over all of it.
     reach: ?dvui.Rect.Physical = null,
 
@@ -600,13 +675,17 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
     const had_prev = state.prev_key != null;
     const key_changed = !had_prev or state.prev_key.? != opts.key;
     const pending = opts.pending or state.pending;
-    const rect = if (opts.reach) |r| opts.rect.unionWith(r) else opts.rect;
+    // A fade has no blur to bleed.
+    const bleeding = opts.bleed and effectiveKind(opts.kind) != .fade;
+    const rect = if (bleeding) opts.rect.outsetAll(bleedWidth()).intersect(dvui.windowRectPixels()) else opts.rect;
 
     if (had_prev and key_changed) {
         const kind = effectiveKind(opts.kind);
         state.cross_fade.kind = kind;
+        state.cross_fade.inner = if (bleeding) opts.rect else null;
         state.cross_fade.opaque_snapshots = false;
         state.cross_fade.duration_ns = opts.duration_ns orelse crossfade.durationNs(kind);
+        state.cross_fade.easing = opts.easing;
         if (opts.draw_previous) |draw_prev| {
             if (beginBackdropCapture(&state.cross_fade, rect, opts.backdrop)) |captured| {
                 var pic = captured;
@@ -629,7 +708,7 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
     var frame: TransitionFrame = .{
         .cross_fade = &state.cross_fade,
         .pending = pending,
-        .reach = if (opts.reach != null) rect else null,
+        .reach = if (bleeding) rect else null,
     };
     const cf = &state.cross_fade;
     if (cf.kind == .blur and cf.texture != null and cf.incoming == null and !cf.have_incoming and !key_changed) {

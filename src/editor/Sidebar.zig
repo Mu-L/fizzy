@@ -16,10 +16,6 @@ pub const Sidebar = @This();
 /// Persisted scroll position for the plugin-icon rail (retained across frames).
 var scroll_info: dvui.ScrollInfo = .{};
 
-/// Where the rail is on screen this frame — drawn before the explorer, which blurs over it when
-/// its view changes.
-pub var rect_screen: dvui.Rect.Physical = .{};
-
 /// Fizzy built-in views pinned to the bottom of the rail (always visible). Everything else —
 /// the plugin-contributed views — scrolls above them in registration (load) order.
 fn isPinned(id: []const u8) bool {
@@ -52,7 +48,6 @@ pub fn draw(_: Sidebar, editor: *Editor, f: *Layout, keywords: []const []const u
         .min_size_content = .{ .w = 40, .h = 100 },
     });
     defer vbox.deinit();
-    rect_screen = vbox.data().borderRectScale().r;
 
     var ret: Action = .none;
 
