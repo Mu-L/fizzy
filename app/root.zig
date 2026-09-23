@@ -101,6 +101,8 @@ pub const single_instance = @import("single_instance/singleton.zig");
 
 pub const store = struct {
     pub const Store = @import("store/PluginStore.zig");
+    /// A plugin's store page as a document — the owner of `store://…` pages.
+    pub const Page = @import("store/PluginPage.zig");
     pub const Manager = @import("store/PluginManager.zig");
     /// Runtime plugin loading: `dlopen` natively; on the web a wasm side module the page links
     /// into its function table (`PluginLoader_web.zig`). Same `LoadedLib` read-shape on both.

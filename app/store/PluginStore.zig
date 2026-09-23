@@ -20,6 +20,7 @@ const store = @import("registry/store.zig");
 // The real loader, not `app.store.Loader`: what this file wants from it are the *manifest
 // probe* helpers, which compile everywhere. Only the `LoadedLib` list — which carries a
 // `DynLib` — has to come from the wasm stub, and that arrives through `PluginManager`.
+const Page = @import("PluginPage.zig");
 const PluginLoader = @import("PluginLoader.zig");
 const PluginManager = @import("PluginManager.zig");
 /// Pretend two installed plugins have store updates waiting, so the update flow (the app's
@@ -412,6 +413,10 @@ pub fn register(manager: PluginManager) !void {
     const fp_hex = try std.fmt.allocPrint(manager.gpa, "0x{x}", .{dylib.abi_fingerprint});
     defer manager.gpa.free(fp_hex);
     catalog = try store.Catalog.init(manager.gpa, dvui.io, url, fp_hex);
+    // The owner of `store://…` pages, and the mount they live on. Registered before the store's
+    // own surface so a layout restored with a page open finds its owner already there.
+    try Page.register(host, .{ .header = drawPageHeader, .source = pageSource });
+
     try host.registerSurface(.{
         .id = view_id,
         .icon = .{ .tvg = dvui.entypo.shop },
@@ -1457,6 +1462,25 @@ fn toggleSelect(entry: StoreEntry) void {
 /// makes no locking decisions of its own.
 fn selectedEntry(snapshot: ?store.Catalog.Snapshot) ?StoreEntry {
     return entryFor(Readme.selectedId() orelse return null, snapshot);
+}
+
+/// A store page's header, drawn into the page document (`PluginPage`). False when the store has
+/// never heard of this id — a page can outlive the plugin it is about.
+fn drawPageHeader(id: []const u8) bool {
+    const snap = if (catalog) |*c| c.acquire() else null;
+    defer if (catalog) |*c| c.release();
+    const entry = entryFor(id, snap) orelse return false;
+    drawDetailHeader(entry);
+    return true;
+}
+
+/// Where that plugin's README lives, for the page to fetch.
+fn pageSource(id: []const u8) ?Page.Source {
+    const snap = if (catalog) |*c| c.acquire() else null;
+    defer if (catalog) |*c| c.release();
+    const entry = entryFor(id, snap) orelse return null;
+    const src = readmeSource(entry) orelse return null;
+    return .{ .repo = src.repo, .subpath = src.subpath };
 }
 
 /// The `StoreEntry` for one id, in the same priority order the store list builds its entries in
@@ -2648,6 +2672,28 @@ fn drawSelectionToggles(
         .id_extra = hashId(entry.id),
     });
     defer panel.deinit();
+
+    // The page, first: it is what the card is *about*, and the one row that is the same on every
+    // card in both panes. It opens as a temporary tab — clicking down a list of plugins reads
+    // them one after another in place, and Keep is how a page stops giving up its tab.
+    {
+        var r = core.widgets.Popover.row(@src(), .{});
+        dvui.labelNoFmt(@src(), "Readme", .{}, .{ .gravity_y = 0.5, .margin = .all(0), .padding = .all(0) });
+        r.deinit();
+        if (r.clicked) {
+            // Grouping 0: the pane the user is in. The workbench's own default
+            // (`open_workspace_grouping`), which is what "open this where I am" means — the store
+            // has no business choosing a pane, and "open to the side" is the tab strip's job.
+            Page.open(app.host, entry.id, entry.title, 0) catch |err|
+                reportError("could not open the page for '{s}': {s}", .{ entry.id, @errorName(err) });
+        }
+    }
+    if (Page.isOpen(entry.id) and !Page.isKept(entry.id)) {
+        var r = core.widgets.Popover.row(@src(), .{});
+        dvui.labelNoFmt(@src(), "Keep Page Open", .{}, .{ .gravity_y = 0.5, .margin = .all(0), .padding = .all(0) });
+        r.deinit();
+        if (r.clicked) Page.keep(entry.id);
+    }
 
     drawToggleControls(entry, .compact);
     // Whichever controls this card's pane owns — the installed pane's full set, the store pane's
