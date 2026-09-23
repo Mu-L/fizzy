@@ -49,6 +49,9 @@ activated: bool = false,
 show_active: bool = false,
 mouse_over: bool = false,
 hover_t: f32 = 0,
+/// The pointer is over this row, as `pointerOver` answers it — stable across frames that carry
+/// no pointer event, unlike `highlight`. Set in `drawBackground`, read by `style`.
+over: bool = false,
 
 /// It's expected to call this when `self` is `undefined`
 pub fn init(self: *MenuItem, src: std.builtin.SourceLocation, init_opts: InitOptions, opts: Options) void {
@@ -76,7 +79,8 @@ pub fn init(self: *MenuItem, src: std.builtin.SourceLocation, init_opts: InitOpt
 }
 
 pub fn drawBackground(self: *MenuItem) void {
-    self.hover_t = dvui.hoverFade(self.data().id, self.highlight);
+    self.over = self.pointerOver();
+    self.hover_t = dvui.hoverFade(self.data().id, self.over);
 
     var focused: bool = self.data().id == dvui.focusedWidgetId();
 
@@ -118,12 +122,34 @@ pub fn drawBackground(self: *MenuItem) void {
         //
         // `hover_t` is the only input, except that the title of an open submenu holds at full
         // strength: it is the one row that should stay lit while the pointer is away from it.
-        const t: f32 = if (self.highlight) 1.0 else self.hover_t;
+        //
+        // That hold used to be `self.highlight` — true on any hover, but only on frames that
+        // delivered this row a pointer event. The fade animates by scheduling frames, and those
+        // frames carry no pointer event, so each one read "not hovered", started fading out, and
+        // the next mouse motion snapped it back to full: moving inside a row made it pulse.
+        const open_submenu = self.init_opts.submenu and focused and menu().?.submenus_activated;
+        const t: f32 = if (open_submenu) 1.0 else self.hover_t;
         if (t > 0) {
             const hover = self.data().options.color(.fill_hover).toColor();
             rs.r.fill(cr, .{ .color = .{ .color = hover.opacity(t) }, .fade = 1.0 });
         }
     }
+}
+
+/// Whether the pointer is over this row, holding its answer across frames that bring no news.
+///
+/// dvui only adds a `.position` event on frames that carry real input, and `highlight` is
+/// derived from that event — so on a frame scheduled by an animation (the hover fade's own) it
+/// reads false while the pointer has not moved at all. Answered from the event when there is one
+/// this frame, and from the last answer when there is not.
+fn pointerOver(self: *MenuItem) bool {
+    const id = self.data().id;
+    const moved = for (dvui.events()) |*e| {
+        if (e.evt == .mouse and e.evt.mouse.action == .position) break true;
+    } else false;
+    if (!moved) return dvui.dataGet(null, id, "_pointer_over", bool) orelse false;
+    dvui.dataSet(null, id, "_pointer_over", self.highlight);
+    return self.highlight;
 }
 
 /// Returns an `Options` struct with color/style overrides for the hover and press state
@@ -134,7 +160,9 @@ pub fn style(self: *MenuItem) Options {
         opts.style = .highlight;
         const active_fill = opts.color_fill_hover orelse opts.color(.fill);
         const active_text = opts.color_text_hover orelse opts.color(.text_hover);
-        if (self.highlight) {
+        // `over`, not `highlight`: the same flag flickering between frames would swap the text
+        // between its lerped and full colours as the pointer moved inside the row.
+        if (self.over) {
             opts.color_fill = rest_fill.lerp(active_fill, self.hover_t);
             opts.color_text = active_text;
         } else {
