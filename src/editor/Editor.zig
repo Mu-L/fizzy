@@ -2509,6 +2509,27 @@ fn drawDocSurface(ctx: ?*anyopaque) anyerror!dvui.App.Result {
     // box id is what a plugin keys its per-pane state on.
     doc.owner.bindDocumentToPane(doc, canvas.data().id, ds, false);
     _ = try doc.owner.drawDocument(doc);
+
+    // A menu inside the document only when its owner names one. The context is created *after*
+    // the document drew, and only for an owner that asked, because a right-click belongs to
+    // whatever drew what is under it: pixi's dropper would stop working the day this ran for a
+    // plugin that said nothing.
+    if (doc.owner.documentContextMenu(doc)) |menu_id| {
+        var right_click = dvui.context(@src(), .{ .rect = canvas.data().borderRectScale().r }, .{ .id_extra = @truncate(ds.doc_id) });
+        defer right_click.deinit();
+        if (right_click.activePoint()) |point| {
+            var menu = fizzy.core.widgets.contextMenu(@src(), point, .{});
+            defer menu.deinit();
+            editor.app.host.drawMenuSections(.{
+                .menu_id = menu_id,
+                .subject = .{ .document = .{
+                    .id = doc.id,
+                    .path = doc.owner.documentPath(doc),
+                    .grouping = doc.owner.documentGrouping(doc),
+                } },
+            }, false);
+        }
+    }
     return .ok;
 }
 

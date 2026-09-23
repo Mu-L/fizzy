@@ -60,6 +60,7 @@ const vtable: sdk.Plugin.VTable = .{
     // rendering + lifecycle
     .tickOpenDocuments = tickOpenDocuments,
     .drawDocument = drawDocument,
+    .documentContextMenu = documentContextMenu,
     .infobarEntries = infobarEntries,
     .closeDocument = closeDocument,
     .reloadDocument = reloadDocument,
@@ -128,6 +129,16 @@ pub fn register(host: *sdk.Host) !void {
     // "Format Document" is only meaningful when a language plugin claims the active
     // document's extension (today, `zig` via zls) — inject it into fizzy's existing
     // "Edit" menu (in-app + native) rather than showing a permanently-greyed generic verb.
+    // The editor's own right-click menu (`documentContextMenu` below names it). Filled through
+    // the same contribution point anyone else would use, so a language plugin can add "Go to
+    // Definition" beside Copy without the text plugin knowing it exists.
+    try host.registerMenuSection(.{
+        .id = "text.menu.document.clipboard",
+        .parent_menu_id = document_menu_id,
+        .owner = &plugin,
+        .draw = drawDocumentMenu,
+    });
+
     try host.registerMenuSection(.{
         .id = "text.menu.edit_section",
         .parent_menu_id = "fizzy.menu.edit",
@@ -430,6 +441,28 @@ fn formatDocument(doc: *Document) void {
     doc.sel_start = restore_cursor;
     doc.sel_end = restore_cursor;
     doc.pending_sel = .collapsed(restore_cursor);
+}
+
+/// The id of the editor's right-click menu. Other plugins contribute to it by this name.
+pub const document_menu_id = "text.menu.document";
+
+/// A text document has a right-click menu; see `Plugin.VTable.documentContextMenu` for why that
+/// is the owner's call and not fizzy's.
+fn documentContextMenu(_: *anyopaque, _: sdk.DocHandle) ?[]const u8 {
+    return document_menu_id;
+}
+
+/// Copy and Paste — as *commands*, `fizzy.copy`/`fizzy.paste`, the same ones ⌘C and ⌘V run. While
+/// this menu is open the active document is still this one, which is exactly what those route
+/// to, so the row and the keybind can never disagree about what gets copied. `drawMenuItem`
+/// shows the chord beside each and greys a row its command says is disabled.
+fn drawDocumentMenu(_: ?*anyopaque) anyerror!void {
+    const host = sdk.host();
+    inline for (.{ .{ "Copy", "fizzy.copy" }, .{ "Paste", "fizzy.paste" } }) |row| {
+        if (host.drawMenuItem(row[0], row[1])) {
+            host.runCommand(row[1]) catch |err| dvui.log.err("text: {s} failed: {t}", .{ row[1], err });
+        }
+    }
 }
 
 /// In-app "Edit" menu section (see `Host.registerMenuSection`) — always drawn; `Host.drawMenuItem`

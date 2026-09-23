@@ -181,6 +181,7 @@ fn drawFilter(tree: *core.widgets.TreeWidget) ![]const u8 {
         .background = false,
     });
     const filter_text = filter_text_edit.getText();
+    _ = core.widgets.textEntryMenu(filter_text_edit);
     filter_text_edit.deinit();
     filter_hbox.deinit();
 
@@ -353,6 +354,12 @@ fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u
 
         fw2.close();
     }
+
+    // What plugins add to the project's own menu — the root row, and blank space below it.
+    runtime.host().drawMenuSections(.{
+        .menu_id = "fizzy.menu.filetree.root",
+        .subject = .{ .path = project_path },
+    }, true);
 }
 
 fn pointerReleaseInRectWithoutSelectionModifier(r: dvui.Rect.Physical) bool {
@@ -458,6 +465,7 @@ pub fn editableLabel(id_extra: usize, label: []const u8, color: dvui.Color, kind
             .font = font,
         });
         defer te.deinit();
+        _ = core.widgets.textEntryMenu(te);
 
         // Text edit should handle any click events, so if we find one unhandled after the text edit
         // we can assume the mouse was clicked anywhere else and that the edit needs to be confirmed.
@@ -1009,6 +1017,12 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                                 }
                             }
                         }
+
+                        // What plugins add to a file's or a folder's menu, about this row.
+                        runtime.host().drawMenuSections(.{
+                            .menu_id = if (entry.kind == .directory) "fizzy.menu.filetree.folder" else "fizzy.menu.filetree.file",
+                            .subject = .{ .path = abs_path },
+                        }, true);
                     }
                 }
 

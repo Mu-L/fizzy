@@ -198,6 +198,8 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
 
         if (reorderable.floating()) {
             runtime.workbench().dragging_surface = surface.id;
+            // Dragging a tab is arranging it, and a tab someone is placing is not on loan.
+            runtime.host().setDocumentPreview(doc.id, false);
             hbox.data().options.color_fill = .{ .color = dvui.themeGet().color(.control, .fill) };
         }
         hbox.drawBackground();
@@ -347,6 +349,10 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
                 dvui.themeGet().color(.window, .text),
             );
         }
+
+        // The tab's own menu. Right-click only, so it never competes with the press above,
+        // which is the left button's (select, then drag).
+        if (drawTabMenu(tabs, i, doc, self.grouping, hbox.data().borderRectScale().r)) break;
 
         loop: for (dvui.events()) |*e| {
             if (!hbox.matchEvent(e)) continue;
@@ -853,6 +859,72 @@ pub fn drawBubble(rect: dvui.Rect, rs: dvui.RectScale, color: [4]u8, _: usize) !
 }
 
 // This should never be able to return more than one folder
+/// `fizzy.menu.tab`: Keep Open for a preview, the close family, then whatever plugins add to
+/// that menu. True when it closed something, so the caller stops walking a tab list that just
+/// changed underneath it — the close button breaks out of the loop for the same reason.
+fn drawTabMenu(tabs: []const *const sdk.Surface, index: usize, doc: sdk.DocHandle, grouping: u64, tab_rect: dvui.Rect.Physical) bool {
+    var ctx = dvui.context(@src(), .{ .rect = tab_rect }, .{ .id_extra = index });
+    defer ctx.deinit();
+    const point = ctx.activePoint() orelse return false;
+
+    const host = runtime.host();
+    var menu = core.widgets.contextMenu(@src(), point, .{});
+    defer menu.deinit();
+
+    const Close = enum { none, this, others, right, left };
+    var close: Close = .none;
+
+    // Only while it is one: a kept tab has nothing to keep.
+    if (host.documentIsPreview(doc.id)) {
+        if (core.widgets.menuItemLabel(@src(), "Keep Open", .{}, .{ .expand = .horizontal }) != null) {
+            host.setDocumentPreview(doc.id, false);
+            menu.close();
+        }
+        _ = dvui.separator(@src(), .{ .expand = .horizontal });
+    }
+    if (core.widgets.menuItemLabel(@src(), "Close", .{}, .{ .expand = .horizontal }) != null) close = .this;
+    if (tabs.len > 1) {
+        if (core.widgets.menuItemLabel(@src(), "Close Others", .{}, .{ .expand = .horizontal }) != null) close = .others;
+    }
+    if (index + 1 < tabs.len) {
+        if (core.widgets.menuItemLabel(@src(), "Close to the Right", .{}, .{ .expand = .horizontal }) != null) close = .right;
+    }
+    if (index > 0) {
+        if (core.widgets.menuItemLabel(@src(), "Close to the Left", .{}, .{ .expand = .horizontal }) != null) close = .left;
+    }
+
+    // What plugins add. The subject is the document, with its path and pane, so a row that works
+    // on files ("Copy Path", "Reveal in Explorer") needs nothing else.
+    host.drawMenuSections(.{
+        .menu_id = "fizzy.menu.tab",
+        .subject = .{ .document = .{ .id = doc.id, .path = doc.owner.documentPath(doc), .grouping = grouping } },
+    }, true);
+
+    if (close == .none) return false;
+    menu.close();
+
+    // Collected before any close runs: closing edits the list these indices point into.
+    var ids: std.ArrayListUnmanaged(u64) = .empty;
+    const arena = host.arena();
+    for (tabs, 0..) |surface, i| {
+        const other = documentOf(surface) orelse continue;
+        const wanted = switch (close) {
+            .none => false,
+            .this => i == index,
+            .others => i != index,
+            .right => i > index,
+            .left => i < index,
+        };
+        if (wanted) ids.append(arena, other.id) catch return false;
+    }
+    for (ids.items) |id| {
+        // Each one goes through the ordinary close, so a dirty document still asks about saving
+        // rather than being dropped because it happened to sit to the right.
+        host.closeDocById(id) catch |err| dvui.log.err("close tab {d}: {t}", .{ id, err });
+    }
+    return true;
+}
+
 pub fn setProjectFolderCallback(folder: ?[][:0]const u8) void {
     if (folder) |f| {
         runtime.host().setProjectFolder(f[0]) catch {

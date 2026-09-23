@@ -1852,6 +1852,7 @@ fn draw(_: ?*anyopaque) anyerror!dvui.App.Result {
         .background = false,
     });
     const filter_text = filter_edit.getText();
+    _ = core.widgets.textEntryMenu(filter_edit);
     filter_edit.deinit();
     filter_hbox.deinit();
     var query = fuzzy.Query.init(filter_text);

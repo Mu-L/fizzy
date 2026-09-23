@@ -527,13 +527,16 @@ pub fn menuContext(self: *Host) ?EditorAPI.MenuContext {
 /// "Reveal in Finder" and fizzy's "Rename" sit in one menu instead of two competing ones.
 ///
 /// A separator goes before the first contributed row and nowhere else: one line between what
-/// the menu's owner put there and what others added, not one per contributor.
-pub fn drawMenuSections(self: *Host, ctx: EditorAPI.MenuContext) void {
+/// the menu's owner put there and what others added, not one per contributor. `after_rows =
+/// false` for a menu that is *only* contributions — a document's, which its owner fills through
+/// the same sections everyone else uses — where a line above the first row would be a line
+/// under nothing.
+pub fn drawMenuSections(self: *Host, ctx: EditorAPI.MenuContext, after_rows: bool) void {
     const prev = self.menu_context;
     self.menu_context = ctx;
     defer self.menu_context = prev;
 
-    var drew_separator = false;
+    var drew_separator = !after_rows;
     for (self.menu_sections.items) |*section| {
         if (section.hidden) continue;
         if (!std.mem.eql(u8, section.parent_menu_id, ctx.menu_id)) continue;
