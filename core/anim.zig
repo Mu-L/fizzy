@@ -520,6 +520,13 @@ fn beginBackdropCapture(cf: *CrossFade, rect: dvui.Rect.Physical, backdrop: ?Bac
         if (under) |u| dvui.textureDestroyLater(u);
         return null;
     };
+    // Under the snapshot's own rect, not the caller's clip: a transition that reaches past its
+    // place (`TransitionOptions.reach`) is called from inside that place's clip, and pasting
+    // the frame under it left the reach transparent — the blur then pulled that in, and the
+    // window showed through as a lighter band.
+    const prev_clip = dvui.clipGet();
+    dvui.clipSet(pic.r);
+    defer dvui.clipSet(prev_clip);
     if (under) |u| {
         defer dvui.textureDestroyLater(u);
         const prev_alpha = dvui.alpha(1);

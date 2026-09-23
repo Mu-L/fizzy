@@ -451,10 +451,13 @@ fn runKawase(self: *BlurBackdrop, source: Texture, restore_target: bool, first: 
             const add = tapsBegin(cur, step_target);
             defer tapsEnd(cur, add);
             for (taps, 0..) |tap, i| {
-                const a: f32 = if (add) 0.25 else 1.0 / @as(f32, @floatFromInt(i + 1));
+                const mod = if (add)
+                    tapWeight(@floatFromInt(i), 1, 4)
+                else
+                    dvui.Color.white.opacity(1.0 / @as(f32, @floatFromInt(i + 1)));
                 dvui.renderTexture(cur, .{ .r = dest_r }, .{
                     .uv = .{ .x = tap.x, .y = tap.y, .w = 1, .h = 1 },
-                    .colormod = dvui.Color.white.opacity(a),
+                    .colormod = mod,
                 }) catch {};
                 if (add and i == 0) _ = tapsBlend(cur, .add);
             }
@@ -510,11 +513,14 @@ fn runKawase(self: *BlurBackdrop, source: Texture, restore_target: bool, first: 
             defer tapsEnd(cur, add);
             var cum_w: f32 = 0;
             for (taps, 0..) |tap, i| {
+                const mod = if (add)
+                    tapWeight(cum_w, tap.w, 12)
+                else
+                    dvui.Color.white.opacity(tap.w / (cum_w + tap.w));
                 cum_w += tap.w;
-                const a = if (add) tap.w / 12.0 else tap.w / cum_w;
                 dvui.renderTexture(cur, .{ .r = dest_r }, .{
                     .uv = .{ .x = tap.x, .y = tap.y, .w = 1, .h = 1 },
-                    .colormod = dvui.Color.white.opacity(a),
+                    .colormod = mod,
                 }) catch {};
                 if (add and i == 0) _ = tapsBlend(cur, .add);
             }
@@ -753,6 +759,30 @@ pub fn releaseTexture(ptr: *anyopaque) void {
 /// the last capture, and a copy over it is what a clear plus a sum would give, without the
 /// clear's target switch and flush. The caller switches the source to `.add` after its first
 /// draw. Without blend control the level is cleared here and the taps composite as before.
+/// An additive tap's weight `w` (of `total`, with `before` handed out already) as a colormod.
+/// The alpha is a byte, and truncating each tap's share on its own lost the remainder every
+/// pass — 0.25 is 63/255, four of them 252/255 — so ~12 passes of a frost came out ~13% less
+/// opaque and darker than what they blurred: a see-through window showed through the blur.
+/// Cumulative rounding hands out whole bytes that always sum to exactly 255.
+fn tapWeight(before: f32, w: f32, total: f32) dvui.Color {
+    const lo: u8 = @intFromFloat(@round(255 * before / total));
+    const hi: u8 = @intFromFloat(@round(255 * (before + w) / total));
+    return .{ .r = 255, .g = 255, .b = 255, .a = hi - lo };
+}
+
+test "additive tap weights sum to exactly one" {
+    var sum: u32 = 0;
+    for (0..4) |i| sum += tapWeight(@floatFromInt(i), 1, 4).a;
+    try std.testing.expectEqual(@as(u32, 255), sum);
+    sum = 0;
+    var before: f32 = 0;
+    for ([_]f32{ 1, 2, 1, 2, 1, 2, 1, 2 }) |w| {
+        sum += tapWeight(before, w, 12).a;
+        before += w;
+    }
+    try std.testing.expectEqual(@as(u32, 255), sum);
+}
+
 fn tapsBegin(cur: Texture, into: Texture.Target) bool {
     if (tapsBlend(cur, .copy)) return true;
     into.clear();
