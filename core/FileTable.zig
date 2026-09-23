@@ -269,6 +269,16 @@ pub fn unmount(self: *FileTable, prefix: []const u8) void {
     }
 }
 
+/// Whether `path` lives on a filesystem reached over a network. False for the disk and for
+/// anything in memory — see `vfs.Fs.remote`.
+pub fn isRemote(self: *const FileTable, path: []const u8) bool {
+    for (self.mounts.items) |*m| {
+        if (!std.mem.startsWith(u8, path, m.prefix)) continue;
+        return m.fs.remote;
+    }
+    return false;
+}
+
 pub fn mountList(self: *const FileTable) []const Mount {
     return self.mounts.items;
 }

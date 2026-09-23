@@ -496,8 +496,31 @@ pub fn revealPosition(self: *Host, path: []const u8, line: u32, character: u32, 
     return if (self.fizzy_api) |a| a.revealPosition(path, line, character, open_side) else false;
 }
 
-pub fn openFilePath(self: *Host, path: []const u8, grouping: u64) !bool {
-    return if (self.fizzy_api) |a| try a.openFilePath(path, grouping) else false;
+/// Open a file — see `EditorAPI.OpenOptions`. Returns true when a new load started.
+pub fn openFile(self: *Host, opts: EditorAPI.OpenOptions) !bool {
+    return if (self.fizzy_api) |a| try a.openFile(opts) else false;
+}
+
+/// Whether this open document is a preview tab (italic, replaced by the next one).
+pub fn documentIsPreview(self: *Host, doc_id: u64) bool {
+    return if (self.fizzy_api) |a| a.documentIsPreview(doc_id) else false;
+}
+
+/// Keep a preview tab, or make a kept one a preview again.
+pub fn setDocumentPreview(self: *Host, doc_id: u64, preview: bool) void {
+    if (self.fizzy_api) |a| a.setDocumentPreview(doc_id, preview);
+}
+
+/// What the context menu currently being drawn is about — see `EditorAPI.MenuContext`. Null
+/// outside a context-menu draw, which is also what a plugin gets when the host predates this.
+pub fn menuContext(self: *Host) ?EditorAPI.MenuContext {
+    return if (self.fizzy_api) |a| a.menuContext() else null;
+}
+
+/// Whether `path` is reached over a network. Ask before crawling: a window that suits a disk
+/// is a spent API quota on a cloud mount.
+pub fn isRemotePath(self: *Host, path: []const u8) bool {
+    return if (self.fizzy_api) |a| a.isRemotePath(path) else false;
 }
 
 pub fn openOrFocusFileAtGrouping(self: *Host, path: []const u8, grouping: u64) !?usize {

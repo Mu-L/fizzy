@@ -907,7 +907,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                                     break :blk &[_][]const u8{};
                                 };
                                 for (to_open) |p| {
-                                    _ = runtime.host().openFilePath(p, runtime.workbench().currentGroupingID()) catch |e| {
+                                    _ = runtime.host().openFile(.{ .path = p, .grouping = runtime.workbench().currentGroupingID() }) catch |e| {
                                         dvui.log.err("Failed to open file: {any} ({s})", .{ e, p });
                                     };
                                 }
@@ -933,7 +933,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                                             runtime.workbench().newGroupingID();
                                         have_grouping = true;
                                     }
-                                    _ = runtime.host().openFilePath(p, side_grouping) catch {
+                                    _ = runtime.host().openFile(.{ .path = p, .grouping = side_grouping }) catch {
                                         dvui.log.err("Failed to open file: {s}", .{p});
                                     };
                                 }
@@ -1083,7 +1083,11 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                             const mode = detectClickMode(branch.button.data().borderRectScale().r);
                             applyFileClick(inner_id_extra.*, abs_path, mode);
                             if (mode == .replace and openablePath(abs_path)) {
-                                _ = runtime.host().openFilePath(abs_path, runtime.workbench().currentGroupingID()) catch |err| {
+                                _ = runtime.host().openFile(.{
+                                    .path = abs_path,
+                                    .grouping = runtime.workbench().currentGroupingID(),
+                                    .mode = .preview,
+                                }) catch |err| {
                                     dvui.log.err("{any}: {s}", .{ err, abs_path });
                                 };
                             }

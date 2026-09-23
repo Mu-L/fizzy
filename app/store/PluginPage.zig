@@ -187,7 +187,7 @@ pub fn open(host: *sdk.Host, id: []const u8, title: []const u8, grouping: u64) !
 
     const path = try std.fmt.allocPrint(gpa, "{s}{s}", .{ mount_prefix, file });
     defer gpa.free(path);
-    _ = try host.openFilePath(path, grouping);
+    _ = try host.openFile(.{ .path = path, .grouping = grouping, .mode = .preview });
 
     // After the open, not before: a failed open should not have cost the user the page they
     // were reading. The close is a no-op for a page the user kept.
@@ -198,7 +198,7 @@ pub fn open(host: *sdk.Host, id: []const u8, title: []const u8, grouping: u64) !
 
 /// Bring an already-open page to the front.
 fn focus(host: *sdk.Host, doc: Document) !void {
-    _ = try host.openFilePath(doc.path, doc.grouping);
+    _ = try host.openFile(.{ .path = doc.path, .grouping = doc.grouping });
 }
 
 /// A title as a filename: a page is addressed by its path, and a path with a separator in it is

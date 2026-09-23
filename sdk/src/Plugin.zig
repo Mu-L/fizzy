@@ -207,6 +207,15 @@ pub const VTable = struct {
     // lands in the same place. Only per-document rendering routes through the vtable below.
     /// Draw an open document (center/workspace region), dispatched via `DocHandle.owner`.
     drawDocument: ?*const fn (state: *anyopaque, doc: DocHandle) anyerror!void = null,
+
+    /// The context menu to open on a right-click inside this document, or null for none.
+    ///
+    /// Null is the default, and the default is *no menu*: a right-click belongs to whoever
+    /// drew what is under it. Pixi uses it for the colour dropper, and a menu appearing over
+    /// the canvas would be a bug rather than a feature. A plugin that wants one — the text
+    /// editor, with cut/copy/paste — returns its own menu id and registers sections into it
+    /// with `Host.registerMenuSection`, the same call every other menu is extended through.
+    documentContextMenu: ?*const fn (state: *anyopaque, doc: DocHandle) ?[]const u8 = null,
     /// Infobar chips for this frame. Fizzy draws each as icon + text after its own items
     /// (logo, project folder) — do not draw into the bar. Return a slice that stays valid
     /// until the next call (plugin scratch or `host.arena()`). Empty / absent = nothing
@@ -565,6 +574,12 @@ pub fn canRedo(self: Plugin, doc: DocHandle) bool {
 
 /// Draw an open document into the current dvui parent (the workbench sets up the
 /// container, then routes here). Returns whether the plugin drew anything.
+/// The menu id for a right-click inside `doc`, or null when this plugin keeps its right-click.
+pub fn documentContextMenu(self: Plugin, doc: DocHandle) ?[]const u8 {
+    const f = self.vtable.documentContextMenu orelse return null;
+    return f(self.state, doc);
+}
+
 pub fn drawDocument(self: Plugin, doc: DocHandle) !bool {
     if (self.vtable.drawDocument) |f| {
         try f(self.state, doc);

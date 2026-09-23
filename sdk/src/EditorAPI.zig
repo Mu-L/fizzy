@@ -18,6 +18,41 @@ const EditorAPI = @This();
 /// `DialogFileFilter` (which mirrors `SDL_DialogFileFilter`), so fizzy forwards a slice
 /// of these straight to the backend without a copy. `pattern` is a `;`-separated extension
 /// list, e.g. `"png;jpg;jpeg"`.
+/// How an open should land in the tab strip.
+pub const OpenMode = enum(u8) {
+    /// Keep it: an ordinary tab, there until closed.
+    keep,
+    /// A preview: shown in italic, replaced by the next preview rather than accumulating, and
+    /// promoted to a kept tab by editing it, double-clicking it, or asking on its tab menu.
+    /// What a single click in a file tree, or a click through a list of store cards, should do.
+    preview,
+};
+
+/// What to open, and how. An options struct rather than a pair of arguments because the answer
+/// to "where does it land" has grown twice already — once for panes (`grouping`), once for
+/// preview — and each time it was a parameter, the callers that did not know about it silently
+/// did the wrong thing (see `setDocumentGroupingOnBuffer`, which exists because of exactly that).
+pub const OpenOptions = struct {
+    path: []const u8,
+    /// The pane. 0 is the one the user is in.
+    grouping: u64 = 0,
+    mode: OpenMode = .keep,
+};
+
+/// What a context menu is about, for whoever is drawing rows into it. Valid only during that
+/// draw: a plugin asks the host while its `registerMenuSection` callback runs, and the answer
+/// is whichever tab, file row or document the press landed on.
+pub const MenuContext = struct {
+    /// The menu being drawn, e.g. `"fizzy.menu.tab"`.
+    menu_id: []const u8,
+    /// The path it was opened on; empty when the menu is not about one.
+    path: []const u8 = "",
+    /// The document it was opened on; 0 when it is not about one.
+    doc_id: u64 = 0,
+    /// The pane, for a menu opened on a tab.
+    grouping: u64 = 0,
+};
+
 pub const SaveDialogFilter = extern struct {
     name: [*:0]const u8,
     pattern: [*:0]const u8,
@@ -115,8 +150,20 @@ pub const VTable = struct {
     explorerViewportWidth: *const fn (ctx: *anyopaque) f32,
     /// Lookup an open document by absolute path.
     docFromPath: *const fn (ctx: *anyopaque, path: []const u8) ?DocHandle,
-    /// Open `path` in `grouping` (async load when needed). Returns true when a new load started.
-    openFilePath: *const fn (ctx: *anyopaque, path: []const u8, grouping: u64) anyerror!bool,
+    /// Open a file — see `OpenOptions`. Returns true when a new load started.
+    openFile: *const fn (ctx: *anyopaque, opts: OpenOptions) anyerror!bool,
+    /// Whether this open document is a preview: shown in italic and replaced by the next
+    /// preview rather than kept.
+    documentIsPreview: *const fn (ctx: *anyopaque, doc_id: u64) bool,
+    /// Keep a preview (or make a kept document one again). Editing keeps it on its own; this is
+    /// the explicit answer — "Keep Open" on a tab.
+    setDocumentPreview: *const fn (ctx: *anyopaque, doc_id: u64, preview: bool) void,
+    /// What the context menu being drawn is about, or null outside one — see `MenuContext`.
+    menuContext: *const fn (ctx: *anyopaque) ?MenuContext,
+    /// Whether `path` is reached over a network (a cloud mount), rather than from a disk or
+    /// memory. A crawler asks before deciding how hard to pull: sixteen parallel listings is a
+    /// pool of reads on a disk and a spent API quota on a drive.
+    isRemotePath: *const fn (ctx: *anyopaque, path: []const u8) bool,
     /// Focus an open doc or queue load; returns index when already open, null when loading.
     openOrFocusFileAtGrouping: *const fn (ctx: *anyopaque, path: []const u8, grouping: u64) anyerror!?usize,
     /// Ensure `path` is open and move the caret to `line`/`character` (0-based; `character` a
@@ -418,8 +465,24 @@ pub fn docFromPath(self: EditorAPI, path: []const u8) ?DocHandle {
     return self.vtable.docFromPath(self.ctx, path);
 }
 
-pub fn openFilePath(self: EditorAPI, path: []const u8, grouping: u64) !bool {
-    return self.vtable.openFilePath(self.ctx, path, grouping);
+pub fn openFile(self: EditorAPI, opts: OpenOptions) !bool {
+    return self.vtable.openFile(self.ctx, opts);
+}
+
+pub fn documentIsPreview(self: EditorAPI, doc_id: u64) bool {
+    return self.vtable.documentIsPreview(self.ctx, doc_id);
+}
+
+pub fn setDocumentPreview(self: EditorAPI, doc_id: u64, preview: bool) void {
+    self.vtable.setDocumentPreview(self.ctx, doc_id, preview);
+}
+
+pub fn menuContext(self: EditorAPI) ?MenuContext {
+    return self.vtable.menuContext(self.ctx);
+}
+
+pub fn isRemotePath(self: EditorAPI, path: []const u8) bool {
+    return self.vtable.isRemotePath(self.ctx, path);
 }
 
 pub fn openOrFocusFileAtGrouping(self: EditorAPI, path: []const u8, grouping: u64) !?usize {

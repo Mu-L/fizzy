@@ -548,7 +548,7 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
                 const pane = wb.pane(grouping) catch continue;
                 pane.addTab(id, true);
             } else {
-                _ = runtime.host().openFilePath(path, grouping) catch {};
+                _ = runtime.host().openFile(.{ .path = path, .grouping = grouping }) catch {};
             }
         }
     }
@@ -857,7 +857,7 @@ pub fn setProjectFolderCallback(folder: ?[][:0]const u8) void {
 pub fn openFilesCallback(files: ?[][:0]const u8) void {
     if (files) |f| {
         for (f) |file| {
-            _ = runtime.host().openFilePath(file, runtime.workbench().open_workspace_grouping) catch {
+            _ = runtime.host().openFile(.{ .path = file, .grouping = runtime.workbench().open_workspace_grouping }) catch {
                 dvui.log.err("Failed to open file: {s}", .{file});
             };
         }

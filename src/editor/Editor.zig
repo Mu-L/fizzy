@@ -96,6 +96,12 @@ app: App,
 /// File-management workbench (per-branch explorer decorations, …)
 workbench: Workbench,
 
+/// Open documents that are *previews*: shown in italic and replaced by the next preview in
+/// their pane rather than kept (`EditorAPI.OpenMode`). A set of ids rather than a flag on the
+/// document, because a document is the owning plugin's and this is the app's opinion about a
+/// tab. Entries are dropped when the document closes.
+preview_docs: std.AutoArrayHashMapUnmanaged(u64, void) = .empty,
+
 /// Which default keymap fizzy starts from.
 keybind_profile: Keybinds.Profile = .vscode,
 
@@ -1998,7 +2004,11 @@ const fizzy_api_vtable: sdk.EditorAPI.VTable = .{
     .allocDocId = fizzyAllocDocId,
     .explorerViewportWidth = fizzyExplorerViewportWidth,
     .docFromPath = fizzyDocFromPath,
-    .openFilePath = fizzyOpenFilePath,
+    .openFile = fizzyOpenFile,
+    .documentIsPreview = fizzyDocumentIsPreview,
+    .setDocumentPreview = fizzySetDocumentPreview,
+    .menuContext = fizzyMenuContext,
+    .isRemotePath = fizzyIsRemotePath,
     .openOrFocusFileAtGrouping = fizzyOpenOrFocusFileAtGrouping,
     .revealPosition = fizzyRevealPosition,
     .beginRegion = fizzyBeginRegion,
@@ -2216,8 +2226,21 @@ fn fizzyExplorerViewportWidth(ctx: *anyopaque) f32 {
 fn fizzyDocFromPath(ctx: *anyopaque, path: []const u8) ?sdk.DocHandle {
     return fizzyCtx(ctx).docFromPath(path);
 }
-fn fizzyOpenFilePath(ctx: *anyopaque, path: []const u8, grouping: u64) anyerror!bool {
-    return fizzyCtx(ctx).openFilePath(path, grouping);
+fn fizzyOpenFile(ctx: *anyopaque, opts: sdk.EditorAPI.OpenOptions) anyerror!bool {
+    return fizzyCtx(ctx).openFile(opts);
+}
+fn fizzyDocumentIsPreview(ctx: *anyopaque, doc_id: u64) bool {
+    return fizzyCtx(ctx).documentIsPreview(doc_id);
+}
+fn fizzySetDocumentPreview(ctx: *anyopaque, doc_id: u64, preview: bool) void {
+    fizzyCtx(ctx).setDocumentPreview(doc_id, preview);
+}
+fn fizzyMenuContext(ctx: *anyopaque) ?sdk.EditorAPI.MenuContext {
+    _ = ctx;
+    return menu_context;
+}
+fn fizzyIsRemotePath(ctx: *anyopaque, path: []const u8) bool {
+    return fizzyCtx(ctx).app.file_table.isRemote(path);
 }
 fn fizzyOpenOrFocusFileAtGrouping(ctx: *anyopaque, path: []const u8, grouping: u64) anyerror!?usize {
     return fizzyCtx(ctx).openOrFocusFileAtGrouping(path, grouping);
@@ -3953,8 +3976,10 @@ pub fn revealPosition(editor: *Editor, path: []const u8, line: u32, character: u
     if (editor.app.host.pluginForExtension(std.fs.path.extension(path)) == null) return false;
 
     // Same canonical spelling `openFilePath` stores on the document, so `pollPendingReveals`'
-    // exact `docFromPath` cannot miss a `.`-laden URI-derived path.
-    const owned_path = try std.fs.path.resolve(editor.app.gpa, &.{path});
+    // exact `docFromPath` cannot miss a `.`-laden URI-derived path. `paths.normalize`, not
+    // `std.fs.path.resolve`: the latter folds a mount's `gdrive://` to `gdrive:/`, after which
+    // the open no longer knows the path is on the mount (and on the web drops it outright).
+    const owned_path = try fizzy.core.paths.normalize(editor.app.gpa, path);
     errdefer editor.app.gpa.free(owned_path);
     try editor.app.pending_reveals.append(editor.app.gpa, .{ .path = owned_path, .line = line, .character = character });
 
@@ -4344,6 +4369,66 @@ pub fn clearFileTreeTabDragDropState(editor: *Editor) void {
 /// `Host.openFilePath`). Canonicalizes `path_in` once so `loading_jobs`, the document's stored
 /// path, and later `docFromPath` lookups all agree — otherwise `foo/./bar.zig` and `foo/bar.zig`
 /// would open as two documents. See `fizzy.core.paths.normalize`.
+/// What `Host.menuContext` answers: set by whoever opens a context menu, for as long as its
+/// rows are being drawn. A plain global because there is exactly one menu open at a time and
+/// the answer is only ever read from inside that draw — a field on the Editor would suggest it
+/// outlives the frame.
+var menu_context: ?sdk.EditorAPI.MenuContext = null;
+
+/// Draw a context menu's contributed sections with `ctx` as the answer to `Host.menuContext`.
+/// The only way to set it: a plugin reads the context while its own section draws, and nothing
+/// should be able to leave a stale one behind.
+pub fn withMenuContext(ctx: sdk.EditorAPI.MenuContext, body: *const fn () void) void {
+    const prev = menu_context;
+    menu_context = ctx;
+    defer menu_context = prev;
+    body();
+}
+
+/// Whether this document is a preview tab. See `EditorAPI.OpenMode`.
+pub fn documentIsPreview(editor: *Editor, doc_id: u64) bool {
+    return editor.preview_docs.contains(doc_id);
+}
+
+/// Make a document a preview, or keep it. Keeping is the common direction: the user edited it,
+/// double-clicked its tab, or asked for it on the tab menu.
+pub fn setDocumentPreview(editor: *Editor, doc_id: u64, preview: bool) void {
+    if (preview) {
+        editor.preview_docs.put(editor.app.gpa, doc_id, {}) catch return;
+    } else {
+        _ = editor.preview_docs.swapRemove(doc_id);
+    }
+}
+
+/// Open a file — see `EditorAPI.OpenOptions`. A `.preview` open takes the tab of the preview
+/// already in that pane, which is what stops a click-through leaving a trail of tabs.
+pub fn openFile(editor: *Editor, opts: sdk.EditorAPI.OpenOptions) !bool {
+    const replacing: ?u64 = if (opts.mode == .preview) editor.previewIn(opts.grouping) else null;
+    const started = try editor.openFilePath(opts.path, opts.grouping);
+    if (opts.mode == .preview) {
+        if (editor.docFromPath(opts.path)) |doc| editor.setDocumentPreview(doc.id, true);
+    }
+    // After the open, so a failed one costs the user nothing. A document the open just landed
+    // on is never the one closed — `previewIn` was read before it existed.
+    if (replacing) |old| {
+        if (editor.docFromPath(opts.path) == null or editor.docFromPath(opts.path).?.id != old) {
+            editor.closeFileID(old) catch |err| {
+                dvui.log.warn("preview: could not close the previous preview: {t}", .{err});
+            };
+        }
+    }
+    return started;
+}
+
+/// The preview document in `grouping`, if any.
+fn previewIn(editor: *Editor, grouping: u64) ?u64 {
+    for (editor.preview_docs.keys()) |id| {
+        const doc = editor.app.open_files.get(id) orelse continue;
+        if (doc.owner.documentGrouping(doc) == grouping) return id;
+    }
+    return null;
+}
+
 pub fn openFilePath(editor: *Editor, path_in: []const u8, grouping: u64) !bool {
     const path = try fizzy.core.paths.normalize(editor.app.gpa, path_in);
     defer editor.app.gpa.free(path);
@@ -5172,6 +5257,9 @@ pub fn rawCloseFileID(editor: *Editor, id: u64) !void {
     editor.doc_io.documentClosed(doc.id);
     editor.unregisterDocSurface(doc.id);
     editor.app.closeDocumentResources(doc);
+    // A closed document is not a preview any more, and ids are handed out fresh — an entry left
+    // here would eventually describe somebody else's tab.
+    _ = editor.preview_docs.swapRemove(id);
     _ = editor.app.open_files.orderedRemove(id);
 }
 
@@ -5182,6 +5270,7 @@ pub fn deinit(editor: *Editor) !void {
     editor.app.layout.view_drag.discard();
     editor.app.layout.deinitSwaps(editor.app.gpa);
     editor.app.layout.regions.deinit(editor.app.gpa);
+    editor.preview_docs.deinit(editor.app.gpa);
     editor.app.layout.regions_building.deinit(editor.app.gpa);
 
     // Stop watchers first, before touching anything they could still be querying —

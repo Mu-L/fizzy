@@ -98,6 +98,12 @@ pub const DoneFn = *const fn (ctx: ?*anyopaque, result: Error!void) void;
 pub const Fs = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
+    /// Reached over a network, rather than from a disk or memory. Only the filesystem knows:
+    /// `gdrive://` is remote and `store://` is a few strings in this process, and a caller
+    /// guessing from the scheme gets that backwards. What it is *for* is pacing — a crawler
+    /// asks before deciding how many listings to have in flight, because a window that suits a
+    /// disk is a spent API quota on a cloud drive.
+    remote: bool = false,
 
     pub const VTable = struct {
         listDir: *const fn (ptr: *anyopaque, allocator: Allocator, path: []const u8, cb: ListDirFn, ctx: ?*anyopaque) Error!Job,

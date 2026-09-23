@@ -29,7 +29,7 @@ pub fn rebuildWorkspaces(wb: *Workbench) !void {
             for (ids) |id| {
                 const path = sdk.document.pathOfSurfaceId(id) orelse continue;
                 if (host.docFromPath(path) != null) continue;
-                _ = host.openFilePath(path, grouping) catch continue;
+                _ = host.openFile(.{ .path = path, .grouping = grouping }) catch continue;
             }
         }
     }
