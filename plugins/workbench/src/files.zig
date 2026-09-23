@@ -313,18 +313,16 @@ fn drawRoot(path: []const u8, kind: RootKind, tree: *core.widgets.TreeWidget, fi
 
 /// Context menu for the project root directory: close project, reveal on disk, new file / folder.
 fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u8, kind: RootKind, tree: *core.widgets.TreeWidget) !void {
-    var fw2 = dvui.floatingMenu(@src(), .{ .from = dvui.Rect.Natural.fromPoint(point) }, .{ .box_shadow = .{
-        .color = .black,
-        .offset = .{ .x = 0, .y = 0 },
-        .shrink = 0,
-        .fade = 10,
-        .alpha = 0.15,
-    } });
+    // `core.widgets.contextMenu`, not `dvui.floatingMenu`: the same frosted, rounded surface
+    // the menu bar drops down and the command palette lists rows in. A menu opened from the
+    // tree used to be a different object — square, opaque, its own shadow — which read as a
+    // different app depending on where you right-clicked.
+    var fw2 = core.widgets.contextMenu(@src(), point, .{});
     defer fw2.deinit();
 
     const root_branch_id = dvui.Id.update(tree.data().id, project_path);
 
-    if ((dvui.menuItemLabel(@src(), "Close", .{}, .{
+    if ((core.widgets.menuItemLabel(@src(), "Close", .{}, .{
         .expand = .horizontal,
     })) != null) {
         runtime.host().closeProjectFolder();
@@ -335,7 +333,7 @@ fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
     if (kind == .disk) {
-        if ((dvui.menuItemLabel(@src(), open_message, .{}, .{ .expand = .horizontal })) != null) {
+        if ((core.widgets.menuItemLabel(@src(), open_message, .{}, .{ .expand = .horizontal })) != null) {
             runtime.host().openInFileBrowser(project_path) catch {
                 dvui.log.err("Failed to open file browser", .{});
             };
@@ -344,13 +342,13 @@ fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u
         }
     }
 
-    if ((dvui.menuItemLabel(@src(), "New File...", .{}, .{ .expand = .horizontal })) != null) {
+    if ((core.widgets.menuItemLabel(@src(), "New File...", .{}, .{ .expand = .horizontal })) != null) {
         defer fw2.close();
 
         runtime.host().requestNewDocument(project_path, root_branch_id.asUsize());
     }
 
-    if ((dvui.menuItemLabel(@src(), "New Folder...", .{}, .{ .expand = .horizontal })) != null) {
+    if ((core.widgets.menuItemLabel(@src(), "New Folder...", .{}, .{ .expand = .horizontal })) != null) {
         createFolderInteractive(project_path);
 
         fw2.close();
@@ -887,13 +885,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                     defer context.deinit();
 
                     if (context.activePoint()) |point| {
-                        var fw2 = dvui.floatingMenu(@src(), .{ .from = dvui.Rect.Natural.fromPoint(point) }, .{ .box_shadow = .{
-                            .color = .black,
-                            .offset = .{ .x = 0, .y = 0 },
-                            .shrink = 0,
-                            .fade = 10,
-                            .alpha = 0.15,
-                        } });
+                        var fw2 = core.widgets.contextMenu(@src(), point, .{});
                         defer fw2.deinit();
 
                         // Right-clicking a row that isn't already part of the selection takes over
@@ -906,7 +898,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                         }
 
                         if (entry.kind == .file) {
-                            if ((dvui.menuItemLabel(@src(), "Open", .{}, .{
+                            if ((core.widgets.menuItemLabel(@src(), "Open", .{}, .{
                                 .expand = .horizontal,
                             })) != null) {
                                 const arena = dvui.currentWindow().arena();
@@ -923,7 +915,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                                 fw2.close();
                             }
 
-                            if ((dvui.menuItemLabel(@src(), "Open to the side", .{}, .{
+                            if ((core.widgets.menuItemLabel(@src(), "Open to the side", .{}, .{
                                 .expand = .horizontal,
                             })) != null) {
                                 const arena = dvui.currentWindow().arena();
@@ -958,7 +950,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                         // the path is a path either way, so the same row works for `gdrive://…`
                         // and for a directory on disk.
                         if (entry.kind == .directory) {
-                            if ((dvui.menuItemLabel(@src(), "Set Root Here", .{}, .{ .expand = .horizontal })) != null) {
+                            if ((core.widgets.menuItemLabel(@src(), "Set Root Here", .{}, .{ .expand = .horizontal })) != null) {
                                 runtime.host().setProjectFolder(abs_path) catch |err| {
                                     dvui.log.err("Failed to set root to {s}: {t}", .{ abs_path, err });
                                 };
@@ -969,7 +961,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                             _ = dvui.separator(@src(), .{ .expand = .horizontal });
                         }
 
-                        if ((dvui.menuItemLabel(@src(), open_message, .{}, .{ .expand = .horizontal })) != null) {
+                        if ((core.widgets.menuItemLabel(@src(), open_message, .{}, .{ .expand = .horizontal })) != null) {
                             runtime.host().openInFileBrowser(if (entry.kind == .file) std.fs.path.dirname(abs_path) orelse abs_path else abs_path) catch {
                                 dvui.log.err("Failed to open file browser", .{});
                             };
@@ -977,14 +969,14 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                             fw2.close();
                         }
 
-                        if ((dvui.menuItemLabel(@src(), "New File...", .{}, .{ .expand = .horizontal })) != null) {
+                        if ((core.widgets.menuItemLabel(@src(), "New File...", .{}, .{ .expand = .horizontal })) != null) {
                             defer fw2.close();
 
                             const parent_dir: []const u8 = if (entry.kind == .directory) abs_path else entry_dir;
                             runtime.host().requestNewDocument(parent_dir, branch_id.asUsize());
                         }
 
-                        if ((dvui.menuItemLabel(@src(), "New Folder...", .{}, .{ .expand = .horizontal })) != null) {
+                        if ((core.widgets.menuItemLabel(@src(), "New Folder...", .{}, .{ .expand = .horizontal })) != null) {
                             switch (entry.kind) {
                                 .directory => createFolderInteractive(abs_path),
                                 .file => createFolderInteractive(entry_dir),
@@ -994,7 +986,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                             fw2.close();
                         }
 
-                        if ((dvui.menuItemLabel(@src(), "Rename", .{}, .{
+                        if ((core.widgets.menuItemLabel(@src(), "Rename", .{}, .{
                             .expand = .horizontal,
                         })) != null) {
                             edit_id = inner_id_extra.*;
@@ -1002,7 +994,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                         }
 
                         {
-                            if ((dvui.menuItemLabel(@src(), "Delete", .{}, .{
+                            if ((core.widgets.menuItemLabel(@src(), "Delete", .{}, .{
                                 .expand = .horizontal,
                             })) != null) {
                                 defer fw2.close();

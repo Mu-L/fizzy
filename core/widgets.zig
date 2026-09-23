@@ -62,6 +62,32 @@ pub fn floatingMenu(src: std.builtin.SourceLocation, init_opts: FloatingMenuWidg
     ret.init(src, init_opts, opts);
     return ret;
 }
+
+/// `dvui.menuItemLabel` over the copies above: a row with a label, returning the rect a submenu
+/// would open from. The one call a context menu is written in — every menu in the app is a list
+/// of these, so they had to come from the same place the menu bar's do or two menus opened from
+/// two regions would not look like the same app.
+pub fn menuItemLabel(
+    src: std.builtin.SourceLocation,
+    label_str: []const u8,
+    init_opts: MenuItemWidget.InitOptions,
+    opts: dvui.Options,
+) ?dvui.Rect.Natural {
+    var mi = menuItem(src, init_opts, opts);
+    const label_opts = mi.style().strip().override(.{ .label = .{ .for_id = mi.data().id } });
+    const ret: ?dvui.Rect.Natural = mi.activeRect();
+    dvui.labelNoFmt(@src(), label_str, .{}, label_opts);
+    mi.deinit();
+    return ret;
+}
+
+/// A context menu's surface, opened at the point the pointer was pressed. Every right-click
+/// menu in the app goes through here: the file tree's rows, the docking widget's tabs, and
+/// whatever a plugin contributes into one — so "what a menu looks like" is answered once,
+/// beside the menu bar's dropdown rather than near it.
+pub fn contextMenu(src: std.builtin.SourceLocation, at: dvui.Point.Natural, opts: dvui.Options) *FloatingMenuWidget {
+    return floatingMenu(src, .{ .from = dvui.Rect.Natural.fromPoint(at) }, opts);
+}
 /// Verb form of `DockingWidget`, same shape as `dvui.dockspace`.
 pub const dockspace = DockingWidget.dockspace;
 
