@@ -32,6 +32,7 @@ pub const path = struct {
 
 pub const http = @import("http.zig");
 pub const Mem = @import("mem.zig").Mem;
+pub const Deferred = @import("Deferred.zig");
 pub const zip = @import("zip.zig");
 
 test {

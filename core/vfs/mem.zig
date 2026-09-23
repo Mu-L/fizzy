@@ -4,14 +4,14 @@
 
 const std = @import("std");
 const Fs = @import("Fs.zig");
-const http = @import("http.zig");
+const Deferred = @import("Deferred.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Mem = struct {
     allocator: Allocator,
     /// Keyed by full path (`/docs/a.txt`). The root `/` is always present.
     nodes: std.StringArrayHashMapUnmanaged(Node) = .empty,
-    completions: http.Completions(Completion),
+    answers: Deferred,
     /// Bumped by every mutation, so a holder (an archive that was unpacked into this) can tell
     /// whether anything changed since it last looked.
     generation: u64 = 0,
@@ -22,34 +22,10 @@ pub const Mem = struct {
         modified_ms: i64 = 0,
     };
 
-    const Completion = union(enum) {
-        list: struct { allocator: Allocator, cb: Fs.ListDirFn, ctx: ?*anyopaque, result: Fs.Error![]Fs.Entry },
-        stat: struct { cb: Fs.StatFn, ctx: ?*anyopaque, result: Fs.Error!Fs.Stat },
-        read: struct { allocator: Allocator, cb: Fs.ReadFn, ctx: ?*anyopaque, result: Fs.Error!Fs.Read },
-        done: struct { cb: Fs.DoneFn, ctx: ?*anyopaque, result: Fs.Error!void },
-
-        fn discard(self: Completion) void {
-            switch (self) {
-                .list => |c| if (c.result) |entries| Fs.freeEntries(c.allocator, entries) else |_| {},
-                .read => |c| if (c.result) |r| c.allocator.free(r.bytes) else |_| {},
-                .stat, .done => {},
-            }
-        }
-
-        fn deliver(self: Completion) void {
-            switch (self) {
-                .list => |c| c.cb(c.ctx, c.result),
-                .stat => |c| c.cb(c.ctx, c.result),
-                .read => |c| c.cb(c.ctx, c.result),
-                .done => |c| c.cb(c.ctx, c.result),
-            }
-        }
-    };
-
     pub fn init(allocator: Allocator) Allocator.Error!Mem {
         var self: Mem = .{
             .allocator = allocator,
-            .completions = .init(allocator),
+            .answers = .init(allocator),
         };
         errdefer self.deinit();
         try self.nodes.put(allocator, try allocator.dupe(u8, "/"), .{ .kind = .dir });
@@ -62,8 +38,7 @@ pub const Mem = struct {
             if (node.bytes.len != 0) self.allocator.free(node.bytes);
         }
         self.nodes.deinit(self.allocator);
-        for (self.completions.items.items) |item| item.payload.discard();
-        self.completions.deinit();
+        self.answers.deinit();
     }
 
     pub fn fs(self: *Mem) Fs.Fs {
@@ -117,12 +92,6 @@ pub const Mem = struct {
         return false;
     }
 
-    fn queue(self: *Mem, completion: Completion) Fs.Error!Fs.Job {
-        const id = self.completions.nextId();
-        try self.completions.push(id, completion);
-        return .{ .id = id };
-    }
-
     fn listImpl(self: *Mem, allocator: Allocator, path: []const u8) Fs.Error![]Fs.Entry {
         const dir = try self.get(path);
         if (dir.kind != .dir) return error.NotADirectory;
@@ -142,7 +111,7 @@ pub const Mem = struct {
 
     fn listDir(ptr: *anyopaque, allocator: Allocator, path: []const u8, cb: Fs.ListDirFn, ctx: ?*anyopaque) Fs.Error!Fs.Job {
         const self: *Mem = @ptrCast(@alignCast(ptr));
-        return self.queue(.{ .list = .{ .allocator = allocator, .cb = cb, .ctx = ctx, .result = self.listImpl(allocator, path) } });
+        return self.answers.list(allocator, cb, ctx, self.listImpl(allocator, path));
     }
 
     fn stat(ptr: *anyopaque, path: []const u8, cb: Fs.StatFn, ctx: ?*anyopaque) Fs.Error!Fs.Job {
@@ -151,7 +120,7 @@ pub const Mem = struct {
             .{ .kind = node.kind, .size = node.bytes.len, .modified_ms = node.modified_ms }
         else |err|
             err;
-        return self.queue(.{ .stat = .{ .cb = cb, .ctx = ctx, .result = result } });
+        return self.answers.stat(cb, ctx, result);
     }
 
     fn readImpl(self: *Mem, allocator: Allocator, path: []const u8) Fs.Error!Fs.Read {
@@ -162,7 +131,7 @@ pub const Mem = struct {
 
     fn readFile(ptr: *anyopaque, allocator: Allocator, path: []const u8, cb: Fs.ReadFn, ctx: ?*anyopaque) Fs.Error!Fs.Job {
         const self: *Mem = @ptrCast(@alignCast(ptr));
-        return self.queue(.{ .read = .{ .allocator = allocator, .cb = cb, .ctx = ctx, .result = self.readImpl(allocator, path) } });
+        return self.answers.read(allocator, cb, ctx, self.readImpl(allocator, path));
     }
 
     fn writeImpl(self: *Mem, path: []const u8, bytes: []const u8, opts: Fs.WriteOptions) Fs.Error!void {
@@ -186,17 +155,17 @@ pub const Mem = struct {
 
     fn writeFile(ptr: *anyopaque, path: []const u8, bytes: []const u8, opts: Fs.WriteOptions, cb: Fs.DoneFn, ctx: ?*anyopaque) Fs.Error!Fs.Job {
         const self: *Mem = @ptrCast(@alignCast(ptr));
-        return self.queue(.{ .done = .{ .cb = cb, .ctx = ctx, .result = self.writeImpl(path, bytes, opts) } });
+        return self.answers.done(cb, ctx, self.writeImpl(path, bytes, opts));
     }
 
     fn createFile(ptr: *anyopaque, path: []const u8, cb: Fs.DoneFn, ctx: ?*anyopaque) Fs.Error!Fs.Job {
         const self: *Mem = @ptrCast(@alignCast(ptr));
-        return self.queue(.{ .done = .{ .cb = cb, .ctx = ctx, .result = self.insert(path, .file, &.{}) } });
+        return self.answers.done(cb, ctx, self.insert(path, .file, &.{}));
     }
 
     fn mkdir(ptr: *anyopaque, path: []const u8, cb: Fs.DoneFn, ctx: ?*anyopaque) Fs.Error!Fs.Job {
         const self: *Mem = @ptrCast(@alignCast(ptr));
-        return self.queue(.{ .done = .{ .cb = cb, .ctx = ctx, .result = self.insert(path, .dir, &.{}) } });
+        return self.answers.done(cb, ctx, self.insert(path, .dir, &.{}));
     }
 
     fn renameImpl(self: *Mem, path: []const u8, new_path: []const u8) Fs.Error!void {
@@ -230,7 +199,7 @@ pub const Mem = struct {
 
     fn rename(ptr: *anyopaque, path: []const u8, new_path: []const u8, cb: Fs.DoneFn, ctx: ?*anyopaque) Fs.Error!Fs.Job {
         const self: *Mem = @ptrCast(@alignCast(ptr));
-        return self.queue(.{ .done = .{ .cb = cb, .ctx = ctx, .result = self.renameImpl(path, new_path) } });
+        return self.answers.done(cb, ctx, self.renameImpl(path, new_path));
     }
 
     fn removeImpl(self: *Mem, path: []const u8) Fs.Error!void {
@@ -245,21 +214,17 @@ pub const Mem = struct {
 
     fn remove(ptr: *anyopaque, path: []const u8, cb: Fs.DoneFn, ctx: ?*anyopaque) Fs.Error!Fs.Job {
         const self: *Mem = @ptrCast(@alignCast(ptr));
-        return self.queue(.{ .done = .{ .cb = cb, .ctx = ctx, .result = self.removeImpl(path) } });
+        return self.answers.done(cb, ctx, self.removeImpl(path));
     }
 
     fn cancel(ptr: *anyopaque, job: Fs.Job) void {
         const self: *Mem = @ptrCast(@alignCast(ptr));
-        if (self.completions.remove(job.id)) |completion| completion.discard();
+        self.answers.cancel(job);
     }
 
     fn pump(ptr: *anyopaque) void {
         const self: *Mem = @ptrCast(@alignCast(ptr));
-        self.completions.drain({}, struct {
-            fn f(_: void, c: Completion) void {
-                c.deliver();
-            }
-        }.f);
+        self.answers.pump();
     }
 };
 

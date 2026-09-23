@@ -108,6 +108,8 @@ pub const Document = struct {
 const State = struct {
     docs: std.AutoArrayHashMapUnmanaged(u64, Document) = .empty,
     mounted: bool = false,
+    /// What the pages' filesystem has answered and not yet delivered — see `pages_fs`.
+    answers: ?core.vfs.Deferred = null,
 };
 
 var state: State = .{};
@@ -153,6 +155,7 @@ comptime {
 pub fn register(host: *sdk.Host, draw: PageDraw) !void {
     page_draw = draw;
     try host.registerPlugin(&plugin);
+    state.answers = .init(host.allocator);
     try host.mount(mount_prefix, pages_fs);
     state.mounted = true;
 }
@@ -160,6 +163,8 @@ pub fn register(host: *sdk.Host, draw: PageDraw) !void {
 pub fn deinit() void {
     for (state.docs.values()) |*doc| doc.deinit();
     state.docs.deinit(sdk.allocator());
+    if (state.answers) |*a| a.deinit();
+    state.answers = null;
     state.mounted = false;
 }
 
@@ -224,59 +229,51 @@ const fs_vtable: core.vfs.Fs.VTable = .{
     .pump = fsPump,
 };
 
-/// Every answer is immediate: there is nothing to wait for, so a job never exists and `pump` has
-/// nothing to deliver.
-const immediate: core.vfs.Job = .{ .id = 0 };
+/// Every answer is known on the spot, and still arrives from `pump`, as `Fs` promises: the
+/// open that asked has to have its bookkeeping in place — the loading tab the page lands in —
+/// before the page exists.
+fn answers() *core.vfs.Deferred {
+    return &state.answers.?;
+}
 
 fn fsListDir(_: *anyopaque, allocator: std.mem.Allocator, _: []const u8, cb: core.vfs.ListDirFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
     // Not browsable: a page exists because someone asked for it by id, and a listing of every
     // plugin that *could* have one is the store's job, in the store.
-    _ = allocator;
-    cb(ctx, &.{});
-    return immediate;
+    return answers().list(allocator, cb, ctx, &.{});
 }
 
 fn fsStat(_: *anyopaque, path: []const u8, cb: core.vfs.StatFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
-    const id = pluginOfPath(path) orelse {
-        cb(ctx, error.NotFound);
-        return immediate;
-    };
-    cb(ctx, .{ .kind = .file, .size = id.len, .modified_ms = 0 });
-    return immediate;
+    const id = pluginOfPath(path) orelse return answers().stat(cb, ctx, error.NotFound);
+    return answers().stat(cb, ctx, .{ .kind = .file, .size = id.len, .modified_ms = 0 });
 }
 
 fn fsReadFile(_: *anyopaque, allocator: std.mem.Allocator, path: []const u8, cb: core.vfs.ReadFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
-    const id = pluginOfPath(path) orelse {
-        cb(ctx, error.NotFound);
-        return immediate;
-    };
-    const bytes = allocator.dupe(u8, id) catch {
-        cb(ctx, error.OutOfMemory);
-        return immediate;
-    };
-    cb(ctx, .{ .bytes = bytes, .modified_ms = 0 });
-    return immediate;
+    const id = pluginOfPath(path) orelse return answers().read(allocator, cb, ctx, error.NotFound);
+    const bytes = allocator.dupe(u8, id) catch return answers().read(allocator, cb, ctx, error.OutOfMemory);
+    return answers().read(allocator, cb, ctx, .{ .bytes = bytes, .modified_ms = 0 });
 }
 
 /// Read-only: a page is a view of the store. Every mutation answers `Unsupported` rather than
 /// pretending, so a "save" here fails loudly instead of quietly doing nothing.
 fn fsWrite(_: *anyopaque, _: []const u8, _: []const u8, _: core.vfs.WriteOptions, cb: core.vfs.DoneFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
-    cb(ctx, error.Unsupported);
-    return immediate;
+    return answers().done(cb, ctx, error.Unsupported);
 }
 
 fn fsCreateOrRemove(_: *anyopaque, _: []const u8, cb: core.vfs.DoneFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
-    cb(ctx, error.Unsupported);
-    return immediate;
+    return answers().done(cb, ctx, error.Unsupported);
 }
 
 fn fsRename(_: *anyopaque, _: []const u8, _: []const u8, cb: core.vfs.DoneFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
-    cb(ctx, error.Unsupported);
-    return immediate;
+    return answers().done(cb, ctx, error.Unsupported);
 }
 
-fn fsCancel(_: *anyopaque, _: core.vfs.Job) void {}
-fn fsPump(_: *anyopaque) void {}
+fn fsCancel(_: *anyopaque, job: core.vfs.Job) void {
+    answers().cancel(job);
+}
+
+fn fsPump(_: *anyopaque) void {
+    answers().pump();
+}
 
 // ---- the document vtable ---------------------------------------------------------------------
 
