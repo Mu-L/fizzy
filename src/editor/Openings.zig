@@ -226,7 +226,12 @@ fn draw(ctx: ?*anyopaque) anyerror!dvui.App.Result {
     const theme = dvui.themeGet();
     const dim = theme.color(.window, .text).opacity(0.6);
 
-    var fill = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = false });
+    // Keyed by path: a swap photographs one placeholder in the same pane another is shown in.
+    var fill = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .expand = .both,
+        .background = false,
+        .id_extra = @truncate(std.hash.Wyhash.hash(0, o.path)),
+    });
     defer fill.deinit();
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5, .gravity_y = 0.5 });
     defer col.deinit();

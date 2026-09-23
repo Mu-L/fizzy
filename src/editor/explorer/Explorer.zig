@@ -131,7 +131,12 @@ pub fn draw(
     }
 
     if (shown) |surface| {
-        _ = try surface.draw(surface.ctx);
+        // Through the layout's swap: choosing another view on the rail blurs from one body to
+        // the next, as every region does. The body's own box, so the capture of the outgoing
+        // view can be unpacked before the incoming one draws.
+        var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = false });
+        defer body.deinit();
+        _ = try f.drawSwappedIn(fizzy.sdk.keywords.groupKey(keywords), body, surface);
     }
 
     scroll.deinit();

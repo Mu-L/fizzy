@@ -15,6 +15,7 @@ const icons = @import("icons");
 const platform = @import("platform.zig");
 const reveal_phase = @import("reveal.zig");
 const BlurBackdrop = @import("widgets/BlurBackdrop.zig");
+const dialogs = @import("dialogs.zig");
 pub const crossfade = @import("crossfade.zig");
 pub const Kind = crossfade.Kind;
 
@@ -263,7 +264,9 @@ pub const Frost = struct {
     pub fn prepare(self: *Frost, sharp: dvui.Texture) void {
         if (self.tried) return;
         self.tried = true;
-        self.texture = BlurBackdrop.blurred(sharp, blur_radius);
+        const radius = blurRadius();
+        if (radius < 1) return;
+        self.texture = BlurBackdrop.blurred(sharp, radius);
     }
 
     pub fn drop(self: *Frost) void {
@@ -272,8 +275,17 @@ pub const Frost = struct {
     }
 };
 
-/// Same default as DVUI's BlurBackdrop applets demo.
-pub const blur_radius: f32 = 16;
+/// How far a transition blurs: the app's one blur setting, the radius dialogs frost with
+/// (`core.dialogs.Style.blur`). Below 1 the blur is off, and every swap is a plain fade — there
+/// is nothing to blur between.
+pub fn blurRadius() f32 {
+    return dialogs.style().blur;
+}
+
+/// `kind` as the blur setting allows it: a blur or frost with the blur off is a fade.
+pub fn effectiveKind(kind: Kind) Kind {
+    return if (kind != .fade and blurRadius() < 1) .fade else kind;
+}
 
 /// Draw a captured overlay. `blur` 0 is a sharp blit. Above that, mix the
 /// snapshot with its one Kawase frost so the ramp is a defocus, not a snap.
@@ -457,9 +469,9 @@ pub const TransitionOptions = struct {
     key: u64,
     /// Physical region to capture / blit. Typically the parent's `contentRectScale().r`.
     rect: dvui.Rect.Physical,
-    /// Fade the outgoing snapshot, or blur out / hand off / unblur in. Fade is the default
-    /// so existing call sites keep their 150ms cross-fade.
-    kind: Kind = .fade,
+    /// Blur out / hand off / unblur in — the app's swap, everywhere a view changes — or just fade
+    /// the outgoing snapshot. A blur with the blur setting off fades (`effectiveKind`).
+    kind: Kind = .blur,
     /// Hold at the outgoing peak this frame. Or set `Transition.pending` and leave this false.
     pending: bool = false,
     /// Override the kind's default duration. Null uses `crossfade.durationNs`.
@@ -572,9 +584,10 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
     const pending = opts.pending or state.pending;
 
     if (had_prev and key_changed) {
-        state.cross_fade.kind = opts.kind;
+        const kind = effectiveKind(opts.kind);
+        state.cross_fade.kind = kind;
         state.cross_fade.opaque_snapshots = false;
-        state.cross_fade.duration_ns = opts.duration_ns orelse crossfade.durationNs(opts.kind);
+        state.cross_fade.duration_ns = opts.duration_ns orelse crossfade.durationNs(kind);
         if (opts.draw_previous) |draw_prev| {
             if (beginBackdropCapture(&state.cross_fade, opts.rect, opts.backdrop)) |captured| {
                 var pic = captured;

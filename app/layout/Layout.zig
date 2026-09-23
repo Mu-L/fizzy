@@ -595,21 +595,31 @@ const offscreen_warmup_frames: u8 = 10;
 /// declared region's space.
 pub fn drawSelected(self: *Layout, keywords: []const []const u8) !dvui.App.Result {
     const s = self.selected(keywords) orelse return .ok;
-    return self.drawSwapped(sdk.keywords.groupKey(keywords), s);
+    return self.drawSwapped(sdk.keywords.groupKey(keywords), s, null);
 }
 
 /// `drawSelected` for a specific region. A by-name region must not draw the first assignment
 /// that happens to share its keywords — that is how every edge tray showed the same surface.
 pub fn drawSelectedIn(self: *Layout, r: *const Region) !dvui.App.Result {
     const s = self.selectedIn(r) orelse return .ok;
-    return self.drawSwapped(r.selectionKey(), s);
+    return self.drawSwapped(r.selectionKey(), s, null);
+}
+
+/// `s` into `box`, blurring from whatever `slot` showed before — the swap every region gets,
+/// for a place that draws its own chooser (the explorer's body, a bottom-panel pane). `slot`
+/// is any key stable for the place; `box` is the parent `s` draws into, whose packing is reset
+/// after the outgoing view is photographed into it.
+pub fn drawSwappedIn(self: *Layout, slot: u64, box: *dvui.BoxWidget, s: *Surface) !dvui.App.Result {
+    return self.drawSwapped(slot, s, box);
 }
 
 /// Capture the outgoing surface and blur-fade to `s`. Keyed by place, not by
 /// surface, so two regions that share a selection still each keep their own
-/// overlay (by-name keys include the region name).
-fn drawSwapped(self: *Layout, slot: u64, s: *Surface) !dvui.App.Result {
-    const rs = dvui.parentGet().data().contentRectScale();
+/// overlay (by-name keys include the region name). `pack` is the box to reset after the capture;
+/// null is the innermost region's.
+fn drawSwapped(self: *Layout, slot: u64, s: *Surface, pack: ?*dvui.BoxWidget) !dvui.App.Result {
+    // The part on screen: a place inside a scroll area is as tall as its content.
+    const rs = dvui.parentGet().data().contentRectScale().r.intersect(dvui.clipGet());
     const tr = self.state.swapFor(self.gpa, slot) orelse return self.draw(s);
 
     // A swap preview already dissolves the outgoing still. Starting a second
@@ -627,6 +637,7 @@ fn drawSwapped(self: *Layout, slot: u64, s: *Surface) !dvui.App.Result {
     const Ctx = struct {
         layout: *Layout,
         id: []const u8,
+        pack: ?*dvui.BoxWidget,
 
         fn drawPrev(ctx: *anyopaque) void {
             const c: *@This() = @ptrCast(@alignCast(ctx));
@@ -637,11 +648,11 @@ fn drawSwapped(self: *Layout, slot: u64, s: *Surface) !dvui.App.Result {
 
         fn after(ctx: *anyopaque) void {
             const c: *@This() = @ptrCast(@alignCast(ctx));
-            c.layout.resetInnermostPack();
+            if (c.pack) |b| resetPack(b) else c.layout.resetInnermostPack();
         }
     };
 
-    var ctx: Ctx = .{ .layout = self, .id = tr.prev_id };
+    var ctx: Ctx = .{ .layout = self, .id = tr.prev_id, .pack = pack };
     const had = tr.prev_id.len > 0;
     // Nothing to swap from — the first thing this place shows: fade it in instead.
     if (!had) {
@@ -670,8 +681,7 @@ fn drawSwapped(self: *Layout, slot: u64, s: *Surface) !dvui.App.Result {
     };
     var frame = core.anim.transition(tr, .{
         .key = std.hash.Wyhash.hash(0, s.id),
-        .rect = rs.r,
-        .kind = .blur,
+        .rect = rs,
         .backdrop = backdrop,
         .draw_previous = if (had) Ctx.drawPrev else null,
         .after_capture = if (had) Ctx.after else null,
@@ -686,7 +696,12 @@ fn drawSwapped(self: *Layout, slot: u64, s: *Surface) !dvui.App.Result {
 
 fn resetInnermostPack(self: *Layout) void {
     const box = if (self.depth > 0) self.containers[self.depth - 1].box else null;
-    const b = box orelse return;
+    resetPack(box orelse return);
+}
+
+/// Forget what `b` has packed this frame, so a view drawn into it again (a capture, a warm-up)
+/// does not make the next child land after an expanded one.
+fn resetPack(b: *dvui.BoxWidget) void {
     b.first_child = true;
     b.packed_children = 0;
     b.total_weight = 0;
@@ -837,7 +852,7 @@ pub fn drawPluginRegionContents(self: *Layout, token: sdk.RegionSpec.Token) !dvu
             dvui.refresh(null, @src(), null);
         };
     }
-    return self.drawSwapped(key, s);
+    return self.drawSwapped(key, s, null);
 }
 
 /// A plugin region's contents and selection, by token — what a plugin's own chooser (a tab
