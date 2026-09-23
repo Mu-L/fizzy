@@ -751,12 +751,14 @@ pub fn draw(self: *TextEntryWidget) void {
     // colour the whole document instead of the viewport.
     var nest_buf: [512]tc.pairs.NestMark = undefined;
     self.bracket_nests = &.{};
-    if (self.init_opts.rainbow_brackets) {
-        const range = self.highlightByteRange() orelse ByteRange{ .start = 0, .end = self.len };
+    // No range yet (the first frame a view is drawn, before it has layout data): no colours for
+    // that one frame, rather than scanning the whole document for them — which, on a 57MB file,
+    // was half of every tab switch back to it.
+    if (self.init_opts.rainbow_brackets) if (self.highlightByteRange()) |range| {
         const tab_size: u8 = if (self.init_opts.tab_size == 0) 4 else self.init_opts.tab_size;
         const n = tc.pairs.nestMarks(self.text[0..self.len], range.start, range.end, tab_size, &nest_buf);
         self.bracket_nests = nest_buf[0..n];
-    }
+    };
 
     if (self.len == 0) {
         if (self.init_opts.placeholder) |placeholder| {
