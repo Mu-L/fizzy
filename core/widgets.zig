@@ -86,7 +86,11 @@ pub fn menuItemLabel(
 /// whatever a plugin contributes into one — so "what a menu looks like" is answered once,
 /// beside the menu bar's dropdown rather than near it.
 pub fn contextMenu(src: std.builtin.SourceLocation, at: dvui.Point.Natural, opts: dvui.Options) *FloatingMenuWidget {
-    return floatingMenu(src, .{ .from = dvui.Rect.Natural.fromPoint(at) }, opts);
+    // `.popup`, not the `.menu` default: a right-click menu is not part of a menubar chain, and
+    // the difference that matters is that a popup closes when you click outside it. The default
+    // left a context menu standing while the click that should have dismissed it went somewhere
+    // else — which is not a decision any caller should be making separately.
+    return floatingMenu(src, .{ .from = dvui.Rect.Natural.fromPoint(at), .style = .popup }, opts);
 }
 /// Verb form of `DockingWidget`, same shape as `dvui.dockspace`.
 pub const dockspace = DockingWidget.dockspace;

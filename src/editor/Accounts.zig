@@ -55,15 +55,18 @@ pub fn drawRailDisc(editor: *Editor, size: f32) !void {
     }
     if (!open) return;
     const button_r = bw.data().borderRectScale().r;
-    if (Popover.outside(&.{ button_r, list_rect.scale(dvui.windowNaturalScale(), dvui.Rect.Physical), sub_phys })) {
-        open = false;
-        return;
-    }
 
     // Beside the icon, not below: the rail is at the screen's left edge.
     const from = button_r.toNatural();
-    var list = Popover.init(@src(), .{ .rect = &list_rect, .anchor = .{ .x = from.x + from.w + 4, .y = from.y - 4 } });
+    var list = Popover.init(@src(), .{
+        .rect = &list_rect,
+        .anchor = .{ .x = from.x + from.w + 4, .y = from.y - 4 },
+        // The disc that opens this, and last frame's submenu: a press on either is inside the
+        // thing, not outside it. `Popover.dismissed` does the rest.
+        .keep = &.{ button_r, sub_phys },
+    });
     defer list.deinit();
+    if (list.dismissed()) open = false;
     drawing_rows = true;
     defer drawing_rows = false;
 

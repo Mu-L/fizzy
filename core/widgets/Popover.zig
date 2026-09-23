@@ -22,6 +22,8 @@ const Popover = @This();
 win: *FloatingWindowWidget,
 /// The window's rect this frame, physical. Where a press counts as inside.
 rect: dvui.Rect.Physical,
+/// What else counts as inside — see `InitOptions.keep`.
+keep: []const dvui.Rect.Physical = &.{},
 
 /// The shared surface radius (`core.dialogs`), re-exported because callers anchor submenus
 /// against it.
@@ -34,6 +36,11 @@ pub const InitOptions = struct {
     /// Where the window's top-left sits, natural coordinates.
     anchor: dvui.Point.Natural,
     id_extra: usize = 0,
+    /// Rects that count as part of this popover for `dismissed`: the control it hangs off, the
+    /// row that opened a submenu. A press there is not a press outside — pressing the button
+    /// that opens a panel is the caller's own toggle, and taking it as a dismissal too would
+    /// close and reopen in one frame.
+    keep: []const dvui.Rect.Physical = &.{},
 };
 
 /// Open (or continue) the popover. Rows go between this and `deinit`.
@@ -62,11 +69,35 @@ pub fn init(src: std.builtin.SourceLocation, init_opts: InitOptions) Popover {
     });
     // Not a window anyone drags: no drag area, so the pointer over it is not the move cursor.
     win.dragAreaSet(.{});
-    return .{ .win = win, .rect = win.data().borderRectScale().r };
+    return .{ .win = win, .rect = win.data().borderRectScale().r, .keep = init_opts.keep };
 }
 
 pub fn deinit(self: *Popover) void {
     self.win.deinit();
+}
+
+/// Whether a press this frame landed outside this popover (and outside whatever the caller
+/// named in `keep`) — the caller's cue to put it away.
+///
+/// Here rather than in each caller because it is not a decision any of them get to make
+/// differently: a floating thing that stays up after you click elsewhere is a bug wherever it
+/// appears. Callers still *do* the closing, since only they know what "closed" means for them —
+/// a selection cleared, a flag unset.
+///
+/// False while the popover has no rect yet: on its first frame there is nothing to be outside
+/// of, and "everywhere" would dismiss it on the press that opened it.
+pub fn dismissed(self: Popover) bool {
+    if (self.rect.empty()) return false;
+    var rects: [8]dvui.Rect.Physical = undefined;
+    var n: usize = 0;
+    rects[n] = self.rect;
+    n += 1;
+    for (self.keep) |r| {
+        if (n == rects.len) break;
+        rects[n] = r;
+        n += 1;
+    }
+    return outside(rects[0..n]);
 }
 
 pub const RowOptions = struct {

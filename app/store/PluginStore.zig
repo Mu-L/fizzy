@@ -2580,20 +2580,6 @@ fn drawSelectionToggles(
         return;
     }
 
-    // A press anywhere but the panel or the card it belongs to puts it away — the rule every
-    // other floating thing in the app follows, and the one a user tries first. The card counts
-    // as inside: pressing it is the toggle, and taking the press here as well would close and
-    // reopen in the same frame. Skipped on the first frame, when the panel has no rect yet and
-    // "outside it" would be everywhere.
-    if (showing and !flyout_rect.empty()) {
-        if (core.widgets.Popover.outside(&.{ card_r, flyout_rect })) {
-            flyoutClear();
-            selected_id_len = 0;
-            dvui.refresh(null, @src(), null);
-            return;
-        }
-    }
-
     if (!showing) flyoutSet(entry.id);
     if (!flyoutIsFor(entry.id)) return; // id too long to track
 
@@ -2625,8 +2611,19 @@ fn drawSelectionToggles(
         .rect = &flyout_win_rect,
         .anchor = .{ .x = natural.x, .y = natural.y - flyout_win_rect.h / 2 },
         .id_extra = hashId(entry.id),
+        // The card is the control this hangs off: pressing it is the selection toggle, not a
+        // dismissal.
+        .keep = &.{card_r},
     });
     defer panel.deinit();
+
+    // Put away on a press anywhere else. The rule is the popover's (`dismissed`); what closing
+    // *means* here is the selection going away, which takes the panel with it.
+    if (panel.dismissed()) {
+        flyoutClear();
+        selected_id_len = 0;
+        dvui.refresh(null, @src(), null);
+    }
 
     // The page, first: it is what the card is *about*, and the one row that is the same on every
     // card in both panes. It opens as a preview tab like any other document — keeping one is the
