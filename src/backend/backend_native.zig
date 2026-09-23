@@ -1890,7 +1890,11 @@ fn activateApp() void {
     const NSApplication = objc.getClass("NSApplication") orelse return;
     const app = NSApplication.msgSend(objc.Object, "sharedApplication", .{});
     if (app.value == null) return;
-    if (app.respondsToSelector(objc.sel("activate"))) {
+    // `class_respondsToSelector` rather than a version check: `activate` arrived in macOS 14
+    // and `activateIgnoringOtherApps:` is deprecated there but still works, so ask the runtime
+    // which one this system has. (zig-objc's `Object` has no respondsToSelector of its own.)
+    const cls = app.getClass() orelse return;
+    if (objc.c.class_respondsToSelector(cls.value, objc.sel("activate").value) != 0) {
         app.msgSend(void, "activate", .{});
     } else {
         app.msgSend(void, "activateIgnoringOtherApps:", .{@as(u8, 1)});

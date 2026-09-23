@@ -120,6 +120,10 @@ const FizzyCommand = struct {
 };
 
 const fizzy_commands = [_]FizzyCommand{
+    // For a plugin that sent the user to the browser and is done with them there — Drive's
+    // sign-in and its folder picker. No default key: nobody reaches for a shortcut to focus the
+    // window they are already looking at, and the command exists so `Host.runCommand` can.
+    .{ .id = "fizzy.focusWindow", .title = "Bring Fizzy to the Front", .bind = null, .run = cmdFocusWindow, .icon = icons.tvg.lucide.@"app-window" },
     .{ .id = "fizzy.openFolder", .title = "Open Folder…", .bind = "open_folder", .run = cmdOpenFolder, .icon = icons.tvg.lucide.@"folder-open" },
     .{ .id = "fizzy.openFiles", .title = "Open Files…", .bind = "open_files", .run = cmdOpenFiles, .icon = icons.tvg.lucide.files },
     .{ .id = "fizzy.newFile", .title = "New File…", .bind = "new_file", .run = cmdNewFile, .icon = icons.tvg.lucide.@"file-plus" },
