@@ -240,7 +240,7 @@ pub fn draw(query: *const fuzzy.Query) void {
     const platform: Keymap.Platform = if (fizzy.core.platform.isMacOS()) .mac else .other;
     const arena = dvui.currentWindow().arena();
 
-    drawConflicts(editor, platform, theme);
+    drawConflicts(editor, theme);
 
     // No banner: the row being recorded says so itself. A strip appearing above the tree pushed
     // every row down the moment you clicked one, so the shortcut you were aiming at moved.
@@ -359,7 +359,7 @@ fn recordingDot() void {
     r.fill(.all(r.h / 2), .{ .color = .{ .color = dvui.themeGet().color(.err, .fill) } });
 }
 
-fn drawConflicts(editor: *fizzy.Editor, platform: Keymap.Platform, theme: dvui.Theme) void {
+fn drawConflicts(editor: *fizzy.Editor, theme: dvui.Theme) void {
     const conflicts = editor.app.keybind_conflicts orelse return;
     if (conflicts.len == 0) return;
 
@@ -378,9 +378,15 @@ fn drawConflicts(editor: *fizzy.Editor, platform: Keymap.Platform, theme: dvui.T
         .expand = .horizontal,
     });
     for (conflicts, 0..) |c, i| {
-        const keys = Keymap.formatKeys(dvui.currentWindow().arena(), c.stroke, platform) catch "?";
-        dvui.label(@src(), "{s}: {s} shadows {s}", .{ keys, c.winner, c.loser }, .{
-            .id_extra = i,
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = i, .expand = .horizontal });
+        defer line.deinit();
+        core.keycaps.draw(@src(), Keybinds.keycapsStroke(c.stroke), .{
+            .style = .caps,
+            .gravity_x = 0.0,
+            .color = theme.color(.window, .text),
+        });
+        dvui.label(@src(), "  {s} shadows {s}", .{ c.winner, c.loser }, .{
+            .gravity_y = 0.5,
             .expand = .horizontal,
             .color_text = .{ .color = theme.color(.window, .text).opacity(0.85) },
         });
@@ -626,18 +632,32 @@ fn drawCommandRow(
                 });
                 defer inner.deinit();
 
-                if (is_recording) recordingDot();
-                dvui.labelNoFmt(@src(), if (is_recording) "Recording…" else keys_text, .{}, .{
-                    .gravity_x = if (is_recording) 0.0 else 0.5,
-                    .gravity_y = 0.5,
-                    .expand = .horizontal,
-                    .color_text = if (is_recording)
-                        .{ .color = theme.color(.err, .fill) }
-                    else if (inherited)
-                        .{ .color = theme.color(.control, .text).opacity(0.55) }
-                    else
-                        null,
-                });
+                if (is_recording) {
+                    recordingDot();
+                    dvui.labelNoFmt(@src(), "Recording…", .{}, .{
+                        .gravity_y = 0.5,
+                        .expand = .horizontal,
+                        .color_text = .{ .color = theme.color(.err, .fill) },
+                    });
+                } else if (shortcut) |sc| {
+                    // Keycaps, centred in the column: this table is where a binding is the thing
+                    // being read. An inherited chord is dimmed, as the text was, so it does not
+                    // read as an override the row's Reset could clear.
+                    core.keycaps.draw(@src(), Keybinds.keycapsStroke(sc.stroke), .{
+                        .style = .caps,
+                        .gravity_x = 0.5,
+                        .color = if (inherited)
+                            theme.color(.control, .text).opacity(0.55)
+                        else
+                            theme.color(.window, .text),
+                    });
+                } else {
+                    dvui.labelNoFmt(@src(), keys_text, .{}, .{
+                        .gravity_x = 0.5,
+                        .gravity_y = 0.5,
+                        .expand = .horizontal,
+                    });
+                }
             }
 
             break :blk bw.clicked();
@@ -676,25 +696,29 @@ fn drawCommandRow(
 }
 
 const Shortcut = struct {
+    /// The text form — what the table searches and sorts by, so typing "ctrl" still filters.
     keys: []const u8,
+    /// What gets drawn: keycaps, not the text.
+    stroke: Keymap.Stroke,
     /// The chord belongs to a Fizzy forwarder this command is reached through, not to this
     /// command. Drawn dimmed so it doesn't read as an override the Reset button could clear.
     inherited: bool = false,
 };
 
 fn shortcutFor(editor: *fizzy.Editor, id: []const u8, platform: Keymap.Platform) ?Shortcut {
-    if (directShortcut(editor, id, platform)) |keys| return .{ .keys = keys };
+    if (directShortcut(editor, id, platform)) |found| return found;
 
     // A plugin's document verb (`pixi.copy`) is invoked through the Fizzy forwarder that owns
     // the chord (`fizzy.copy` on `cmd+c`), so it has no binding of its own to find. Showing the
     // forwarder's chord is the truth about what key runs this command; showing "—" implied it
     // had no shortcut at all.
     const source = Keybinds.inheritedChordSource(id) orelse return null;
-    const keys = directShortcut(editor, source, platform) orelse return null;
-    return .{ .keys = keys, .inherited = true };
+    var found = directShortcut(editor, source, platform) orelse return null;
+    found.inherited = true;
+    return found;
 }
 
-fn directShortcut(editor: *fizzy.Editor, id: []const u8, platform: Keymap.Platform) ?[]const u8 {
+fn directShortcut(editor: *fizzy.Editor, id: []const u8, platform: Keymap.Platform) ?Shortcut {
     const arena = dvui.currentWindow().arena();
     const found = editor.app.keymap.bindingsFor(arena, id) catch return null;
     if (found.len == 0) return null;
@@ -703,7 +727,8 @@ fn directShortcut(editor: *fizzy.Editor, id: []const u8, platform: Keymap.Platfo
     for (found[1..]) |b| {
         if (@intFromEnum(b.source) >= @intFromEnum(best.source)) best = b;
     }
-    return Keymap.formatKeys(arena, best.stroke, platform) catch null;
+    const keys = Keymap.formatKeys(arena, best.stroke, platform) catch return null;
+    return .{ .keys = keys, .stroke = best.stroke };
 }
 
 /// Returns true when recording finished (a chord was captured).

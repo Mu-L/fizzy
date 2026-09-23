@@ -91,6 +91,23 @@ var fizzy_plugin: sdk.Plugin = .{
 
 const fizzy_vtable: sdk.Plugin.VTable = .{};
 
+/// A keymap stroke as `core.keycaps` draws it. Here rather than in the keymap because the keymap
+/// is deliberately dvui-free and `core.keycaps` draws; the two share key tag names, so this is a
+/// field-for-field copy.
+pub fn keycapsStroke(s: Keymap.Stroke) fizzy.core.keycaps.Stroke {
+    return .{
+        .first = keycapsChord(s.first),
+        .second = if (s.second) |c| keycapsChord(c) else null,
+    };
+}
+
+fn keycapsChord(c: Keymap.Chord) fizzy.core.keycaps.Chord {
+    return .{
+        .mods = .{ .ctrl = c.mods.ctrl, .shift = c.mods.shift, .alt = c.mods.alt, .command = c.mods.command },
+        .key = @tagName(c.key),
+    };
+}
+
 fn cmdFocusWindow(_: *anyopaque) anyerror!void {
     fizzy.backend.raiseWindow();
 }

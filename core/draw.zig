@@ -7,6 +7,7 @@
 //! `core` and not the app, because a plugin's list should shade its edges the same way fizzy's
 //! does — see `core.widgets` for the divide.
 const std = @import("std");
+const keycaps = @import("keycaps.zig");
 const dvui = @import("dvui");
 const icon_tex = @import("gfx/icon.zig");
 const builtin = @import("builtin");
@@ -117,103 +118,51 @@ pub fn menuRowIcon(bytes: ?[]const u8, base_color: dvui.Color, enabled: bool, id
     }
 }
 
+/// A menu row's label and its shortcut, laid out the way macOS lays out a menu: the label starts
+/// right after the icon column, and the shortcut sits against the right edge — so down a whole
+/// menu the shortcuts line up in their own column instead of trailing each label at a different x.
+///
+/// The row always fills the width it is given and the label takes the slack. That is not left to
+/// `opts`: the row used to be exactly as wide as the options a caller passed said, and the menu
+/// bar's said nothing about expanding, so its rows shrink-wrapped and every shortcut landed
+/// immediately after its label.
 pub fn labelWithKeybind(label_str: []const u8, hotkey: dvui.enums.Keybind, enabled: bool, label_opts: dvui.Options, opts: dvui.Options) void {
-    const box = dvui.box(@src(), .{ .dir = .horizontal }, opts);
+    const box = dvui.box(@src(), .{ .dir = .horizontal }, opts.override(.{ .expand = .horizontal }));
     defer box.deinit();
 
-    var new_opts = label_opts.strip();
-    new_opts.gravity_y = 0.5;
+    var label = label_opts.strip();
+    label.gravity_y = 0.5;
+    // Takes whatever the shortcut does not, which is what pushes the shortcut to the edge.
+    label.expand = .horizontal;
     if (!enabled) {
-        if (new_opts.color_text) |c| {
-            new_opts.color_text = c.opacity(0.5);
+        if (label.color_text) |c| {
+            label.color_text = c.opacity(0.5);
         } else {
-            new_opts.color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.5) };
+            label.color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.5) };
         }
     }
+    dvui.labelNoFmt(@src(), label_str, .{}, label);
 
-    dvui.labelNoFmt(@src(), label_str, .{}, new_opts);
-    _ = dvui.spacer(@src(), .{ .min_size_content = .width(12) });
-
-    var second_opts = opts.strip();
-    second_opts.color_text = .{ .color = dvui.themeGet().color(.control, .text) };
-    second_opts.gravity_y = 0.5;
-    second_opts.gravity_x = 1.0;
-    second_opts.font = dvui.Font.theme(.heading);
-
-    keybindLabels(&hotkey, enabled, second_opts);
+    // No shortcut, no gap: a row without one should not be widened by space for it.
+    if (hotkey.key == null) return;
+    // The minimum distance between a label and its shortcut. macOS keeps a wide one, so the
+    // shortcut column reads as a column even in the widest row of the menu.
+    _ = dvui.spacer(@src(), .{ .min_size_content = .width(28) });
+    keybindLabels(&hotkey, enabled, .{ .id_extra = opts.id_extra });
 }
 
+/// A menu row's shortcut, drawn the way the OS's own menus draw one — `keycaps.draw` in `.plain`
+/// style. Kept as the entry point the menu rows already call, so every one of them changes at once:
+/// this used to spell `ctrl` and `shift` as words beside ⌘ and ⌥ as glyphs, and the key as its enum
+/// tag (`enter`, `page_up`).
 pub fn keybindLabels(self: *const dvui.enums.Keybind, enabled: bool, opts: dvui.Options) void {
-    var box = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = opts.expand, .gravity_x = 1.0 });
-    defer box.deinit();
-
-    var color = if (opts.color_text) |c| c.toColor() else dvui.themeGet().color(.control, .text);
-    if (true or enabled) {
-        color = color.opacity(0.5);
-    }
-
-    var second_opts = opts.strip();
-    second_opts.color_text = .{ .color = color };
-    second_opts.font = dvui.Font.theme(.mono);
-    second_opts.gravity_y = 0.5;
-
-    var needs_space = false;
-    if (self.control) |ctrl| {
-        if (ctrl) {
-            needs_space = true;
-            if (needs_space) dvui.labelNoFmt(@src(), " ", .{}, opts.strip());
-            //if (needs_plus) dvui.labelNoFmt(@src(), "+", .{}, opts.strip()) else needs_plus = true;
-            //if (needs_space) dvui.labelNoFmt(@src(), " ", .{}, opts.strip()) else needs_space = true;
-
-            dvui.labelNoFmt(@src(), "ctrl", .{}, second_opts);
-        }
-    }
-
-    if (self.command) |cmd| {
-        if (cmd) {
-            needs_space = true;
-            if (needs_space) dvui.labelNoFmt(@src(), " ", .{}, opts.strip());
-            //if (needs_plus) dvui.labelNoFmt(@src(), "+", .{}, opts.strip()) else needs_plus = true;
-            //if (needs_space) dvui.labelNoFmt(@src(), " ", .{}, opts.strip()) else needs_space = true;
-            if (platform.isMacOS()) {
-                icon_tex.icon(@src(), "cmd", icons.tvg.lucide.command, .{ .stroke_color = .{ .color = color } }, .{ .gravity_y = 0.5 });
-            } else {
-                dvui.labelNoFmt(@src(), "cmd", .{}, second_opts);
-            }
-        }
-    }
-
-    if (self.alt) |alt| {
-        if (alt) {
-            needs_space = true;
-            if (needs_space) dvui.labelNoFmt(@src(), " ", .{}, opts.strip());
-            //if (needs_plus) dvui.labelNoFmt(@src(), "+", .{}, opts.strip()) else needs_plus = true;
-            //if (needs_space) dvui.labelNoFmt(@src(), " ", .{}, opts.strip()) else needs_space = true;
-            if (platform.isMacOS()) {
-                icon_tex.icon(@src(), "option", icons.tvg.lucide.option, .{ .stroke_color = .{ .color = color } }, .{ .gravity_y = 0.5 });
-            } else {
-                dvui.labelNoFmt(@src(), "alt", .{}, second_opts);
-            }
-        }
-    }
-
-    if (self.shift) |shift| {
-        if (shift) {
-            needs_space = true;
-            if (needs_space) dvui.labelNoFmt(@src(), " ", .{}, opts.strip());
-            //if (needs_plus) dvui.labelNoFmt(@src(), "+", .{}, opts.strip()) else needs_plus = true;
-            //if (needs_space) dvui.labelNoFmt(@src(), " ", .{}, opts.strip()) else needs_space = true;
-            dvui.labelNoFmt(@src(), "shift", .{}, second_opts);
-        }
-    }
-
-    if (self.key) |key| {
-        needs_space = true;
-        if (needs_space) dvui.labelNoFmt(@src(), " ", .{}, opts.strip());
-        //if (needs_plus) dvui.labelNoFmt(@src(), "+", .{}, opts.strip()) else needs_plus = true;
-        //if (needs_space) dvui.labelNoFmt(@src(), " ", .{}, opts.strip()) else needs_space = true;
-        dvui.labelNoFmt(@src(), @tagName(key), .{}, second_opts);
-    }
+    const stroke = keycaps.Stroke.fromKeybind(self.*) orelse return;
+    keycaps.draw(@src(), stroke, .{
+        .style = .plain,
+        .enabled = enabled,
+        .color = if (opts.color_text) |c| c.toColor().opacity(0.55) else null,
+        .id_extra = opts.id_extra orelse 0,
+    });
 }
 
 const Shadow = enum {

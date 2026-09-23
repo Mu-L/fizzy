@@ -381,13 +381,12 @@ fn collectCommandRows(editor: *Editor, query: *const fuzzy.Query) []Row {
     return rows.items;
 }
 
-/// Shortcut hint for a command, or null when it has none.
-fn shortcutFor(editor: *Editor, id: []const u8) ?[]const u8 {
+/// A command's first binding, or null when it has none.
+fn shortcutFor(editor: *Editor, id: []const u8) ?Keymap.Stroke {
     const arena = dvui.currentWindow().arena();
     const found = editor.app.keymap.bindingsFor(arena, id) catch return null;
     if (found.len == 0) return null;
-    const platform: Keymap.Platform = if (fizzy.core.platform.isMacOS()) .mac else .other;
-    return Keymap.formatKeys(arena, found[0].stroke, platform) catch null;
+    return found[0].stroke;
 }
 
 // ---- activation ---------------------------------------------------------------------------
@@ -804,16 +803,13 @@ fn drawRow(
                     });
                 }
             }
-            if (shortcutFor(editor, c.id)) |keys| {
-                // `expand = .horizontal` hands the label every pixel left in the row, so the
-                // *widget* already ends at the right edge — but the glyphs inside it are laid
-                // out from its left, which left-justified the keys right after the title. Text
-                // alignment is `LabelWidget.InitOptions.align_x`, not `opts.gravity_x` (that
-                // places the widget in its parent), so this needs `labelEx` to flush them right.
-                dvui.labelEx(@src(), "{s}", .{keys}, .{ .align_x = 1.0 }, .{
-                    .gravity_y = 0.5,
-                    .expand = .horizontal,
-                    .color_text = .{ .color = text_color.opacity(0.55) },
+            if (shortcutFor(editor, c.id)) |stroke| {
+                // The spacer takes what the title does not, so the keycaps sit against the right
+                // edge — the column every row's shortcut lines up in.
+                _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+                core.keycaps.draw(@src(), Keybinds.keycapsStroke(stroke), .{
+                    .style = .caps,
+                    .color = text_color.opacity(0.7),
                 });
             }
         },

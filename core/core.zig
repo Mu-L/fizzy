@@ -46,6 +46,8 @@ pub const anim = @import("anim.zig");
 pub const dialogs = @import("dialogs.zig");
 /// Drawing helpers with no widget of their own: highlighted labels, menu rows, edge shadows.
 pub const draw = @import("draw.zig");
+/// How a keybind is drawn: glyphs and keycaps, in each platform's modifier order.
+pub const keycaps = @import("keycaps.zig");
 
 /// Generic momentum/fling helper (pan, scrub, cover-flow).
 pub const Fling = @import("Fling.zig");
