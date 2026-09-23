@@ -12,6 +12,7 @@ const Editor = fizzy.Editor;
 const nfd = @import("nfd");
 const PluginStore = @import("app").store.Store;
 const Layout = @import("app").layout.Layout;
+const Sidebar = @import("../Sidebar.zig");
 
 pub const Explorer = @This();
 
@@ -133,10 +134,13 @@ pub fn draw(
     if (shown) |surface| {
         // Through the layout's swap: choosing another view on the rail blurs from one body to
         // the next, as every region does. The body's own box, so the capture of the outgoing
-        // view can be unpacked before the incoming one draws.
+        // view can be unpacked before the incoming one draws. The blur takes in the header and
+        // the rail too: the click was there, and a blur that stopped at the pane's edge cut the
+        // change off from where it came from.
         var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = false });
         defer body.deinit();
-        _ = try f.drawSwappedIn(fizzy.sdk.keywords.groupKey(keywords), body, surface);
+        const reach = explorer.rect_screen.unionWith(Sidebar.rect_screen);
+        _ = try f.drawSwappedIn(fizzy.sdk.keywords.groupKey(keywords), body, surface, reach);
     }
 
     scroll.deinit();

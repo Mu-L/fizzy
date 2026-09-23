@@ -488,6 +488,11 @@ pub const TransitionOptions = struct {
     /// it, so a view that paints only part of its area (the region's fill is not its own)
     /// photographs as it looks on screen rather than with transparent holes.
     backdrop: ?Backdrop = null,
+    /// More of the screen the snapshots take in beyond `rect`, as it is already drawn this frame
+    /// — a neighbour the change belongs with (the explorer's icon rail), so the blur runs over
+    /// the edge between them rather than stopping at it. Only the frame is copied there; the
+    /// outgoing view still draws within `rect`.
+    reach: ?dvui.Rect.Physical = null,
     /// Called after a successful capture, before the incoming screen packs. Use it to clear the
     /// parent's pack state so the capture's expanded child does not make the incoming one trip
     /// `rectFor() got child after expanded child`.
@@ -546,12 +551,18 @@ pub const TransitionFrame = struct {
     incoming: ?dvui.Picture = null,
     prev_clip: ?dvui.Rect.Physical = null,
     pending: bool = false,
+    /// The snapshots' rect when it reaches past the caller's clip (`TransitionOptions.reach`):
+    /// the overlay is drawn over all of it.
+    reach: ?dvui.Rect.Physical = null,
 
     pub fn deinit(self: *TransitionFrame) void {
         if (self.incoming) |*pic| {
             self.cross_fade.endIncoming(pic);
             if (self.prev_clip) |c| dvui.clipSet(c);
         }
+        const clip = dvui.clipGet();
+        if (self.reach) |r| dvui.clipSet(r);
+        defer dvui.clipSet(clip);
         self.cross_fade.draw(self.pending);
     }
 };
@@ -582,6 +593,7 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
     const had_prev = state.prev_key != null;
     const key_changed = !had_prev or state.prev_key.? != opts.key;
     const pending = opts.pending or state.pending;
+    const rect = if (opts.reach) |r| opts.rect.unionWith(r) else opts.rect;
 
     if (had_prev and key_changed) {
         const kind = effectiveKind(opts.kind);
@@ -589,12 +601,11 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
         state.cross_fade.opaque_snapshots = false;
         state.cross_fade.duration_ns = opts.duration_ns orelse crossfade.durationNs(kind);
         if (opts.draw_previous) |draw_prev| {
-            if (beginBackdropCapture(&state.cross_fade, opts.rect, opts.backdrop)) |captured| {
+            if (beginBackdropCapture(&state.cross_fade, rect, opts.backdrop)) |captured| {
                 var pic = captured;
-                // Match CacheWidget: clip to the capture region so we don't paint outside the
-                // target, and restore afterward so the incoming screen sees the normal clip.
-                const prev_clip = dvui.clipGet();
-                dvui.clipSet(opts.rect);
+                // The outgoing view draws where it lives: within `opts.rect` and the caller's
+                // clip. Restored afterward so the incoming screen sees the normal clip.
+                const prev_clip = dvui.clip(opts.rect);
                 draw_prev(opts.ctx);
                 dvui.clipSet(prev_clip);
                 state.cross_fade.endCapture(&pic);
@@ -608,12 +619,16 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
     // A blur swap also photographs the incoming view once, a settle frame after the swap (the
     // first frame it draws has no sizes from last frame and is not what it will look like),
     // so `CrossFade.draw` can sharpen it in. Fade does not need it.
-    var frame: TransitionFrame = .{ .cross_fade = &state.cross_fade, .pending = pending };
+    var frame: TransitionFrame = .{
+        .cross_fade = &state.cross_fade,
+        .pending = pending,
+        .reach = if (opts.reach != null) rect else null,
+    };
     const cf = &state.cross_fade;
     if (cf.kind == .blur and cf.texture != null and cf.incoming == null and !cf.have_incoming and !key_changed) {
         if (cf.incoming_wait < 1) {
             cf.incoming_wait += 1;
-        } else if (beginBackdropCapture(cf, opts.rect, opts.backdrop)) |pic| {
+        } else if (beginBackdropCapture(cf, rect, opts.backdrop)) |pic| {
             frame.incoming = pic;
             frame.prev_clip = dvui.clip(opts.rect);
         }
