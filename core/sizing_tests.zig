@@ -11,6 +11,7 @@
 //! than arithmetic, and reading the code caught none of them.
 test {
     _ = @import("widgets/Split.zig");
+    _ = @import("widgets/ContextWidget.zig");
     // The local copies of upstream's docking + blur (see `widgets.zig`): referenced here so they
     // are analysed — and their own tests run — even before anything in the app draws them.
     _ = @import("widgets/DockingWidget.zig");

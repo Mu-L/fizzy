@@ -2511,7 +2511,7 @@ fn drawDocSurface(ctx: ?*anyopaque) anyerror!dvui.App.Result {
     // whatever drew what is under it: pixi's dropper would stop working the day this ran for a
     // plugin that said nothing.
     if (doc.owner.documentContextMenu(doc)) |menu_id| {
-        var right_click = dvui.context(@src(), .{ .rect = canvas.data().borderRectScale().r }, .{ .id_extra = @truncate(ds.doc_id) });
+        var right_click = core.widgets.context(@src(), .{ .rect = canvas.data().borderRectScale().r }, .{ .id_extra = @truncate(ds.doc_id) });
         defer right_click.deinit();
         if (right_click.activePoint()) |point| {
             var menu = fizzy.core.widgets.contextMenu(@src(), point, .{});

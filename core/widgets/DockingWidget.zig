@@ -75,7 +75,7 @@ pub const InitOptions = struct {
     /// (default) leaves just the tab strip.
     drawHeaderExtra: ?*const fn (Layout.PanelId) void = null,
     /// Called every frame a tab's right-click context menu is open (each tab
-    /// is wrapped in its own `dvui.context()`). `pt` anchors a `floatingMenu`;
+    /// is wrapped in its own `widgets.context()`). `pt` anchors a `floatingMenu`;
     /// call `.close()` on it when a menu item is picked.
     onTabContextMenu: ?*const fn (panel: Layout.PanelId, pt: dvui.Point.Natural) void = null,
     /// Options for a box wrapping each docked leaf's whole area — tab strip and
@@ -790,7 +790,7 @@ fn drawHeader(self: *Dockspace, node: Layout.NodeIndex, leaf: Layout.Node.Leaf) 
     if (self.init_opts.onTabContextMenu) |cb| {
         for (leaf.tabs.items, 0..) |slug, i| {
             if (i >= tab_rects.len) continue;
-            var cxt = dvui.context(@src(), .{ .rect = tab_rects[i] }, .{ .id_extra = slugIdExtra(slug) });
+            var cxt = @import("../widgets.zig").context(@src(), .{ .rect = tab_rects[i] }, .{ .id_extra = slugIdExtra(slug) });
             defer cxt.deinit();
             if (cxt.activePoint()) |cp| cb(slug, cp);
         }

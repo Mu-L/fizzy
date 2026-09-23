@@ -229,7 +229,7 @@ fn drawRoot(path: []const u8, kind: RootKind, tree: *core.widgets.TreeWidget, fi
     defer branch.deinit();
 
     { // Project root row: close / reveal / new items (same actions as folder rows, plus Close)
-        var context = dvui.context(@src(), .{ .rect = branch.button.data().borderRectScale().r }, .{});
+        var context = core.widgets.context(@src(), .{ .rect = branch.button.data().borderRectScale().r }, .{});
         defer context.deinit();
 
         if (context.activePoint()) |point| {
@@ -302,7 +302,7 @@ fn drawRoot(path: []const u8, kind: RootKind, tree: *core.widgets.TreeWidget, fi
         defer filler.deinit();
 
         {
-            var blank_ctx = dvui.context(@src(), .{ .rect = filler.data().borderRectScale().r }, .{});
+            var blank_ctx = core.widgets.context(@src(), .{ .rect = filler.data().borderRectScale().r }, .{});
             defer blank_ctx.deinit();
 
             if (blank_ctx.activePoint()) |point| {
@@ -885,7 +885,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                 }
 
                 { // Add right click context menu for item options
-                    var context = dvui.context(@src(), .{ .rect = branch.button.data().borderRectScale().r }, .{ .id_extra = inner_id_extra.* });
+                    var context = core.widgets.context(@src(), .{ .rect = branch.button.data().borderRectScale().r }, .{ .id_extra = inner_id_extra.* });
                     defer context.deinit();
 
                     if (context.activePoint()) |point| {

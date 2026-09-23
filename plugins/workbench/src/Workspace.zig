@@ -863,7 +863,7 @@ pub fn drawBubble(rect: dvui.Rect, rs: dvui.RectScale, color: [4]u8, _: usize) !
 /// that menu. True when it closed something, so the caller stops walking a tab list that just
 /// changed underneath it — the close button breaks out of the loop for the same reason.
 fn drawTabMenu(tabs: []const *const sdk.Surface, index: usize, doc: sdk.DocHandle, grouping: u64, tab_rect: dvui.Rect.Physical) bool {
-    var ctx = dvui.context(@src(), .{ .rect = tab_rect }, .{ .id_extra = index });
+    var ctx = core.widgets.context(@src(), .{ .rect = tab_rect }, .{ .id_extra = index });
     defer ctx.deinit();
     const point = ctx.activePoint() orelse return false;
 

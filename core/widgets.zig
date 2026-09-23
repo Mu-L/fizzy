@@ -36,6 +36,7 @@ pub const DockingWidget = @import("widgets/DockingWidget.zig");
 pub const DockLayout = DockingWidget.Layout;
 pub const BlurBackdrop = @import("widgets/BlurBackdrop.zig");
 pub const Popover = @import("widgets/Popover.zig");
+pub const ContextWidget = @import("widgets/ContextWidget.zig");
 
 /// The menu chain, copied from dvui so a menu can be frosted and so its rows are the same rows
 /// the command palette and the flyouts draw — see `widgets/menu/FloatingMenu.zig`'s header for
@@ -56,6 +57,15 @@ pub fn menuItem(src: std.builtin.SourceLocation, init_opts: MenuItemWidget.InitO
     ret.init(src, init_opts, opts);
     ret.processEvents();
     ret.drawBackground();
+    return ret;
+}
+
+/// A right-click / touch-hold area over `init_opts.rect` — use this, not `dvui.context`: see
+/// `ContextWidget`'s header for why a touch hold needs the copy.
+pub fn context(src: std.builtin.SourceLocation, init_opts: ContextWidget.InitOptions, opts: dvui.Options) *ContextWidget {
+    var ret = dvui.widgetAlloc(ContextWidget);
+    ret.init(src, init_opts, opts);
+    ret.processEvents();
     return ret;
 }
 
@@ -152,7 +162,7 @@ pub fn menuItemLabel(
 /// it does not, would otherwise drop the paste: it happened while the *menu* had focus. Focus goes
 /// back to the field afterwards, so the next keystroke lands where the paste did.
 pub fn textEntryMenu(te: *dvui.TextEntryWidget) bool {
-    var right_click = dvui.context(@src(), .{ .rect = te.data().borderRectScale().r }, .{ .id_extra = te.data().id.asUsize() });
+    var right_click = context(@src(), .{ .rect = te.data().borderRectScale().r }, .{ .id_extra = te.data().id.asUsize() });
     defer right_click.deinit();
     const point = right_click.activePoint() orelse return false;
 
