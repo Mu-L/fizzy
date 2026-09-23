@@ -25,8 +25,8 @@ const is_wasm = builtin.target.cpu.arch == .wasm32;
 /// load does not land, and the preview draws its placeholder.
 pub const fetch_supported = true;
 
-/// The browser can show SVG (pixels when CORS allows, an `<img>` overlay when it
-/// does not). Native cannot — dvui's `svgToTvg` mangles every real badge — so SVG
+/// The browser rasterizes SVG for us (the page reads its pixels, through the image proxy when
+/// the host sends no CORS header). Native cannot — dvui's `svgToTvg` mangles every real badge — so SVG
 /// URLs are skipped there instead of fetched. The preview uses this to decide
 /// *before* a fetch, so a `.svg` badge never becomes the "open" fallback link.
 pub const rasterizes_svg = is_wasm;
@@ -37,14 +37,6 @@ pub const Status = enum(u8) { fetching, ready, failed };
 /// rasterized, so stb never sees these bytes.
 pub const Pixels = struct {
     rgba: []const u8,
-    width: u32,
-    height: u32,
-};
-
-/// Image the browser loaded but we cannot read (no CORS). The preview reserves
-/// `width`×`height` and asks JS to park an `<img>` on top of the canvas.
-pub const Overlay = struct {
-    id: u32,
     width: u32,
     height: u32,
 };
@@ -67,8 +59,6 @@ const Entry = struct {
     /// Browser-rasterized pixels (`gpa`-owned). Web completion writes this before `ready`.
     /// Unused on native.
     pixels: ?Pixels = null,
-    /// Set when the browser loaded the image but pixels were unreadable (CORS).
-    overlay: ?Overlay = null,
     /// Native worker handle. Omitted on wasm — that target is single-threaded and
     /// `std.Thread` cannot even be named there.
     thread: if (is_wasm) void else ?std.Thread = if (is_wasm) {} else null,
@@ -88,20 +78,7 @@ const wasm = if (is_wasm) struct {
     /// Starts a browser load for `url`. Wired in `web/index.html` by adding a `fizzy`
     /// import namespace at instantiate time — dvui's `web.js` only provides `dvui.*`.
     extern "fizzy" fn fizzy_web_image_request(id: u32, url_ptr: [*]const u8, url_len: usize) void;
-    extern "fizzy" fn fizzy_web_image_place(id: u32, x: f32, y: f32, w: f32, h: f32, cx: f32, cy: f32, cw: f32, ch: f32) void;
-    extern "fizzy" fn fizzy_web_image_dismiss(id: u32) void;
-    /// Marks the start of a canvas frame so JS can hide overlays this frame did not
-    /// place. Idle (no frame) must not hide them — see `beginOverlayFrame`.
-    extern "fizzy" fn fizzy_web_image_frame_begin() void;
 } else struct {};
-
-/// Web only. Tell JS a canvas frame is starting. Overlays that aren't `placeOverlay`'d
-/// this frame hide after paint; when the app sleeps (mouse left the window) this is
-/// never called, so badges stay put instead of vanishing on a wall-clock timeout.
-pub fn beginOverlayFrame() void {
-    if (comptime !is_wasm) return;
-    wasm.fizzy_web_image_frame_begin();
-}
 
 /// Counted rather than tracked in a counter the workers would have to decrement: the map is
 /// small and bounded by `max_entries`, and a UI-thread-only walk keeps this state single-owner.
@@ -134,8 +111,6 @@ pub const Result = union(enum) {
     ready: []const u8,
     /// Cached decoded pixels, valid until `deinit`. Web path.
     ready_pixels: Pixels,
-    /// Browser has the image; we cannot copy pixels. Web path.
-    overlay: Overlay,
     failed,
 };
 
@@ -185,8 +160,6 @@ fn resultOf(entry: *Entry) Result {
         .failed => .failed,
         .ready => if (entry.pixels) |p|
             .{ .ready_pixels = p }
-        else if (entry.overlay) |o|
-            .{ .overlay = o }
         else if (entry.bytes) |b|
             .{ .ready = b }
         else
@@ -206,8 +179,6 @@ pub fn deinit() void {
         const entry = kv.value_ptr.*;
         if (comptime !is_wasm) {
             if (entry.thread) |t| t.join();
-        } else {
-            wasm.fizzy_web_image_dismiss(entry.id);
         }
         if (entry.bytes) |b| a.free(b);
         if (entry.pixels) |p| a.free(p.rgba);
@@ -296,37 +267,4 @@ export fn FizzyWebImageFailed(id: u32) void {
     const entry = entryById(id) orelse return;
     if (entry.statusValue() != .fetching) return;
     entry.status.store(@intFromEnum(Status.failed), .release);
-}
-
-/// Browser loaded the image but pixels were unreadable (tainted canvas). We still
-/// know the intrinsic size, so the preview can reserve space and overlay an `<img>`.
-export fn FizzyWebImageOverlay(id: u32, width: u32, height: u32) void {
-    if (comptime !is_wasm) return;
-    const entry = entryById(id) orelse return;
-    if (entry.statusValue() != .fetching) return;
-    // A badge SVG with no intrinsic size still needs a slot — GitHub's are ~200×20,
-    // and a zero box would collapse the overlay to nothing.
-    const w = if (width == 0) 200 else width;
-    const h = if (height == 0) 20 else height;
-    entry.overlay = .{ .id = id, .width = w, .height = h };
-    entry.status.store(@intFromEnum(Status.ready), .release);
-}
-
-/// Park the browser `<img>` over `rect`, clipped to the preview pane. Coordinates
-/// are physical; we convert to CSS pixels with `scale` so the overlay tracks a
-/// HiDPI canvas.
-pub fn placeOverlay(id: u32, rect: dvui.Rect.Physical, clip: dvui.Rect.Physical, scale: f32) void {
-    if (comptime !is_wasm) return;
-    if (!(scale > 0)) return;
-    wasm.fizzy_web_image_place(
-        id,
-        rect.x / scale,
-        rect.y / scale,
-        rect.w / scale,
-        rect.h / scale,
-        clip.x / scale,
-        clip.y / scale,
-        clip.w / scale,
-        clip.h / scale,
-    );
 }

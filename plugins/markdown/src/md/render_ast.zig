@@ -741,8 +741,6 @@ const ResolvedImage = union(enum) {
     bytes: []const u8,
     /// Browser-decoded RGBA — web path, including SVG badges.
     pixels: net_image.Pixels,
-    /// Browser has the image; we cannot copy pixels (CORS). Web path.
-    overlay: net_image.Overlay,
     /// Remote fetch still running — caller should draw a placeholder and come back next frame.
     pending,
     /// User-facing reason the image can't be shown.
@@ -770,7 +768,6 @@ fn resolveImageBytes(ctx: RenderContext, arena: std.mem.Allocator, raw_url: []co
             .failed => .{ .message = "could not fetch image" },
             .ready => |b| .{ .bytes = b },
             .ready_pixels => |p| .{ .pixels = p },
-            .overlay => |o| .{ .overlay = o },
         };
     }
 
@@ -1231,25 +1228,6 @@ fn renderImageUrl(raw_url: []const u8, alt: []const u8, want: RequestedSize, ctx
                 .invalidation = .ptr,
             } };
             key_ptr = b.ptr;
-        },
-        .overlay => |o| {
-            const nat: dvui.Size = .{ .w = @floatFromInt(o.width), .h = @floatFromInt(o.height) };
-            const size = displaySize(nat, want, avail_w) orelse {
-                renderMarkdownImagePlaceholder("invalid image size", ids);
-                return;
-            };
-            var holder = box(@src(), .{ .dir = .horizontal }, .{
-                .min_size_content = .{ .w = size.w, .h = size.h },
-                .max_size_content = dvui.Options.MaxSize.size(.{ .w = size.w, .h = size.h }),
-                .expand = .none,
-                .gravity_x = alignGravityX(want),
-                .id_extra = ids.next(),
-            });
-            defer holder.deinit();
-            const rs = holder.data().rectScale();
-            net_image.placeOverlay(o.id, rs.r, dvui.clipGet(), rs.s);
-            renderImageCaption(alt, ctx, ids);
-            return;
         },
         .pending => {
             renderMarkdownImagePlaceholder("loading image…", ids);

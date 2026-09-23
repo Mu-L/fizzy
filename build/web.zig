@@ -67,7 +67,6 @@ pub fn addSteps(
         "FizzyWebImageAlloc",
         "FizzyWebImageReady",
         "FizzyWebImageFailed",
-        "FizzyWebImageOverlay",
         "FizzyWebFetchAlloc",
         "FizzyWebFetchReady",
         "FizzyWebFetchFailed",

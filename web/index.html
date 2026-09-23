@@ -137,27 +137,13 @@
       }
 
       // Markdown remote images (and SVG badges) load through the browser: Zig calls
-      // `fizzy_web_image_request`. If CORS lets us read pixels, we write RGBA back
-      // through `FizzyWebImageAlloc` / `FizzyWebImageReady` and dvui draws them. If
-      // it does not — GitHub Actions badges — we keep the `<img>` and Zig parks it
-      // over the canvas via `fizzy_web_image_place`. dvui's `web.js` only passes a
-      // `dvui` import object into `instantiateStreaming`, so we add a `fizzy`
-      // namespace on the way through — same trick as the trackpad export, inverted.
+      // `fizzy_web_image_request`, and the page writes RGBA back through `FizzyWebImageAlloc` /
+      // `FizzyWebImageReady` for dvui to draw like any other texture. dvui's `web.js` only passes
+      // a `dvui` import object into `instantiateStreaming`, so we add a `fizzy` namespace on the
+      // way through — same trick as the trackpad export, inverted.
       const utf8 = new TextDecoder();
       const utf8encode = (s) => new TextEncoder().encode(s);
       let wasmInstance = null;
-      const overlayUrls = new Map();
-      const overlays = new Map();
-      // Hide overlays that a canvas frame did not place — not ones that went unseen
-      // because the app slept. `frameBegin` is called from Zig at the start of every
-      // `dvui_update`; the rAF after paint hides the rest. No frame → no hide, so
-      // badges stay when the mouse leaves the window.
-      let overlayFrameOpen = false;
-      const placedThisFrame = new Set();
-      const overlayRoot = document.createElement("div");
-      overlayRoot.setAttribute("aria-hidden", "true");
-      overlayRoot.style.cssText = "position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:1;";
-      document.getElementById("app-root").appendChild(overlayRoot);
 
       // The one function table, created here so it can grow: a plugin loaded at runtime (a
       // wasm side module, see `loadPlugin`) brings functions of its own, and its function
@@ -209,8 +195,10 @@
             const inst = target();
             if (!inst) return;
             const url = utf8.decode(new Uint8Array(wasmInstance.exports.memory.buffer, urlPtr, urlLen));
-            overlayUrls.set(id, url);
-            loadImagePixels(url).then((imageData) => {
+            // Pixels or nothing: an image has to be a texture to sit under a menu, be frosted
+            // behind a flyout and take the theme's corners. A host that does not let the page
+            // read its pixels is read through the proxy instead, which adds the header.
+            loadImagePixels(url).catch(() => loadImagePixels(imageProxy + encodeURIComponent(url))).then((imageData) => {
               const bytes = new Uint8Array(
                 imageData.data.buffer,
                 imageData.data.byteOffset,
@@ -225,52 +213,9 @@
               }
               if (dvuiApp) dvuiApp.requestRender();
             }).catch(() => {
-              loadImageSize(url).then(({ w, h }) => {
-                inst.exports.FizzyWebImageOverlay(id, w, h);
-                if (dvuiApp) dvuiApp.requestRender();
-              }).catch(() => {
-                inst.exports.FizzyWebImageFailed(id);
-                if (dvuiApp) dvuiApp.requestRender();
-              });
+              inst.exports.FizzyWebImageFailed(id);
+              if (dvuiApp) dvuiApp.requestRender();
             });
-          },
-          fizzy_web_image_frame_begin() {
-            overlayFrameOpen = true;
-            placedThisFrame.clear();
-          },
-          fizzy_web_image_place(id, x, y, w, h, cx, cy, cw, ch) {
-            const url = overlayUrls.get(id);
-            if (!url) return;
-            let entry = overlays.get(id);
-            if (!entry) {
-              const img = document.createElement("img");
-              img.alt = "";
-              img.draggable = false;
-              img.src = url;
-              img.style.cssText = "position:absolute;pointer-events:none;";
-              overlayRoot.appendChild(img);
-              entry = { img };
-              overlays.set(id, entry);
-            }
-            placedThisFrame.add(id);
-            const img = entry.img;
-            img.style.display = "block";
-            img.style.left = x + "px";
-            img.style.top = y + "px";
-            img.style.width = w + "px";
-            img.style.height = h + "px";
-            const top = Math.max(0, cy - y);
-            const left = Math.max(0, cx - x);
-            const bottom = Math.max(0, (y + h) - (cy + ch));
-            const right = Math.max(0, (x + w) - (cx + cw));
-            img.style.clipPath = `inset(${top}px ${right}px ${bottom}px ${left}px)`;
-          },
-          fizzy_web_image_dismiss(id) {
-            overlayUrls.delete(id);
-            const entry = overlays.get(id);
-            if (!entry) return;
-            entry.img.remove();
-            overlays.delete(id);
           },
           // A full request for `core.transport.Web`: any method, headers as `Name: value`
           // lines, a body, and the status back with the bytes. Cloud drives speak through
@@ -573,6 +518,9 @@
       // the sha256 the registry published before it compiles anything, so this is a pipe, never
       // something trusted. `web/wrangler.toml` has the two lines to flip when the zone moves.
       const pluginProxy = "https://fizzy-plugin-dl.foxnne.workers.dev/dl/";
+      // The same Worker's image route (`dl-worker.js`): an image whose host sends no CORS header
+      // is fetched through it so its pixels can be read.
+      const imageProxy = "https://fizzy-plugin-dl.foxnne.workers.dev/img/";
       // Set once at startup by the host (`PluginLoader_web.init`): the ABI fingerprint whose
       // catalog shard this build installs from. The proxy checks the URL against that shard.
       let pluginFingerprint = "";
@@ -660,50 +608,32 @@
         // `fizzy_web_plugin_remember` once the plugin has actually registered.
       }
 
-      function hideUnplacedOverlays() {
-        if (overlayFrameOpen) {
-          for (const [id, entry] of overlays) {
-            if (!placedThisFrame.has(id)) entry.img.style.display = "none";
-          }
-          overlayFrameOpen = false;
-        }
-        requestAnimationFrame(hideUnplacedOverlays);
-      }
-      requestAnimationFrame(hideUnplacedOverlays);
-
       /** Rasterize `url` the way an `<img>` would — PNG/JPEG and CORS-friendly SVG. */
       function loadImagePixels(url) {
         return new Promise((resolve, reject) => {
           const img = new Image();
           img.crossOrigin = "anonymous";
           img.onload = () => {
-            const w = img.naturalWidth;
-            const h = img.naturalHeight;
-            if (!(w > 0) || !(h > 0) || w * h > 4 * 1024 * 1024) {
-              reject(new Error("empty or oversized image"));
-              return;
-            }
+            // An SVG with no size of its own (a badge, often) still needs a box to raster into;
+            // GitHub's are about 200×20.
+            const nw = img.naturalWidth || 200;
+            const nh = img.naturalHeight || 20;
+            // Screenshots in READMEs run to 8+ megapixels and are shown at a fraction of that:
+            // scale down to the cap rather than refuse, so the pixels handed over stay bounded.
+            const fit = Math.min(1, Math.sqrt((4 * 1024 * 1024) / (nw * nh)));
+            const w = Math.max(1, Math.floor(nw * fit));
+            const h = Math.max(1, Math.floor(nh * fit));
             const canvas = document.createElement("canvas");
             canvas.width = w;
             canvas.height = h;
             const ctx = canvas.getContext("2d");
-            ctx.drawImage(img, 0, 0);
+            ctx.drawImage(img, 0, 0, w, h);
             try {
               resolve(ctx.getImageData(0, 0, w, h));
             } catch (err) {
               reject(err);
             }
           };
-          img.onerror = () => reject(new Error("image load failed"));
-          img.src = url;
-        });
-      }
-
-      /** Load without CORS so we still get intrinsic size for an overlay. */
-      function loadImageSize(url) {
-        return new Promise((resolve, reject) => {
-          const img = new Image();
-          img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
           img.onerror = () => reject(new Error("image load failed"));
           img.src = url;
         });

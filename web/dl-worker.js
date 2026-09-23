@@ -1,4 +1,4 @@
-// fizzy's plugin download proxy — a Cloudflare Worker on `fizzyed.it/dl/*`.
+// fizzy's plugin download and image proxy — a Cloudflare Worker (`/dl/*`, `/img/*`).
 //
 // **Why it exists.** A plugin publishes one set of binaries, wherever its author likes, and the
 // registry records the URLs. On the desktop fizzy downloads them directly. A browser cannot: it
@@ -19,7 +19,16 @@
 // trust this Worker any more than it trusts the origin, so the check belongs at the end of the
 // pipe, not in the middle of it.
 //
-// Deploy: `wrangler deploy`, with a route of `fizzyed.it/dl/*` on the zone.
+// **Images, on `/img/<encoded url>`.** Markdown in the web app — store READMEs, a user's notes —
+// shows remote images, and the app can only draw one whose pixels it can read, which is the same
+// CORS rule. Drawn as pixels, an image is an ordinary texture: it sits under menus, is frosted
+// behind a flyout, takes the theme's corners. So an image whose host sends no CORS header comes
+// through here. This route is not limited to a catalog — a note may embed anything — so it is
+// limited by what it returns and to whom: https in, `image/*` out, at most `MAX_IMAGE_BYTES`, and
+// only for pages on `IMAGE_ORIGINS`. A non-browser client can claim any Origin; the rest still
+// holds, and Cloudflare's cache keeps a repeated URL off the upstream.
+//
+// Deploy: `npx wrangler deploy --config web/wrangler.toml`.
 
 const CATALOG = "https://plugins.fizzyed.it/catalog";
 
@@ -32,12 +41,19 @@ const SHARD_TTL_SECONDS = 600;
 // a URL, so a request can never name a path of its own.
 const FINGERPRINT = /^0x[0-9a-f]{1,16}$/;
 
+// Pages the image route answers: the deployed app and a local `zig build web` server.
+const IMAGE_ORIGINS = [/^https:\/\/fizzyed\.it$/, /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/];
+
+// A README image past this is a mistake, and the app refuses to decode one this large anyway.
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
 export default {
   async fetch(request) {
     if (request.method === "OPTIONS") return preflight();
     if (request.method !== "GET" && request.method !== "HEAD") return problem(405, "only GET");
 
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/img/")) return image(request, url);
     if (!url.pathname.startsWith("/dl/")) return problem(404, "not a download path");
 
     // `/dl/<fingerprint>/<encoded url>` — everything after the second slash is the target,
@@ -80,6 +96,50 @@ export default {
     return new Response(request.method === "HEAD" ? null : upstream.body, { status: 200, headers });
   },
 };
+
+/** `/img/<encoded url>`: an image, with the CORS header its host did not send. */
+async function image(request, url) {
+  const origin = request.headers.get("origin") ?? "";
+  if (!IMAGE_ORIGINS.some((re) => re.test(origin))) return problem(403, "not for this origin");
+
+  let target;
+  try {
+    target = new URL(decodeURIComponent(url.pathname.slice("/img/".length)) + url.search);
+  } catch {
+    return problem(400, "not a URL");
+  }
+  if (target.protocol !== "https:") return problem(400, "https only");
+
+  const upstream = await fetch(target.toString(), {
+    redirect: "follow",
+    cf: { cacheEverything: true, cacheTtl: 86400 },
+  });
+  if (!upstream.ok) return problem(upstream.status, "upstream said " + upstream.status);
+  const type = upstream.headers.get("content-type") ?? "";
+  if (!type.startsWith("image/")) return problem(415, "not an image");
+  const len = Number(upstream.headers.get("content-length") ?? "0");
+  if (len > MAX_IMAGE_BYTES) return problem(413, "image too large");
+
+  const headers = new Headers();
+  headers.set("access-control-allow-origin", "*");
+  headers.set("cache-control", "public, max-age=86400");
+  headers.set("content-type", type);
+  if (request.method === "HEAD") return new Response(null, { status: 200, headers });
+  // A host that sends no length is held to the cap as the bytes arrive.
+  return new Response(upstream.body.pipeThrough(capBytes(MAX_IMAGE_BYTES)), { status: 200, headers });
+}
+
+/** A stream that errors once more than `max` bytes have passed through it. */
+function capBytes(max) {
+  let seen = 0;
+  return new TransformStream({
+    transform(chunk, controller) {
+      seen += chunk.byteLength;
+      if (seen > max) controller.error(new Error("image too large"));
+      else controller.enqueue(chunk);
+    },
+  });
+}
 
 /** Every download URL one shard publishes, cached per isolate. */
 const shards = new Map();

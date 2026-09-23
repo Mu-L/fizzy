@@ -1,4 +1,4 @@
-# Deploy fizzy's plugin download proxy (see `dl-worker.js` for what it is and why).
+# Deploy fizzy's plugin download and image proxy (see `dl-worker.js` for what it is and why).
 #
 #   npx wrangler deploy --config web/wrangler.toml
 #

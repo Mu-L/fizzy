@@ -22,12 +22,6 @@ pub fn deinitShared() void {
     net_image.deinit();
 }
 
-/// Web only — see `net_image.beginOverlayFrame`. Called once per canvas frame from
-/// `Editor.tick` so leaving a README and sleeping the window stay distinct.
-pub fn beginWebOverlayFrame() void {
-    net_image.beginOverlayFrame();
-}
-
 /// Persistent preview state: caches parsed AST + precomputed render data keyed by content hash.
 pub const Preview = struct {
     scroll: dvui.ScrollInfo = .{},

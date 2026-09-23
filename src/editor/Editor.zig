@@ -3359,15 +3359,7 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             .has_chrome = true,
         });
     }
-    // CORS-fail README images are `<img>` overlays, not canvas pixels. JS hides any
-    // overlay this frame doesn't place — but only after a real frame, so sleeping the
-    // window (mouse left) does not blank them. See `net_image.beginOverlayFrame`.
-    // A bundled plugin that needs a call each frame declares one; on web the markdown
-    // preview's remote-image overlay is the one that does.
     if (comptime builtin.target.cpu.arch == .wasm32) {
-        inline for (bundled_plugins) |m| {
-            if (comptime @hasDecl(m, "beginWebOverlayFrame")) m.beginWebOverlayFrame();
-        }
         // Plugins the page has finished linking since last frame register now.
         PluginLoader.pump();
     }
