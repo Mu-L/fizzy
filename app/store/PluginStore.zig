@@ -2579,6 +2579,21 @@ fn drawSelectionToggles(
         if (showing) flyoutClear();
         return;
     }
+
+    // A press anywhere but the panel or the card it belongs to puts it away — the rule every
+    // other floating thing in the app follows, and the one a user tries first. The card counts
+    // as inside: pressing it is the toggle, and taking the press here as well would close and
+    // reopen in the same frame. Skipped on the first frame, when the panel has no rect yet and
+    // "outside it" would be everywhere.
+    if (showing and !flyout_rect.empty()) {
+        if (core.widgets.Popover.outside(&.{ card_r, flyout_rect })) {
+            flyoutClear();
+            selected_id_len = 0;
+            dvui.refresh(null, @src(), null);
+            return;
+        }
+    }
+
     if (!showing) flyoutSet(entry.id);
     if (!flyoutIsFor(entry.id)) return; // id too long to track
 
