@@ -6,6 +6,9 @@
 //!   every press it gets. dvui's skips handled events, so on a touch screen a hold never began.
 //!   Taking the press anyway is safe: a hold that completes releases the capture, so the button
 //!   under the finger does not fire on touch up, and moving the finger cancels the hold.
+//! - **A hold is timed from the press.** dvui's adds up `secondsSinceLastFrame`, and the frame
+//!   a press wakes a sleeping app for is seconds after the one before it — so a tap after any
+//!   pause counted as a full hold on its first frame: the menu opened and ate the tap.
 //! - **It registers as the root of fizzy's menu chain** (`menu/Menu.zig`'s `Root`) as well as
 //!   dvui's, so choosing a row closes it whichever chain drew the menu it opened.
 const std = @import("std");
@@ -30,8 +33,8 @@ pub const InitOptions = struct {
 
 const HoldState = struct {
     pending: bool = false,
-    /// Seconds the touch has been held, accumulated via `dvui.secondsSinceLastFrame`.
-    held: f32 = 0,
+    /// The frame time of the press's frame; the hold is how long ago that was.
+    start_ns: i128 = 0,
     press_p: Point.Physical = .{},
     button: dvui.enums.Button = .none,
     event_num: u16 = 0,
@@ -140,11 +143,8 @@ fn updateHold(self: *ContextWidget) void {
     // "Simulate Touch")
     dvui.timer(self.data().id, 100_000);
 
-    self.hold.held += dvui.secondsSinceLastFrame();
-
     const cw = dvui.currentWindow();
-    const hold_menu_duration_s = @as(f32, @floatFromInt(cw.hold_menu_duration_ns)) / std.time.ns_per_s;
-    if (self.hold.held >= hold_menu_duration_s) {
+    if (cw.frame_time_ns - self.hold.start_ns >= cw.hold_menu_duration_ns) {
         self.hold.pending = false;
 
         // prevent any button or other thing the finger might be on top of from firing on touch up
@@ -164,7 +164,7 @@ pub fn processEvents(self: *ContextWidget) void {
                 // touch down inside our rect
                 self.hold = .{
                     .pending = true,
-                    .held = 0,
+                    .start_ns = dvui.currentWindow().frame_time_ns,
                     .press_p = me.p,
                     .button = me.button,
                     .event_num = e.num,
@@ -325,4 +325,27 @@ test "a touch hold opens the menu over a button, and the button does not fire" {
     _ = try cw.addEventPointer(.{ .button = .touch0, .action = .release, .xynorm = .{ .x = 0.5, .y = 0.5 } });
     _ = try dvui.testing.step(holdFrame);
     try std.testing.expect(!t_clicked);
+}
+
+test "a tap after the app sat idle is a tap, not a hold" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 200, .h = 100 } });
+    defer t.deinit();
+    t_opened = false;
+    t_clicked = false;
+
+    try dvui.testing.settle(holdFrame);
+    const cw = dvui.currentWindow();
+    // Nothing happens for three seconds: the app sleeps, and the frame the press wakes it for
+    // is three seconds after the last one.
+    _ = try holdFrame();
+    _ = try cw.end(.{});
+    try cw.begin(cw.frame_time_ns + 3 * std.time.ns_per_s);
+
+    _ = try cw.addEventPointer(.{ .button = .touch0, .action = .press, .xynorm = .{ .x = 0.5, .y = 0.5 } });
+    _ = try dvui.testing.step(holdFrame);
+    try std.testing.expect(!t_opened);
+    _ = try cw.addEventPointer(.{ .button = .touch0, .action = .release, .xynorm = .{ .x = 0.5, .y = 0.5 } });
+    for (0..2) |_| _ = try dvui.testing.step(holdFrame);
+    try std.testing.expect(t_clicked);
+    try std.testing.expect(!t_opened);
 }
