@@ -284,17 +284,7 @@ fn drawOwnerBranch(
 
     {
         const icon_color = theme.color(.control, .fill);
-        {
-            var slot = core.widgets.treeRowGlyph(@src(), .{});
-            defer slot.deinit();
-            _ = core.icon.icon(
-                @src(),
-                "KeybindOwnerCaret",
-                if (b.expanded) icons.tvg.entypo.@"down-open" else icons.tvg.entypo.@"right-open",
-                .{ .fill_color = .{ .color = icon_color }, .stroke_color = .{ .color = icon_color } },
-                core.widgets.treeRowIconOptions(.{}),
-            );
-        }
+        core.widgets.treeCaret(@src(), b.expanded, icon_color);
         {
             var slot = core.widgets.treeRowGlyph(@src(), .{ .margin = .{ .w = 2 } });
             defer slot.deinit();

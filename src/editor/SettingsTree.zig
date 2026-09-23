@@ -509,17 +509,7 @@ fn drawRow(b: *core.widgets.TreeWidget.Branch, branch: *const Branch, query: *co
     // `fill_hover` reads as a washed-out caret on top-level settings branches.
     const icon_color = dvui.themeGet().color(.control, .fill);
 
-    {
-        var slot = core.widgets.treeRowGlyph(@src(), .{});
-        defer slot.deinit();
-        _ = core.icon.icon(
-            @src(),
-            "BranchCaret",
-            if (b.expanded) icons.tvg.entypo.@"down-open" else icons.tvg.entypo.@"right-open",
-            .{ .fill_color = .{ .color = icon_color }, .stroke_color = .{ .color = icon_color } },
-            core.widgets.treeRowIconOptions(.{}),
-        );
-    }
+    core.widgets.treeCaret(@src(), b.expanded, icon_color);
 
     {
         // Same trailing gap as the file tree's folder/file icon slot (`files.zig`).

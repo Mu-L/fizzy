@@ -248,19 +248,9 @@ fn drawRoot(path: []const u8, kind: RootKind, tree: *core.widgets.TreeWidget, fi
     // by `fileRowFillColor`); the project row has no per-row tint, so it takes the theme base.
     const caret_color = dvui.themeGet().color(.control, .fill);
 
-    {
-        var caret_slot = core.widgets.treeRowGlyph(@src(), .{});
-        defer caret_slot.deinit();
-        _ = core.icon.icon(
-            @src(),
-            "FolderIcon",
-            if (branch.expanded) icons.tvg.entypo.@"down-open" else icons.tvg.entypo.@"right-open",
-            // Same tint the folder rows below use, so the project row's caret doesn't read as a
-            // different kind of control from every other caret in the tree.
-            .{ .fill_color = .{ .color = caret_color }, .stroke_color = .{ .color = caret_color } },
-            core.widgets.treeRowIconOptions(.{}),
-        );
-    }
+    // Same tint the folder rows below use, so the project row's caret doesn't read as a
+    // different kind of control from every other caret in the tree.
+    core.widgets.treeCaret(@src(), branch.expanded, caret_color);
 
     var fmt_string = std.fmt.allocPrint(dvui.currentWindow().lifo(), comptime "{s}", .{folder}) catch unreachable;
     defer dvui.currentWindow().lifo().free(fmt_string);
@@ -310,6 +300,16 @@ fn drawRoot(path: []const u8, kind: RootKind, tree: *core.widgets.TreeWidget, fi
             }
         }
     }
+}
+
+/// The row an expanded folder shows while its listing is on the way (a mount: see
+/// `FileTable.listingPending`). Dim, where the first child will be.
+fn drawLoadingRow(id_extra: usize) void {
+    dvui.labelNoFmt(@src(), "Loading\u{2026}", .{}, .{
+        .id_extra = id_extra,
+        .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
+        .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.45) },
+    });
 }
 
 /// Context menu for the project root directory: close project, reveal on disk, new file / folder.
@@ -608,10 +608,15 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
             // `FileTable.Entry` type serves both, which is what lets the run below draw either
             // without a second code path. Neither is copied — a listing can be hundreds of
             // thousands of entries and only the handful actually drawn is touched.
-            const listing: ?*const FileTable.Listing = if (rows == null)
-                ((table() orelse return).listDir(directory) orelse return)
-            else
-                null;
+            const listing: ?*const FileTable.Listing = if (rows == null) blk: {
+                const t = table() orelse return;
+                break :blk t.listDir(directory) orelse {
+                    // A mount answers later: say so in the folder rather than leave it open and
+                    // empty, which reads as "nothing here" until everything appears at once.
+                    if (t.listingPending(directory)) drawLoadingRow(inner_id_extra.*);
+                    return;
+                };
+            } else null;
             const total: usize = if (rows) |r| r.len else listing.?.entries.len;
             const file_run_start: usize = if (listing) |l| l.dir_count else 0;
 
@@ -1100,20 +1105,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                         const icon_color = color;
 
                         if (dvui.parentGet().data().rectScale().r.h > 10) {
-                            {
-                                var caret_slot = core.widgets.treeRowGlyph(@src(), .{});
-                                defer caret_slot.deinit();
-                                _ = core.icon.icon(
-                                    @src(),
-                                    "DropIcon",
-                                    if (branch.expanded) icons.tvg.entypo.@"down-open" else icons.tvg.entypo.@"right-open",
-                                    .{
-                                        .fill_color = .{ .color = icon_color },
-                                        .stroke_color = .{ .color = icon_color },
-                                    },
-                                    core.widgets.treeRowIconOptions(.{}),
-                                );
-                            }
+                            core.widgets.treeCaret(@src(), branch.expanded, icon_color);
 
                             {
                                 var icon_slot = core.widgets.treeRowGlyph(@src(), .{ .margin = .{ .w = 2 } });

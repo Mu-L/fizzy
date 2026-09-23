@@ -216,6 +216,24 @@ pub fn treeRowGlyphSize() dvui.Size {
     return .{ .w = h, .h = h };
 }
 
+/// A tree row's expand caret, in its own glyph slot: down when `expanded`, right when not.
+///
+/// The two arrows are different shapes (the down one wide, the right one tall) and the icon fits
+/// itself to the slot by the proportions dvui remembers for its id. Drawn under one id, a
+/// just-collapsed caret was fitted by the down arrow's proportions and stayed stretched until
+/// something redrew the row, so each direction has an id of its own.
+pub fn treeCaret(src: std.builtin.SourceLocation, expanded: bool, color: dvui.Color) void {
+    var slot = treeRowGlyph(src, .{});
+    defer slot.deinit();
+    _ = icon_tex.icon(
+        @src(),
+        "TreeCaret",
+        if (expanded) icons.tvg.entypo.@"down-open" else icons.tvg.entypo.@"right-open",
+        .{ .fill_color = .{ .color = color }, .stroke_color = .{ .color = color } },
+        treeRowIconOptions(.{ .id_extra = @intFromBool(expanded) }),
+    );
+}
+
 /// Options for fizzy's own icons/images drawn inside a `treeRowGlyph` slot — the same
 /// `expand = .ratio` fit asked of plugin icons, centred in the slot.
 pub fn treeRowIconOptions(over: dvui.Options) dvui.Options {

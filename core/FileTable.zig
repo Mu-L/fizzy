@@ -382,6 +382,12 @@ pub fn releaseRetired(self: *FileTable) void {
 
 // ---- listing ---------------------------------------------------------------------------------
 
+/// Whether `directory` has a listing on its way: `listDir` returned null because the answer has
+/// not landed, not because the directory cannot be read. What a tree shows as "loading".
+pub fn listingPending(self: *const FileTable, directory: []const u8) bool {
+    return self.pending.contains(directory);
+}
+
 /// Cached, sorted, ignore-screened listing for `directory`, asking its filesystem on a miss.
 ///
 /// Null when the directory can't be read — or, on a mount that answers later, until it has:
