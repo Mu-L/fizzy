@@ -51,6 +51,8 @@ fn defaultPreviewMode() PreviewMode {
 
 /// Fizzy document id (monotonic, allocated from the host).
 id: u64,
+/// The widget id its editor's layout was kept under last frame (`TextEntryWidget.RetainLayout`).
+layout_id: ?dvui.Id = null,
 /// Absolute path on disk, heap-owned.
 path: []u8,
 /// Tab grouping (which split/tab group this document lives in).

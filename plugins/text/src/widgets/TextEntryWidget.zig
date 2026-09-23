@@ -246,6 +246,17 @@ pub const EditNotify = struct {
     endEdit: *const fn (ctx: *anyopaque, sel_after: tc.Range) void,
 };
 
+/// A hidden tab is not drawn, dvui frees what an undrawn widget kept, and without its line
+/// heights the first frame back measures the whole document — about a second and a half for a
+/// 57MB file. So the layout is retained under `token` (the owner releases it with
+/// `dvui.releaseAllToken` when the document closes), and it follows the view when its widget id
+/// changes: ids follow their parents, and a document moved to another pane comes back under a
+/// new one. `last_id` is where it was kept last, owned by the caller across frames.
+pub const RetainLayout = struct {
+    token: dvui.data.Token,
+    last_id: *?dvui.Id,
+};
+
 pub const InitOptions = struct {
     pub const TextOption = union(enum) {
         /// Use this slice of bytes, cannot add more.
@@ -343,11 +354,8 @@ pub const InitOptions = struct {
     /// paren and a brace at the same indent do not. Off by default for the same reusability
     /// reason as `tab_inserts_indent`.
     rainbow_brackets: bool = false,
-    /// Keep this view's measured layout alive under `token` while it is not drawn: a hidden tab
-    /// is not drawn, dvui frees what an undrawn widget kept, and without its line heights the
-    /// first frame back measures the whole document — about a second and a half for a 57MB
-    /// file. The owner releases the token (`dvui.releaseAllToken`) when the document closes.
-    retain_layout: ?dvui.data.Token = null,
+    /// Keep this view's measured layout alive while it is not drawn — see `RetainLayout`.
+    retain_layout: ?RetainLayout = null,
 };
 
 /// Byte span of a tree-sitter token, used by `hovered_span` below.
@@ -592,7 +600,14 @@ pub fn init(self: *TextEntryWidget, src: std.builtin.SourceLocation, init_opts: 
         self.text_changed = true; // trigger tree_sitter full reparse
     }
 
-    self.textLayout.init(@src(), .{
+    const layout_src = @src();
+    if (self.init_opts.retain_layout) |r| {
+        // The id `textLayout.init` below is about to take (`strip` leaves no `id_extra`).
+        const layout_id = dvui.parentGet().extendId(layout_src, 0);
+        if (r.last_id.*) |old| if (old != layout_id) moveLayout(old, layout_id);
+        r.last_id.* = layout_id;
+    }
+    self.textLayout.init(layout_src, .{
         .break_lines = self.init_opts.break_lines,
         .kerning = self.init_opts.kerning,
         .touch_edit_just_focused = false,
@@ -1022,6 +1037,22 @@ pub fn draw(self: *TextEntryWidget) void {
 }
 
 pub const ByteRange = struct { start: usize, end: usize };
+
+/// Carry a retained layout from the id it was kept under to the one its view has now. Only into
+/// an id with none of its own: that one is newer.
+///
+/// The line heights are what spare the first frame from measuring everything. The per-line
+/// ascents are not carried (dvui keeps their type private): they only record lines whose later
+/// text is taller than their start — mixed font sizes, which this editor never draws — and a
+/// view that had some re-records them as it lays those lines out.
+fn moveLayout(from: dvui.Id, to: dvui.Id) void {
+    const BH = []dvui.TextLayoutWidget.ByteHeight;
+    if (dvui.dataGetSlice(null, to, "_byte_heights", BH) == null) {
+        if (dvui.dataGetSlice(null, from, "_byte_heights", BH)) |bh| dvui.dataSetSlice(null, to, "_byte_heights", bh);
+    }
+    dvui.dataRemove(null, from, "_byte_heights");
+    dvui.dataRemove(null, from, "__line_ascents");
+}
 
 /// Byte range the tree-sitter capture walk should cover this frame: what the viewport shows,
 /// plus a screenful of headroom on each side so a scroll doesn't outrun the highlighting before
@@ -2372,9 +2403,9 @@ pub fn deinit(self: *TextEntryWidget) void {
     self.textLayout.deinit();
     // After `deinit`, which is what writes these: writing a key can replace its value, and the
     // retain goes with the old one.
-    if (self.init_opts.retain_layout) |token| {
-        dvui.dataRetain(null, layout_id, "_byte_heights", token);
-        dvui.dataRetain(null, layout_id, "__line_ascents", token);
+    if (self.init_opts.retain_layout) |r| {
+        dvui.dataRetain(null, layout_id, "_byte_heights", r.token);
+        dvui.dataRetain(null, layout_id, "__line_ascents", r.token);
     }
     self.scroll.deinit();
 
