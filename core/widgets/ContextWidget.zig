@@ -253,6 +253,62 @@ fn holdFrame() !dvui.App.Result {
     return .ok;
 }
 
+var t_row_fired = false;
+
+/// `holdFrame`, plus the menu a real call site draws: fizzy's context menu, a row at its top.
+fn holdMenuFrame() !dvui.App.Result {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{}, .{ .expand = .both });
+    bw.processEvents();
+    bw.drawBackground();
+    const r = bw.data().borderRectScale().r;
+    if (bw.clicked()) t_clicked = true;
+    bw.deinit();
+
+    var ctx = dvui.widgetAlloc(ContextWidget);
+    ctx.init(@src(), .{ .rect = r }, .{});
+    ctx.processEvents();
+    defer ctx.deinit();
+    t_opened = ctx.activePoint() != null;
+    if (ctx.activePoint()) |pt| {
+        const widgets = @import("../widgets.zig");
+        var menu = widgets.contextMenu(@src(), pt, .{});
+        defer menu.deinit();
+        if (widgets.menuRow(@src(), "Delete", .{}) != null) t_row_fired = true;
+    }
+    return .ok;
+}
+
+test "lifting the finger that held a menu open does not pick the row under it" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 200, .h = 100 } });
+    defer t.deinit();
+    t_opened = false;
+    t_clicked = false;
+    t_row_fired = false;
+
+    try dvui.testing.settle(holdMenuFrame);
+    const cw = dvui.currentWindow();
+    _ = try cw.addEventPointer(.{ .button = .touch0, .action = .press, .xynorm = .{ .x = 0.5, .y = 0.5 } });
+    for (0..8) |_| _ = try dvui.testing.step(holdMenuFrame);
+    try std.testing.expect(t_opened);
+
+    // A finger drifts: lift it a few pixels inside the menu, over its first row.
+    const inside: dvui.Point = .{ .x = 112.0 / 200.0, .y = 60.0 / 100.0 };
+    _ = try cw.addEventTouchMotion(.touch0, inside.x, inside.y, 0, 0);
+    _ = try cw.addEventPointer(.{ .button = .touch0, .action = .release, .xynorm = inside });
+    for (0..3) |_| _ = try dvui.testing.step(holdMenuFrame);
+    try std.testing.expect(!t_row_fired);
+    try std.testing.expect(!t_clicked);
+    try std.testing.expect(t_opened);
+
+    // The control: a deliberate tap at the same spot is on the row, and picks it.
+    _ = try cw.addEventPointer(.{ .button = .touch0, .action = .press, .xynorm = inside });
+    _ = try dvui.testing.step(holdMenuFrame);
+    _ = try cw.addEventPointer(.{ .button = .touch0, .action = .release, .xynorm = inside });
+    for (0..3) |_| _ = try dvui.testing.step(holdMenuFrame);
+    try std.testing.expect(t_row_fired);
+}
+
 test "a touch hold opens the menu over a button, and the button does not fire" {
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 200, .h = 100 } });
     defer t.deinit();
