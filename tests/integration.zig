@@ -1835,6 +1835,8 @@ test "a plugin declares a region inside the one it was given" {
     const editor = ctx.editor;
     editor.app.gpa = std.testing.allocator;
     defer editor.app.layout.regions.deinit(editor.app.gpa);
+    // A plugin region blurs between what it shows (`Layout.drawPluginRegionContents`).
+    defer editor.app.layout.deinitSwaps(editor.app.gpa);
     defer editor.app.layout.regions_building.deinit(editor.app.gpa);
     defer editor.app.layout.deinitQualified(editor.app.gpa);
 

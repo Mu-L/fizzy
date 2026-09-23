@@ -145,6 +145,9 @@ pub const CrossFade = struct {
     start_ns: i128 = 0,
     duration_ns: i128 = crossfade.fade_ns,
     kind: Kind = .fade,
+    /// The snapshots carry their region's backdrop, so they are opaque wherever they cover and
+    /// blend exactly with plain source-over (`blitOpaque`).
+    opaque_snapshots: bool = false,
     /// Frames to wait after the outgoing capture before photographing the incoming view —
     /// one settle frame under the opaque overlay.
     incoming_wait: u8 = 0,
@@ -207,9 +210,13 @@ pub const CrossFade = struct {
         }
 
         const s = crossfade.sample(self.kind, t, pending);
-        // One overlay over the live incoming view. A second snapshot on top
-        // is what read as a bright, grainy double exposure.
-        if (self.texture) |tex| blit(tex, &self.frost, self.rect, s.out_blur, s.out_alpha);
+        // Bottom to top: the live incoming view (drawn by the caller), its own frost thinning
+        // over it, then the outgoing snapshot. Both snapshots carry the region's backdrop
+        // (`TransitionOptions.backdrop`), so neither has transparent holes for the blur to
+        // spread into — which is what once made a second layer read as grey glare.
+        const draw_snapshot = if (self.opaque_snapshots) &blitOpaque else &blit;
+        if (self.incoming) |tex| draw_snapshot(tex, &self.incoming_frost, self.incoming_rect, s.in_blur, s.in_alpha);
+        if (self.texture) |tex| draw_snapshot(tex, &self.frost, self.rect, s.out_blur, s.out_alpha);
 
         // Nothing else is animating, so without this an idle app would sleep mid-fade.
         dvui.refresh(null, @src(), null);
@@ -271,6 +278,19 @@ pub const blur_radius: f32 = 16;
 /// Draw a captured overlay. `blur` 0 is a sharp blit. Above that, mix the
 /// snapshot with its one Kawase frost so the ramp is a defocus, not a snap.
 pub fn blit(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f32, alpha: f32) void {
+    blitWith(tex, frost, dest, blur, alpha, .lerp);
+}
+
+/// `blit` for a snapshot that is opaque wherever it covers (it carries its backdrop —
+/// `TransitionOptions.backdrop`). Plain source-over is exact for it: `a` of the snapshot where it
+/// covers, and untouched frame where it is transparent. `blit`'s lerp is for translucent
+/// snapshots, and it scales *every* pixel of the rect — including a rounded region's corners,
+/// where the snapshot has nothing, which then flashed as square corners at the start of a swap.
+pub fn blitOpaque(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f32, alpha: f32) void {
+    blitWith(tex, frost, dest, blur, alpha, .over);
+}
+
+fn blitWith(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f32, alpha: f32, mode: enum { lerp, over }) void {
     if (alpha <= 0.001) return;
     if (frost) |f| {
         if (blur > 0.001) f.prepare(tex);
@@ -299,7 +319,7 @@ pub fn blit(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f
     // then add `a * snapshot`. Only immediate rendering can do it — a deferred draw would
     // queue the blend changes out of order — so a floating card's sharp blit takes the
     // plain path below, where alpha 1 over an opaque card is exact anyway.
-    if (lerpUnder(r, alpha)) |under| {
+    if (mode == .lerp) if (lerpUnder(r, alpha)) |under| {
         defer dvui.textureDestroyLater(under);
         const a = alpha * dvui.currentWindow().alpha;
         const prev_alpha = dvui.alpha(1);
@@ -311,7 +331,7 @@ pub fn blit(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f
             addOne(tex, r, a * (1 - mix));
         }
         return;
-    }
+    };
 
     if (!use_frost) {
         blitOne(tex, r, alpha);
@@ -326,6 +346,24 @@ pub fn blit(tex: dvui.Texture, frost: ?*Frost, dest: dvui.Rect.Physical, blur: f
 /// control, or rendering deferred. The returned copy is the caller's to destroy.
 fn lerpUnder(r: dvui.Rect.Physical, alpha: f32) ?dvui.Texture {
     if (!dvui.Backend.support_texture_blend) return null;
+    const under = copyFrame(r) orelse return null;
+    const cw = dvui.currentWindow();
+    // Written back with a copy blend, so the region holds exactly `(1 - a) * under`.
+    cw.backend.textureBlend(under, .copy) catch {
+        dvui.textureDestroyLater(under);
+        return null;
+    };
+    const prev_alpha = dvui.alpha(1);
+    defer dvui.alphaSet(prev_alpha);
+    const keep = 1 - std.math.clamp(alpha * prev_alpha, 0, 1);
+    dvui.renderTexture(under, .{ .r = r, .s = 1 }, .{ .colormod = dvui.Color.white.opacity(keep) }) catch {};
+    return under;
+}
+
+/// What the frame being drawn holds under `r`, copied out of the bound target: the true pixels,
+/// window translucency and all. Null when there is no target to read (rendering straight to the
+/// screen, or deferred). The copy is the caller's to destroy.
+fn copyFrame(r: dvui.Rect.Physical) ?dvui.Texture {
     const cw = dvui.currentWindow();
     if (!cw.render_target.rendering) return null;
     const bound = cw.render_target.texture orelse return null;
@@ -351,17 +389,7 @@ fn lerpUnder(r: dvui.Rect.Physical, alpha: f32) ?dvui.Texture {
         }) catch {};
     }
     _ = dvui.renderTarget(prev);
-    const under = dvui.textureFromTarget(step) catch return null;
-    // Written back with a copy blend, so the region holds exactly `(1 - a) * under`.
-    cw.backend.textureBlend(under, .copy) catch {
-        dvui.textureDestroyLater(under);
-        return null;
-    };
-    const prev_alpha = dvui.alpha(1);
-    defer dvui.alphaSet(prev_alpha);
-    const keep = 1 - std.math.clamp(alpha * prev_alpha, 0, 1);
-    dvui.renderTexture(under, .{ .r = r, .s = 1 }, .{ .colormod = dvui.Color.white.opacity(keep) }) catch {};
-    return under;
+    return dvui.textureFromTarget(step) catch null;
 }
 
 /// `weight * tex` added onto the target. The texture's blend is put back to source-over after.
@@ -414,12 +442,16 @@ pub const Transition = struct {
     /// Latch: hold at peak-blur outgoing until the incoming view is ready. Cleared by
     /// the caller; `transition` also accepts a per-frame flag.
     pending: bool = false,
+    /// A swap was asked for ahead of time (`prev_*` set by the caller) and has not run yet.
+    /// `transition` clears it on the frame it captures.
+    armed: bool = false,
 
     pub fn discard(self: *Transition) void {
         self.cross_fade.discard();
         self.prev_key = null;
         self.prev_id = "";
         self.pending = false;
+        self.armed = false;
     }
 };
 
@@ -444,12 +476,61 @@ pub const TransitionOptions = struct {
     /// temporary isolate parent gives every widget a new id, which restarts `reveal` at alpha 0
     /// and freezes min-size caches — the capture comes out empty/wrong and there is no fade.
     draw_previous: ?*const fn (*anyopaque) void = null,
+    /// What is behind the region: each snapshot is filled with it before the view is drawn into
+    /// it, so a view that paints only part of its area (the region's fill is not its own)
+    /// photographs as it looks on screen rather than with transparent holes.
+    backdrop: ?Backdrop = null,
     /// Called after a successful capture, before the incoming screen packs. Use it to clear the
     /// parent's pack state so the capture's expanded child does not make the incoming one trip
     /// `rectFor() got child after expanded child`.
     after_capture: ?*const fn (*anyopaque) void = null,
     ctx: *anyopaque = undefined,
 };
+
+/// What is on screen behind a region's contents, rebuilt in a snapshot: the window `base` (opaque
+/// — a snapshot has nothing further behind it), then the region's own `fill` over it. A region's
+/// fill is translucent at the window's content opacity, so on screen it is what it is only over
+/// the window; alone in a texture it came out lighter, and the swap read as a haze.
+pub const Backdrop = struct {
+    base: dvui.Color,
+    fill: dvui.Color,
+    corners: dvui.CornerRect.Physical = .{},
+};
+
+/// Start a snapshot of `rect` for a region with a backdrop: the frame's own pixels under it when
+/// they can be read (exact — and the region's surroundings, its corners included, match the
+/// frame, so `blit`'s lerp is exact over them), else the `Backdrop` rebuilt from colours, which
+/// only `blitOpaque` blends correctly. Returns which one it did.
+fn beginBackdropCapture(cf: *CrossFade, rect: dvui.Rect.Physical, backdrop: ?Backdrop) ?dvui.Picture {
+    if (backdrop == null) return CrossFade.beginCapture(rect);
+    const under = copyFrame(rect);
+    var pic = CrossFade.beginCapture(rect) orelse {
+        if (under) |u| dvui.textureDestroyLater(u);
+        return null;
+    };
+    if (under) |u| {
+        defer dvui.textureDestroyLater(u);
+        const prev_alpha = dvui.alpha(1);
+        defer dvui.alphaSet(prev_alpha);
+        dvui.renderTexture(u, .{ .r = rect, .s = 1 }, .{}) catch {};
+        cf.opaque_snapshots = false;
+    } else {
+        fillBackdrop(rect, backdrop);
+        cf.opaque_snapshots = true;
+    }
+    _ = &pic;
+    return pic;
+}
+
+fn fillBackdrop(rect: dvui.Rect.Physical, backdrop: ?Backdrop) void {
+    const b = backdrop orelse return;
+    var base = b.base;
+    base.a = 255;
+    // Both rounded like the region: beyond its corners the snapshot stays transparent, so the
+    // live frame shows there as it does on screen, not a square of window colour.
+    rect.fill(b.corners, .{ .color = .{ .color = base } });
+    rect.fill(b.corners, .{ .color = .{ .color = b.fill } });
+}
 
 /// Per-frame handle from `transition`. `defer` its `deinit` so the snapshot is blitted after
 /// the incoming content draws — and so an incoming capture started this frame is saved.
@@ -497,9 +578,10 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
 
     if (had_prev and key_changed) {
         state.cross_fade.kind = opts.kind;
+        state.cross_fade.opaque_snapshots = false;
         state.cross_fade.duration_ns = opts.duration_ns orelse crossfade.durationNs(opts.kind);
         if (opts.draw_previous) |draw_prev| {
-            if (CrossFade.beginCapture(opts.rect)) |captured| {
+            if (beginBackdropCapture(&state.cross_fade, opts.rect, opts.backdrop)) |captured| {
                 var pic = captured;
                 // Match CacheWidget: clip to the capture region so we don't paint outside the
                 // target, and restore afterward so the incoming screen sees the normal clip.
@@ -514,6 +596,7 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
     }
 
     state.prev_key = opts.key;
+    state.armed = false;
 
     // A blur swap also photographs the incoming view once, a settle frame after the swap (the
     // first frame it draws has no sizes from last frame and is not what it will look like),
@@ -523,7 +606,7 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
     if (cf.kind == .blur and cf.texture != null and cf.incoming == null and !cf.have_incoming and !key_changed) {
         if (cf.incoming_wait < 1) {
             cf.incoming_wait += 1;
-        } else if (CrossFade.beginCapture(opts.rect)) |pic| {
+        } else if (beginBackdropCapture(cf, opts.rect, opts.backdrop)) |pic| {
             frame.incoming = pic;
             frame.prev_clip = dvui.clip(opts.rect);
         }

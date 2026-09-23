@@ -506,6 +506,11 @@ pub fn draw(self: *Layout, s: *Surface) !dvui.App.Result {
         .{},
     );
     defer rv.deinit();
+    return self.drawSolid(s);
+}
+
+/// `draw` without the fade-in: for a swap, whose overlay already carries the change.
+fn drawSolid(self: *Layout, s: *Surface) !dvui.App.Result {
     self.drawn.append(self.arena, s) catch {};
     if (self.state.snapshots_wanted and self.state.snapshot(s.id) == null) {
         if (try self.drawCaptured(s)) |r| return r;
@@ -638,17 +643,32 @@ fn drawSwapped(self: *Layout, slot: u64, s: *Surface) !dvui.App.Result {
 
     var ctx: Ctx = .{ .layout = self, .id = tr.prev_id };
     const had = tr.prev_id.len > 0;
+    // The region's own fill, when it has one, over the window base (`Backdrop`): the view drawn
+    // into it may not paint its whole area, and a snapshot without it has holes the blur turns
+    // grey.
+    const parent = dvui.parentGet().data();
+    const backdrop: ?core.anim.Backdrop = if (parent.options.backgroundGet())
+.{
+            .base = core.dialogs.style().chromeColor(),
+            .fill = parent.options.color(.fill).toColor(),
+            .corners = parent.options.cornersGet().scale(parent.rectScale().s, dvui.CornerRect.Physical),
+        }
+    else
+        null;
     var frame = core.anim.transition(tr, .{
         .key = std.hash.Wyhash.hash(0, s.id),
         .rect = rs.r,
         .kind = .blur,
+        .backdrop = backdrop,
         .draw_previous = if (had) Ctx.drawPrev else null,
         .after_capture = if (had) Ctx.after else null,
         .ctx = @ptrCast(&ctx),
     });
     defer frame.deinit();
     tr.prev_id = s.id;
-    return self.draw(s);
+    // Solid, not faded in: the outgoing snapshot over it *is* the transition. Fading this in
+    // as well left both layers part-transparent mid-swap, and the window showed through.
+    return self.drawSolid(s);
 }
 
 fn resetInnermostPack(self: *Layout) void {
@@ -785,6 +805,10 @@ pub fn beginPluginRegion(self: *Layout, spec: sdk.RegionSpec) ?sdk.RegionSpec.To
 pub fn drawPluginRegionContents(self: *Layout, token: sdk.RegionSpec.Token) !dvui.App.Result {
     const r = self.pluginRegion(token) orelse return .ok;
     const s = self.selectedIn(r) orelse return .ok;
+    // Contents fade in on a switch; a swap someone asked for (`State.armSwap` — a document
+    // landing over its loading placeholder) blurs from one to the other instead.
+    const key = r.selectionKey();
+    if (self.state.swapping(key)) return self.drawSwapped(key, s);
     return self.draw(s);
 }
 

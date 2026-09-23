@@ -570,6 +570,23 @@ pub fn swapFor(self: *State, gpa: std.mem.Allocator, key: u64) ?*core.anim.Trans
     return t;
 }
 
+/// Blur the place `key` from `outgoing_id` to whatever it shows next, once, in a region that
+/// otherwise just fades its contents in (a plugin region: `Layout.drawPluginRegionContents`).
+/// For a swap worth the capture — a document landing over its loading placeholder — and not
+/// for every tab switch, which would redraw the outgoing document just to photograph it.
+pub fn armSwap(self: *State, gpa: std.mem.Allocator, key: u64, outgoing_id: []const u8) void {
+    const t = self.swapFor(gpa, key) orelse return;
+    t.prev_id = outgoing_id;
+    t.prev_key = std.hash.Wyhash.hash(0, outgoing_id);
+    t.armed = true;
+}
+
+/// Whether the place `key` is mid-swap, or armed for one (`armSwap`).
+pub fn swapping(self: *const State, key: u64) bool {
+    const t = self.swaps.get(key) orelse return false;
+    return t.armed or t.cross_fade.texture != null or t.cross_fade.incoming != null;
+}
+
 /// Forget every remembered extent, assignment and runtime split. The next frame
 /// draws the shape's defaults. Widget `_size` is cleared so a leftover drag
 /// does not write itself back.

@@ -6,9 +6,9 @@
 //! next view is ready; nothing here loads a plugin.
 const std = @import("std");
 
-/// `fade` drops the outgoing snapshot's alpha. `blur` frosts it first, sitting fully covering
-/// through `hold` (so a settle frame, or a plugin load, can hide under it), then dissolves while
-/// the incoming sharpens in. `frost` is a blur with no hold: it frosts *while* it goes and never
+/// `fade` drops the outgoing snapshot's alpha. `blur` is two layers, both opaque the whole way:
+/// the outgoing view on top blurs while it fades out, and the incoming view beneath starts fully
+/// blurred and sharpens — so nothing but the two views is ever on screen. `frost` is a blur with no hold: it frosts *while* it goes and never
 /// fully covers the live view — for a preview whose incoming content is already drawing
 /// underneath, where a held opaque frost reads as a wall of colour rather than a defocus.
 pub const Kind = enum { fade, blur, frost };
@@ -27,8 +27,9 @@ pub const Sample = struct {
 pub const fade_ns: i128 = 150 * std.time.ns_per_ms;
 pub const blur_ns: i128 = 420 * std.time.ns_per_ms;
 
-/// Outgoing is fully blurred and still covering. `pending` holds here so a
-/// plugin need not load until its view is used.
+/// Where `pending` holds a blur: the outgoing view fully blurred and still mostly covering, so a
+/// plugin need not load until its view is used. The timeline resumes from here, so letting go
+/// does not jump.
 pub const hold: f32 = 0.35;
 
 pub fn durationNs(kind: Kind) i128 {
@@ -59,26 +60,16 @@ pub fn sample(kind: Kind, t: f32, pending: bool) Sample {
 }
 
 fn sampleBlur(t: f32) Sample {
-    // One overlay: the outgoing snapshot blurs, then dissolves over the live
-    // incoming view. Stacking a second full-opacity blurred snapshot is what
-    // read as glare.
-    if (t <= hold) {
-        const u = t / hold;
-        return .{
-            .out_blur = smooth(u),
-            .out_alpha = 1,
-            .in_blur = 0,
-            .in_alpha = 0,
-        };
-    }
-    // Past the hold both overlays go together: the outgoing frost dissolves, and the
-    // incoming frost thins over the live view beneath it — the sharpening-in half.
-    const u = (t - hold) / (1 - hold);
+    // The outgoing view blurs (reaching full blur at `hold`) while it fades out over the whole
+    // swap. Beneath it the incoming view is drawn sharp and opaque, with its own frost over it
+    // thinning away: blurred → sharp. Both layers are opaque throughout, so the window never
+    // shows through the middle of a swap.
+    const fade = smooth(t);
     return .{
-        .out_blur = 1,
-        .out_alpha = 1 - smooth(u),
+        .out_blur = smooth(t / hold),
+        .out_alpha = 1 - fade,
         .in_blur = 1,
-        .in_alpha = 1 - smooth(u),
+        .in_alpha = 1 - fade,
     };
 }
 
@@ -110,73 +101,46 @@ test "a fade holds the outgoing snapshot while pending" {
     try testing.expectEqual(@as(f32, 1), held.out_alpha);
 }
 
-test "blur starts sharp and covers the incoming view" {
+test "blur starts on the outgoing view, sharp and opaque, over a fully blurred incoming one" {
     const a = sample(.blur, 0, false);
     try testing.expectEqual(@as(f32, 0), a.out_blur);
     try testing.expectEqual(@as(f32, 1), a.out_alpha);
-    try testing.expectEqual(@as(f32, 0), a.in_alpha);
+    try testing.expectEqual(@as(f32, 1), a.in_blur);
+    try testing.expectEqual(@as(f32, 1), a.in_alpha);
 }
 
-test "blur reaches peak and hides the incoming view at the hold" {
-    const a = sample(.blur, hold, false);
-    try testing.expectApproxEqAbs(@as(f32, 1), a.out_blur, 1e-5);
-    try testing.expectEqual(@as(f32, 1), a.out_alpha);
-    try testing.expectEqual(@as(f32, 0), a.in_alpha);
+test "blur: the outgoing view blurs as it fades, and the incoming one sharpens" {
+    const a = sample(.blur, 0.2, false);
+    const b = sample(.blur, 0.6, false);
+    try testing.expect(a.out_blur > 0 and a.out_blur < 1);
+    try testing.expectApproxEqAbs(@as(f32, 1), b.out_blur, 1e-5);
+    try testing.expect(a.out_alpha > b.out_alpha);
+    // The incoming frost thins as the outgoing view fades: blurred → sharp beneath it.
+    try testing.expect(a.in_alpha > b.in_alpha);
+    try testing.expect(b.in_alpha > 0);
 }
 
 test "pending freezes blur at the hold no matter where t is" {
     const early = sample(.blur, 0, true);
     const late = sample(.blur, 1, true);
     try testing.expectApproxEqAbs(@as(f32, 1), early.out_blur, 1e-5);
-    try testing.expectEqual(@as(f32, 1), early.out_alpha);
-    try testing.expectEqual(@as(f32, 0), early.in_alpha);
+    try testing.expect(early.out_alpha > 0.5);
     try testing.expectEqual(early.out_blur, late.out_blur);
     try testing.expectEqual(early.out_alpha, late.out_alpha);
     try testing.expectEqual(early.in_alpha, late.in_alpha);
 }
 
-test "after the hold both frosts fade: the outgoing dissolves, the incoming sharpens in" {
-    const a = sample(.blur, hold + 0.01, false);
-    const b = sample(.blur, 0.8, false);
-    try testing.expectApproxEqAbs(@as(f32, 1), a.out_blur, 1e-5);
-    try testing.expectApproxEqAbs(@as(f32, 1), b.out_blur, 1e-5);
-    try testing.expect(a.out_alpha > b.out_alpha);
-    try testing.expectApproxEqAbs(@as(f32, 1), a.in_blur, 1e-5);
-    try testing.expect(a.in_alpha > b.in_alpha);
-    try testing.expect(b.in_alpha > 0);
-}
-
-test "blur ends with the overlay gone" {
+test "blur ends with both overlays gone" {
     const a = sample(.blur, 1, false);
     try testing.expectEqual(@as(f32, 0), a.out_alpha);
     try testing.expectEqual(@as(f32, 0), a.in_alpha);
 }
 
-test "outgoing blur only rises before the hold" {
+test "outgoing blur rises until the hold" {
     const a = sample(.blur, hold * 0.25, false);
     const b = sample(.blur, hold * 0.75, false);
     try testing.expect(a.out_blur < b.out_blur);
     try testing.expect(b.out_blur < 1);
-}
-
-// The preview's geometry ease is outCubic. Fed to `sample(.blur)` as `t` it
-// crosses the hold — the only part that is a blur — almost immediately, so
-// the motion people saw was the fade tail. A linear clock stays in the blur
-// for the first third.
-test "an eased preview clock is already fading at one fifth of the slide" {
-    const eased = 1 - (1 - 0.2) * (1 - 0.2) * (1 - 0.2);
-    const s = sample(.blur, eased, false);
-    try testing.expect(eased > hold);
-    try testing.expectApproxEqAbs(@as(f32, 1), s.out_blur, 1e-5);
-    try testing.expect(s.out_alpha < 1);
-}
-
-test "a linear preview clock is still blurring at one fifth of the slide" {
-    const s = sample(.blur, 0.2, false);
-    try testing.expect(0.2 < hold);
-    try testing.expect(s.out_blur > 0);
-    try testing.expect(s.out_blur < 1);
-    try testing.expectEqual(@as(f32, 1), s.out_alpha);
 }
 
 test "frost never covers the live view once it is moving" {
