@@ -284,6 +284,10 @@ pub const InitOptions = struct {
     center: bool = false,
     pan_zoom_scheme: PanZoomScheme = .mouse,
     hooks: Hooks = .{},
+    /// An edge shadow on all four sides of the viewport. A canvas goes on past every edge —
+    /// it is panned, not scrolled to an end — so every edge gets the "this continues" hint,
+    /// where a scroll area only shadows an edge that hides content (`draw.drawScrollEdgeShadows`).
+    edge_shadows: bool = true,
 };
 
 pub fn recenter(self: *CanvasWidget) void {
@@ -841,6 +845,8 @@ pub fn deinit(self: *CanvasWidget) void {
         self.has_stable_snapshot = true;
     }
 
+    const was_installed = self.installed;
+    const viewport = self.scroll.data().borderRectScale();
     self.installed = false;
 
     self.scaler.deinit();
@@ -848,6 +854,12 @@ pub fn deinit(self: *CanvasWidget) void {
     // Restore the alpha multiplied in `install`. Done after the children deinit so any
     // sibling content drawn by the caller between `install` and `deinit` is also faded.
     dvui.alphaSet(self.prev_alpha);
+
+    // After the content and at full alpha: the edges are the viewport's, not the canvas's, and
+    // do not fade in with it.
+    if (was_installed and self.init_opts.edge_shadows) {
+        inline for (.{ .top, .bottom, .left, .right }) |edge| core.draw.drawEdgeShadow(viewport, edge, .{});
+    }
 }
 
 pub fn dataFromScreenPoint(self: *CanvasWidget, screen: dvui.Point.Physical) dvui.Point {
