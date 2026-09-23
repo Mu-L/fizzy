@@ -229,10 +229,17 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
             }
         }
 
+        // Italic says *preview*: this tab is on loan. The next single click replaces it, and
+        // editing it — or double-clicking it, or Keep Open on its menu — makes it a tab like any
+        // other. Borrowed from every editor that has the idea, because it is the one signal that
+        // does not cost a control.
+        var title_font = dvui.Font.theme(.body);
+        if (runtime.host().documentIsPreview(doc.id)) title_font.style = .italic;
         dvui.labelNoFmt(@src(), surface.title, .{}, .{
             .color_text = .{ .color = if (is_selected) dvui.themeGet().color(.window, .text) else dvui.themeGet().color(.control, .text) },
             .padding = dvui.Rect.all(4),
             .gravity_y = 0.5,
+            .font = title_font,
         });
 
         const close_inner = core.dialogs.windowHeaderCloseInnerSide();

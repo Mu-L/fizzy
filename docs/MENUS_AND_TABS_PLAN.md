@@ -101,7 +101,12 @@ regions — the tab strip, the tree, the panel — are fizzy's own and always ha
 
 A *preview* tab is VSCode's: opened by a single click, shown in italic, and replaced by the
 next preview rather than accumulating. It becomes a real tab — "kept" — when the user edits
-it, double-clicks it, drags it, or chooses **Keep Open** from the tab menu.
+it, drags it, or chooses **Keep Open** from the tab menu.
+
+*Not* by double-clicking it, which is where VSCode puts the gesture: fizzy uses double-click
+nowhere else, so it would be a thing users have no reason to guess and no way to discover.
+Editing covers the case that matters (a tab holding your typing is never replaced), and the
+menu covers the deliberate one.
 
 State lives with the app, which owns open documents: at most one preview per grouping, so a
 split can hold a preview on each side. The tab strip reads it to draw italic; the document
@@ -133,7 +138,7 @@ which cannot express half the question, is how the grouping bug in
 - The store's private "temporary page" logic is deleted: a page opens with `.mode = .preview`
   like anything else, and **Keep Page Open** leaves the store's flyout for the tab menu,
   where it is **Keep Open** and works for every document.
-- The file tree opens with `.mode = .preview` on a single click, `.keep` on a double click.
+- The file tree opens with `.mode = .preview` on a single click.
 - The workbench's tab strip gains its menu: Keep Open, Close, Close Others, Close to the
   Right, Close to the Left.
 

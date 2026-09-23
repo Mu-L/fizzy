@@ -2595,8 +2595,8 @@ fn drawSelectionToggles(
     defer panel.deinit();
 
     // The page, first: it is what the card is *about*, and the one row that is the same on every
-    // card in both panes. It opens as a temporary tab — clicking down a list of plugins reads
-    // them one after another in place, and Keep is how a page stops giving up its tab.
+    // card in both panes. It opens as a preview tab like any other document — keeping one is the
+    // tab's own menu, not a row here.
     {
         var r = core.widgets.Popover.row(@src(), .{});
         dvui.labelNoFmt(@src(), "Readme", .{}, .{ .gravity_y = 0.5, .margin = .all(0), .padding = .all(0) });
@@ -2609,13 +2609,6 @@ fn drawSelectionToggles(
                 reportError("could not open the page for '{s}': {s}", .{ entry.id, @errorName(err) });
         }
     }
-    if (Page.isOpen(entry.id) and !Page.isKept(entry.id)) {
-        var r = core.widgets.Popover.row(@src(), .{});
-        dvui.labelNoFmt(@src(), "Keep Page Open", .{}, .{ .gravity_y = 0.5, .margin = .all(0), .padding = .all(0) });
-        r.deinit();
-        if (r.clicked) Page.keep(entry.id);
-    }
-
     drawToggleControls(entry, .compact);
     // Whichever controls this card's pane owns — the installed pane's full set, the store pane's
     // Install/Uninstall — so both panes' cards are the same object: content in the body, every

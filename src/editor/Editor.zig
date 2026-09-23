@@ -3319,6 +3319,7 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
     // Mounted filesystems deliver here — a cloud listing that landed since last frame is in
     // the table's cache before the tree asks for it.
     editor.app.file_table.pump();
+    editor.promoteEditedPreviews();
 
     editor.window_opacity = if (dvui.themeGet().dark) editor.app.settings.window_opacity_dark else editor.app.settings.window_opacity_light;
 
@@ -4418,6 +4419,26 @@ pub fn openFile(editor: *Editor, opts: sdk.EditorAPI.OpenOptions) !bool {
         }
     }
     return started;
+}
+
+/// A preview the user has typed into is not on loan any more. Checked every frame rather than
+/// signalled, because "dirty" is the owning plugin's answer and it changes without telling
+/// anyone — and the cost of missing it is the worst thing this feature could do: replace a tab
+/// holding unsaved work with the next thing someone clicked.
+fn promoteEditedPreviews(editor: *Editor) void {
+    var i: usize = 0;
+    while (i < editor.preview_docs.count()) {
+        const id = editor.preview_docs.keys()[i];
+        const doc = editor.app.open_files.get(id) orelse {
+            _ = editor.preview_docs.swapRemove(id);
+            continue; // same slot, now a different id
+        };
+        if (doc.owner.isDirty(doc)) {
+            _ = editor.preview_docs.swapRemove(id);
+            continue;
+        }
+        i += 1;
+    }
 }
 
 /// The preview document in `grouping`, if any.

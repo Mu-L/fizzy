@@ -83,10 +83,6 @@ pub const Document = struct {
     readme_started: bool = false,
     /// Which of the page's tabs is showing.
     tab: u8 = readme_tab,
-    /// A page the user has said to keep. An unkept page is *temporary*: the next page opened
-    /// takes its tab, so clicking down a list of plugins reads one after another in place
-    /// instead of leaving a tab behind for every card touched.
-    kept: bool = false,
 
     pub fn fromBytes(path: []const u8, bytes: []const u8) !Document {
         const gpa = sdk.allocator();
@@ -176,14 +172,9 @@ pub fn open(host: *sdk.Host, id: []const u8, title: []const u8, grouping: u64) !
     if (!state.mounted) return;
     const gpa = host.allocator;
 
-    // The temporary page, if any, gives up its tab to this one. Collected first: closing walks
-    // back into this module (`closeDocument`) and would invalidate an iterator over `docs`.
-    var replacing: ?u64 = null;
+    // Already open: focus it rather than opening a second tab for the same plugin.
     for (state.docs.values()) |*doc| {
-        if (doc.kept) continue;
-        if (std.mem.eql(u8, doc.plugin, id)) return focus(host, doc.*); // already the open one
-        replacing = doc.id;
-        break;
+        if (std.mem.eql(u8, doc.plugin, id)) return focus(host, doc.*);
     }
 
     // Rooted, like every path in a `Mem`: what the mount hands it is the path *after* the
@@ -194,13 +185,10 @@ pub fn open(host: *sdk.Host, id: []const u8, title: []const u8, grouping: u64) !
 
     const path = try std.fmt.allocPrint(gpa, "{s}{s}", .{ mount_prefix, file });
     defer gpa.free(path);
+    // `.preview`: the page takes the tab of whatever preview is in that pane, so clicking down
+    // a list of plugins reads them one after another in place. The store used to do that itself,
+    // for its own pages only; it is the app's now and applies to every document.
     _ = try host.openFile(.{ .path = path, .grouping = grouping, .mode = .preview });
-
-    // After the open, not before: a failed open should not have cost the user the page they
-    // were reading. The close is a no-op for a page the user kept.
-    if (replacing) |old| host.closeDocById(old) catch |err| {
-        dvui.log.warn("store page: could not close the temporary page: {t}", .{err});
-    };
 }
 
 /// Bring an already-open page to the front.
@@ -336,31 +324,6 @@ fn placeholderText(text: []const u8) void {
         .gravity_y = 0.5,
         .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.7) },
     });
-}
-
-/// Whether `id`'s page is open at all.
-pub fn isOpen(id: []const u8) bool {
-    for (state.docs.values()) |*doc| {
-        if (std.mem.eql(u8, doc.plugin, id)) return true;
-    }
-    return false;
-}
-
-/// Whether `id`'s page is open and kept — the store asks so its flyout can offer Keep or say it
-/// already is.
-pub fn isKept(id: []const u8) bool {
-    for (state.docs.values()) |*doc| {
-        if (std.mem.eql(u8, doc.plugin, id)) return doc.kept;
-    }
-    return false;
-}
-
-/// Keep `id`'s page: it stops being the one the next page replaces. There is no unkeep — a tab
-/// the user asked to hold onto is closed by closing it, like any other.
-pub fn keep(id: []const u8) void {
-    for (state.docs.values()) |*doc| {
-        if (std.mem.eql(u8, doc.plugin, id)) doc.kept = true;
-    }
 }
 
 fn docBuf(ptr: *anyopaque) *Document {

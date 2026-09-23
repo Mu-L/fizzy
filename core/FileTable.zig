@@ -1717,3 +1717,40 @@ test "listingHasFile searches only the file run" {
     // A directory is not a file, even though it is in `entries`.
     try t.expect(!listingHasFile(&listing, "src"));
 }
+
+test "a mount claims the paths under it, and says whether it is remote" {
+    // The bug this exists for: a mount registered as `store://` claimed nothing. `pathOnMount`
+    // asks that the rest of the path start with `/`, and `store://Name.ext` continues with an
+    // `N` — so every store page resolved to the disk and failed to open a file that was sitting
+    // in memory. A prefix that matches nothing is still a perfectly good string, so only a
+    // resolve says whether one is right.
+    const t = std.testing;
+    var fx = try Fixture.init(t.allocator);
+    defer fx.deinit();
+    const table = fx.wire();
+
+    var pages = try vfs.Mem.init(t.allocator);
+    defer pages.deinit();
+    try pages.put("/Pixi.fizzyplugin", "pixi");
+    try table.mount("store://pages", pages.fs());
+
+    const hit = table.resolve("store://pages/Pixi.fizzyplugin");
+    try t.expect(hit.mount != null);
+    try t.expectEqualStrings("/Pixi.fizzyplugin", hit.rel);
+    try t.expect(table.isMounted("store://pages/Pixi.fizzyplugin"));
+
+    // The mount itself, and a path that only looks like it is under one.
+    try t.expect(table.isMounted("store://pages"));
+    try t.expect(!table.isMounted("store://pagesomething/x"));
+
+    // In memory, so not remote — the thing a crawler asks before deciding how hard to pull.
+    try t.expect(!table.isRemote("store://pages/Pixi.fizzyplugin"));
+    try t.expect(!table.isRemote(fx.root));
+
+    var cloudy = try vfs.Mem.init(t.allocator);
+    defer cloudy.deinit();
+    var cloud_fs = cloudy.fs();
+    cloud_fs.remote = true;
+    try table.mount("cloud://account", cloud_fs);
+    try t.expect(table.isRemote("cloud://account/Notes/a.md"));
+}
