@@ -85,6 +85,40 @@ pub fn menuItemLabel(
 /// menu in the app goes through here: the file tree's rows, the docking widget's tabs, and
 /// whatever a plugin contributes into one — so "what a menu looks like" is answered once,
 /// beside the menu bar's dropdown rather than near it.
+/// Copy and Paste on a right-click in a text field. Call after drawing the entry, before its
+/// `deinit` — the menu acts on this widget directly.
+///
+/// Directly, not through `fizzy.copy`/`fizzy.paste`: those pick their target by asking what has
+/// focus, and opening a menu moves focus *to the menu*. A field's own menu already knows which
+/// field it belongs to, and asking focus at the one moment focus is elsewhere is how a paste
+/// meant for a search box lands in the document behind it. (The text editor's document menu is
+/// the other case: there the active document is still the editor while its menu is open, so it
+/// does run the commands, and they route to it.)
+///
+/// Returns true when it changed the text — a paste — because the caller may need to treat that as
+/// an edit. A field that commits only while it has focus, or resyncs from its stored value when
+/// it does not, would otherwise drop the paste: it happened while the *menu* had focus. Focus goes
+/// back to the field afterwards, so the next keystroke lands where the paste did.
+pub fn textEntryMenu(te: *dvui.TextEntryWidget) bool {
+    var right_click = dvui.context(@src(), .{ .rect = te.data().borderRectScale().r }, .{ .id_extra = te.data().id.asUsize() });
+    defer right_click.deinit();
+    const point = right_click.activePoint() orelse return false;
+
+    var popup = contextMenu(@src(), point, .{});
+    defer popup.deinit();
+    if (menuItemLabel(@src(), "Copy", .{}, .{ .expand = .horizontal }) != null) {
+        te.copy();
+        popup.close();
+    }
+    if (menuItemLabel(@src(), "Paste", .{}, .{ .expand = .horizontal }) != null) {
+        te.paste();
+        popup.close();
+        dvui.focusWidget(te.data().id, null, null);
+        return true;
+    }
+    return false;
+}
+
 pub fn contextMenu(src: std.builtin.SourceLocation, at: dvui.Point.Natural, opts: dvui.Options) *FloatingMenuWidget {
     // `.popup`, not the `.menu` default: a right-click menu is not part of a menubar chain, and
     // the difference that matters is that a popup closes when you click outside it. The default

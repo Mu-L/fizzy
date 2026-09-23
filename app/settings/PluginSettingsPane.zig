@@ -126,7 +126,10 @@ fn drawZon(schema: *const settings.SettingsSchema, field_index: usize, id_extra:
     if (!focused and !std.mem.eql(u8, entry.getText(), current)) entry.textSet(current, false);
     entry.processEvents();
     entry.draw();
-    if (entry.enter_pressed and !std.mem.eql(u8, entry.getText(), current)) {
+    // A paste from the field's menu is an edit made while the field was not focused, so it
+    // commits here — there will be no Enter for it, and the resync above would undo it.
+    const pasted = core.widgets.textEntryMenu(&entry);
+    if ((entry.enter_pressed or pasted) and !std.mem.eql(u8, entry.getText(), current)) {
         if (access.setZonText(value, field_index, entry.getText())) {
             access.persist(value, schema.owner);
         }
@@ -157,7 +160,11 @@ fn drawString(schema: *const settings.SettingsSchema, field: settings.Setting, f
     // empty space, so "focus left" is not a moment that reliably comes, and an edit that
     // needed Enter to count was one that silently did not. The settings autosave debounces the
     // disk write, so per-keystroke commits cost nothing.
-    if (focused and entry.text_changed and !std.mem.eql(u8, entry.getText(), current)) {
+    // A paste from the field's menu counts as typing: it happened while the menu had focus, so
+    // neither `focused` nor `text_changed` saw it, and the resync above would put the old value
+    // back on the next frame.
+    const pasted = core.widgets.textEntryMenu(&entry);
+    if (((focused and entry.text_changed) or pasted) and !std.mem.eql(u8, entry.getText(), current)) {
         access.setString(value, field_index, entry.getText());
         access.persist(value, schema.owner);
     }

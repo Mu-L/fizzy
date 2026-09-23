@@ -571,6 +571,7 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
             self.tail_frames -= 1;
             entry.textLayout.selection.moveCursor(std.math.maxInt(usize), false);
         }
+        _ = core.widgets.textEntryMenu(entry);
         entry.deinit();
     }
 

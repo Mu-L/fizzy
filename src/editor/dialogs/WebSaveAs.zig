@@ -64,6 +64,7 @@ pub fn dialog(id: dvui.Id) anyerror!bool {
 
     const te = dvui.textEntry(@src(), .{ .placeholder = "filename.fiz" }, .{ .expand = .horizontal });
     defer te.deinit();
+    _ = fizzy.core.widgets.textEntryMenu(te);
 
     if (dvui.firstFrame(te.data().id)) {
         if (default_name_storage) |def| te.textSet(def, false);

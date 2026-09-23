@@ -351,6 +351,7 @@ fn drawSearchRow() []const u8 {
         .background = false,
     });
     defer entry.deinit();
+    _ = core.widgets.textEntryMenu(entry);
     return entry.getText();
 }
 
