@@ -218,7 +218,7 @@ fn drawChord(chord: Chord, which: usize, color: dvui.Color, mac: bool, style: St
         // Plain on a PC is `Ctrl+Shift+P`: words need the `+` that glyphs run together without.
         if (style == .plain and !mac and i > 0) plainText("+", id * 2, color);
         switch (style) {
-            .plain => drawFace(face, id, color),
+            .plain => if (i + 1 == all.len) drawKeyColumn(face, id, color) else drawFace(face, id, color),
             .caps => {
                 var cap = dvui.box(@src(), .{ .dir = .horizontal }, .{
                     .id_extra = id,
@@ -235,6 +235,24 @@ fn drawChord(chord: Chord, which: usize, color: dvui.Color, mac: bool, style: St
             },
         }
     }
+}
+
+/// The key in a plain chord, in a column one wide letter wide and drawn from its left edge — the
+/// way macOS lays out a menu's shortcuts. Shortcuts sit against a row's right edge, so without
+/// the column a narrow key (`F`, `I`) would pull the modifiers in front of it out of line with
+/// the rows above and below.
+fn drawKeyColumn(face: Face, id: usize, color: dvui.Color) void {
+    const font = dvui.Font.theme(.body);
+    const w = @max(font.textSize("W").w, font.lineHeight() * 0.85);
+    var col = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .id_extra = id,
+        .gravity_y = 0.5,
+        .min_size_content = .{ .w = w },
+        .padding = .all(0),
+        .margin = .all(0),
+    });
+    defer col.deinit();
+    drawFace(face, id, color);
 }
 
 fn drawFace(face: Face, id: usize, color: dvui.Color) void {
