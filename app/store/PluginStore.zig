@@ -2251,7 +2251,7 @@ fn isBuiltIn(id: []const u8) bool {
 /// via `drawCardControls`/`infoLine` (which still shows "installed vX"). See `drawCardShell`.
 fn drawCard(entry: StoreEntry) void {
     var buf: [192]u8 = undefined;
-    drawCardShell(entry, drawNoCardControls, infoLine(&buf, entry), .{ .show_failure = true, .hover_toggles = true, .compact = true });
+    drawCardShell(entry, drawNoCardControls, infoLine(&buf, entry), .{ .show_failure = true, .selection_toggles = true, .compact = true });
 }
 
 /// STORE-tab card: browse-only — just an install button or a "no compatible build" message via
@@ -2309,8 +2309,8 @@ const card_text_padding: dvui.Rect = .{ .x = 0, .y = 1, .w = 0, .h = 1 };
 const CardOptions = struct {
     /// Surface a rejected build's load-failure detail under the info line.
     show_failure: bool = false,
-    /// Reveal the Enabled / Auto-update panel while the card is hovered.
-    hover_toggles: bool = false,
+    /// Show the Enabled / Auto-update panel beside this card while it is the selected one.
+    selection_toggles: bool = false,
     /// Clicking the card body selects it (and shows its README in the center).
     clickable: bool = true,
     /// Drop the empty-line reservation for description / author.
@@ -2322,7 +2322,7 @@ const CardOptions = struct {
     compact: bool = false,
 };
 
-/// A card whose every control lives in its hover flyout instead (`drawHoverToggles`).
+/// A card whose every control lives in the flyout beside it instead (`drawSelectionToggles`).
 fn drawNoCardControls(_: StoreEntry) void {}
 
 fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_text: []const u8, opts: CardOptions) void {
@@ -2331,14 +2331,7 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
     // Disabled plugins read as a faded card: half the surface fill opacity and half the shadow.
     //const disabled = app.isDisabled(entry.id);
 
-    // The card stays lit while the pointer is inside its own flyout. The panel overhangs the
-    // card's right edge, so `ButtonWidget`'s hover goes false the instant the mouse crosses into
-    // it — without this the row would go dark while the menu it opened is still up and being used.
-    // `flyout_rect` is last frame's, which is exactly when the pointer was over it.
-    const flyout_pinned = opts.hover_toggles and flyoutIsFor(entry.id) and
-        flyout_rect.contains(dvui.currentWindow().mouse_pt);
-
-    const fill = if (selected or flyout_pinned)
+    const fill = if (selected)
         theme.color(.control, .fill).opacity(0.5)
     else
         theme.color(.content, .fill).opacity(0.0);
@@ -2511,7 +2504,7 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
             // collision, etc.) — this is the *only* place that surfaces it (there is no more
             // startup dialog), so it must carry every diagnostic detail we have. It wraps across
             // the card's full width: nothing shares this row any more, since every control moved
-            // into the hover flyout. The zero-floor max (as on the labels above) keeps the wrapped
+            // into the flyout beside the card. The zero-floor max (as on the labels above) keeps the wrapped
             // text from reporting its unwrapped width as the card's min size. Store (upper-pane)
             // cards never show this — see `show_failure`.
             if (opts.show_failure) if (failedInfo(entry.id)) |f| {
@@ -2557,17 +2550,18 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
 
     // Drawn last so the flyout paints over the card and gets first refusal on the mouse. Its
     // anchor is this card's own rect, so it has to be inside the card widget's scope.
-    if (opts.hover_toggles) drawHoverToggles(entry, bw.data().borderRectScale().r, bw.hover);
+    if (opts.selection_toggles) drawSelectionToggles(entry, bw.data().borderRectScale().r, selected);
 }
 
-// ---- per-card hover flyout -------------------------------------------------
+// ---- per-card flyout, beside the selected card -----------------------------
 
 /// Which card's toggle flyout is showing, by id. A fixed buffer rather than an allocation: this
 /// changes on every mouse move across the list, and plugin ids are short by construction
 /// (`Editor.isValidPluginId`). An over-long id simply never gets a flyout.
 var flyout_id_buf: [96]u8 = undefined;
 var flyout_id_len: usize = 0;
-/// Last drawn flyout rect, so the mouse can leave the card *into* the flyout without it closing.
+/// Last drawn flyout rect. Kept for the panel's own size animation bookkeeping; nothing gates
+/// on the pointer being inside it any more, now that selection decides what is showing.
 var flyout_rect: dvui.Rect.Physical = .{};
 /// The popover's own rect, which it animates its size through across frames. Zeroed whenever the
 /// flyout moves to another card, so each one grows from its anchor rather than sliding over.
@@ -2599,22 +2593,23 @@ fn flyoutClear() void {
 }
 
 /// The installed card's Enabled / Auto-update controls, as a small rounded panel butted against
-/// the card's right edge while the card (or the panel itself) is hovered.
+/// the right edge of the *selected* card.
 ///
 /// These two are settings rather than actions, and a sidebar-width card has no room for four
-/// controls in a row without squeezing the title and description into nothing. Hover-revealing
-/// them keeps the resting card readable and still puts them one mouse-move away.
-fn drawHoverToggles(entry: StoreEntry, card_r: dvui.Rect.Physical, card_hovered: bool) void {
+/// controls in a row without squeezing the title and description into nothing. Putting them
+/// beside the card the user has chosen keeps the resting card readable and costs one tap.
+///
+/// Selection rather than hover, which is what this used to be: a hover-only control does not
+/// exist on a touch screen. There is no hover to give, the panel never appeared, and the two
+/// settings were unreachable — on the web build, which is the one most likely to be used from a
+/// phone. Selection is the same gesture on both: a click or a tap.
+fn drawSelectionToggles(entry: StoreEntry, card_r: dvui.Rect.Physical, selected: bool) void {
     // Bundled built-ins are neither disablable nor store-updatable, and a plugin with no build on
     // disk has nothing to toggle.
     if (isBundled(entry.id) or !isInstalled(entry)) return;
 
-    const mouse = dvui.currentWindow().mouse_pt;
     const showing = flyoutIsFor(entry.id);
-    // `card_hovered` is false the moment the pointer crosses onto the flyout (which overhangs the
-    // card), so the panel's own rect has to keep it alive.
-    const keep_open = card_hovered or (showing and flyout_rect.contains(mouse));
-    if (!keep_open) {
+    if (!selected) {
         if (showing) flyoutClear();
         return;
     }
@@ -2671,9 +2666,9 @@ fn drawHoverToggles(entry: StoreEntry, card_r: dvui.Rect.Physical, card_hovered:
     flyout_rect = panel.rect;
 }
 
-/// The two per-plugin settings shared by the hover flyout and the detail page header: whether the
+/// The two per-plugin settings shared by the selected card's flyout and the detail page header: whether the
 /// plugin loads at all, and whether the store's update pass considers it.
-/// `.compact` shrinks the labels a step for the hover flyout, which sits over the content rather
+/// `.compact` shrinks the labels a step for the card flyout, which sits over the content rather
 /// than in a header and should read as a small menu, not a second row of primary controls.
 const ToggleSize = enum { normal, compact };
 
@@ -2696,7 +2691,7 @@ fn drawToggleControls(entry: StoreEntry, size: ToggleSize) void {
     // A *failed* build is the one case with nothing to toggle — it already tried and lost, and
     // gets the Retry/Reinstall buttons on the card instead.
     // Each control gets its own normally-packed row: these are drawn into *vertical* parents (the
-    // hover flyout, the detail header's toggle column), where a `gravity_y = 0.5` direct child is
+    // card flyout, the detail header's toggle column), where a `gravity_y = 0.5` direct child is
     // treated as positioned/overlay and would stack on top of its sibling rather than under it.
     if (loaded or disabled or untracked) {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
@@ -3055,7 +3050,7 @@ fn drawCardControls(entry: StoreEntry) void {
 
     // Present on disk in some form: loaded, disabled-on-disk, sideloaded local, or a broken build.
     if (loaded or disabled or entry.kind == .local or entry.kind == .disabled or broken) {
-        // Enabled / Auto-update are not here: on a list card they live in the hover flyout at the
+        // Enabled / Auto-update are not here: on a list card they live in the flyout at the
         // card's right edge (`drawHoverToggles`), and on the detail page they sit beside these
         // buttons (`drawDetailControls`). Only actions — update, repair, uninstall — are inline
         // on a card, so a row of four controls can't crowd the text out of a narrow sidebar.
@@ -3137,10 +3132,14 @@ fn drawCardControls(entry: StoreEntry) void {
     drawNoStoreBuild(entry, .{});
 }
 
-/// Upper-pane (store) card controls: browse-only. Just an in-flight job status, an Install
-/// button, or a "no compatible build" message — never enable/disable, update, or uninstall
-/// (those are the installed pane's job, see `drawCardControls`), regardless of whether this
-/// particular store plugin also happens to be installed.
+/// Upper-pane (store) card controls: an in-flight job status, Install, Uninstall for something
+/// already here, or a "no compatible build" message. Enable/disable and update stay the installed
+/// pane's job (`drawCardControls`) — those are settings for a plugin you have, and this pane is
+/// for deciding whether to have it.
+///
+/// It used to offer Install whatever the local state was, on the grounds that the store pane
+/// only browses. But a button that says Install beside something already installed is not
+/// browsing, it is a wrong answer: pressing it re-fetches a build the app is already running.
 fn drawStoreCardControls(entry: StoreEntry) void {
     const theme = dvui.themeGet();
     const muted = theme.color(.window, .text).opacity(0.7);
@@ -3170,6 +3169,18 @@ fn drawStoreCardControls(entry: StoreEntry) void {
     // button simply sat there during a web install, which reads as a button that does nothing.
     if (isInstalling(entry.id)) {
         drawInstalling("Installing…", muted);
+        return;
+    }
+
+    if (isInstalled(entry)) {
+        // Bundled built-ins ship inside fizzy: nothing to uninstall, and a disabled one is still
+        // "here". Say so rather than offering an action that cannot happen.
+        if (isBundled(entry.id)) {
+            dvui.labelNoFmt(@src(), "Built in", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = muted }, .font = dvui.Font.theme(.mono) });
+            return;
+        }
+        if (dvui.button(@src(), "Uninstall", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = theme.color(.err, .text) } }))
+            queueUninstall(entry.id);
         return;
     }
 
