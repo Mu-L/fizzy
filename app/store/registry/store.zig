@@ -4,7 +4,7 @@
 //! caller already computes this from `sdk.dylib.abi_fingerprint`; this layer stays free of
 //! SDK-specific concerns). The store UI drives `Catalog` and tracks per-plugin install state
 //! on top of this. Native refresh uses an `Io.Group` worker; the web build pumps browser GETs
-//! on the UI thread (browse-only — no wasm plugin binaries).
+//! on the UI thread; the page downloads and links the plugin itself (`PluginLoader_web.zig`).
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -153,6 +153,10 @@ pub const Catalog = struct {
                         if (self.summary) |*p| p.deinit();
                         self.summary = parsed;
                         self.wasm_phase = .shard;
+                        // Ask for the shard now, not on the next pump: the web draws a frame only
+                        // when something asks for one, and nothing may — the update pass runs with
+                        // no store tab open to keep a spinner turning.
+                        self.pump(fetcher);
                     },
                 }
             },

@@ -84,6 +84,7 @@ pub fn addSteps(
         "FizzyWebPluginReady",
         "FizzyWebPluginFailed",
         "FizzyWebPluginRequest",
+        "FizzyWebStartupPluginsRequested",
         "FizzyWebOpenBytes",
         "__stack_pointer",
         "dvui_c_alloc",

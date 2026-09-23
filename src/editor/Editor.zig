@@ -806,7 +806,8 @@ pub fn isUnloadablePlugin(editor: *Editor, id: []const u8) bool {
 /// from every `.plugins.<id>.enabled` that is not `true` (absent entry / omitted field / explicit
 /// false all mean disabled — R12), and `auto_update_off_ids` from every `.plugins.<id>.auto_update`
 /// that is explicitly `false`. One directory walk and one settings read for both.
-/// Call once after settings load, before `loadUserPlugins`.
+/// Call once after settings load, before `loadUserPlugins`. The web has no directory to walk:
+/// each plugin the page remembers is seeded as it is asked for (`FizzyWebPluginRequest`).
 fn seedPluginFlags(editor: *Editor) void {
     if (comptime builtin.target.cpu.arch == .wasm32) return;
     const gpa = editor.app.gpa;
@@ -827,17 +828,24 @@ fn seedPluginFlags(editor: *Editor) void {
         if (id.len == 0 or id[0] == '.') continue;
         if (!App.isValidPluginId(id)) continue;
         if (isBundledPluginId(id)) continue;
-        // The two flags are independent: a disabled plugin can still be opted out of updates
-        // (which takes effect the moment it is enabled again), so neither read short-circuits
-        // the other.
-        editor.app.trackAutoUpdate(id, App.readPluginAutoUpdate(gpa, data, id)) catch {};
-        const state = App.readPluginEnabledState(gpa, data, id);
-        if (state == .enabled) continue;
-        editor.app.trackDisabledPlugin(id) catch {};
-        // Never asked about: a build that appeared while fizzy wasn't running. Offer it in the
-        // store rather than leaving it looking like a plugin the user had switched off.
-        if (state == .unset) editor.app.trackUndecidedPlugin(id) catch {};
+        editor.seedPluginFlagsFor(data, id);
     }
+}
+
+/// One plugin's flags from `settings_data`: whether it is disabled (or never decided), and whether
+/// it is opted out of updates.
+fn seedPluginFlagsFor(editor: *Editor, settings_data: ?[:0]const u8, id: []const u8) void {
+    const gpa = editor.app.gpa;
+    // The two flags are independent: a disabled plugin can still be opted out of updates
+    // (which takes effect the moment it is enabled again), so neither read short-circuits
+    // the other.
+    editor.app.trackAutoUpdate(id, App.readPluginAutoUpdate(gpa, settings_data, id)) catch {};
+    const state = App.readPluginEnabledState(gpa, settings_data, id);
+    if (state == .enabled) return;
+    editor.app.trackDisabledPlugin(id) catch {};
+    // Never asked about: a build that appeared while fizzy wasn't running. Offer it in the
+    // store rather than leaving it looking like a plugin the user had switched off.
+    if (state == .unset) editor.app.trackUndecidedPlugin(id) catch {};
 }
 
 /// Opt `id` in or out of store updates, persisting the choice immediately (same reasoning as
@@ -1423,7 +1431,8 @@ const WebPluginRequest = struct {
             return;
         };
 
-        if (req.replace) {
+        // Nothing to take over from when the build it replaces was refused: that is a repair.
+        if (req.replace and editor.app.host.pluginById(req.id) != null) {
             // `force = false`: a plugin with unsaved documents keeps them, and the update stays
             // on offer. The module just linked is wasted, which costs the page some memory and
             // the user nothing.
@@ -1480,14 +1489,39 @@ export fn FizzyWebPluginRequest(id_ptr: [*]const u8, id_len: usize, url_ptr: [*]
         dvui.log.warn("web plugin request: '{s}' is not a valid plugin id", .{id});
         return;
     }
-    // A plugin the user turned off stays off across reloads: the page remembers every plugin it
-    // ever linked, and without this the disable would last exactly one visit.
+    // A remembered build is an installed plugin: read its flags as the desktop does for each
+    // directory in the plugins folder. A plugin the user turned off then stays off across
+    // reloads, and one opted out of updates is left at the build it has.
+    if (url_len != 0) {
+        const settings_path = std.fs.path.join(editor.app.gpa, &.{ editor.app.config_folder, "settings.zon" }) catch return;
+        defer editor.app.gpa.free(settings_path);
+        const data = fizzy.core.fs.readZ(editor.app.gpa, dvui.io, settings_path) catch null;
+        defer if (data) |d| editor.app.gpa.free(d);
+        if (App.readPluginEnabledState(editor.app.gpa, data, id) == .unset) {
+            // Installed on a visit before web installs recorded the decision: the page
+            // remembering the build is the record that the user chose it.
+            editor.setPluginEnabledPersisted(id, true) catch {};
+        } else editor.seedPluginFlagsFor(data, id);
+    }
     if (editor.app.isPluginDisabled(id)) return;
     var buf: [512]u8 = undefined;
     const url = if (url_len != 0) url_ptr[0..url_len] else std.fmt.bufPrint(&buf, "plugins/{s}/{s}.wasm", .{ id, id }) catch return;
     // No hash: this is either a local `plugins/<id>/<id>.wasm` beside the app or a URL the page
     // remembered from an install it already verified. A store install always carries one.
-    editor.loadWebPlugin(id, url, "") catch |err| dvui.log.err("web plugin '{s}': {s}", .{ id, @errorName(err) });
+    editor.loadWebPlugin(id, url, "") catch |err| {
+        dvui.log.err("web plugin '{s}': {s}", .{ id, @errorName(err) });
+        return;
+    };
+    // A remembered build is an installed plugin, so the update pass considers it — and it may be
+    // one this host refuses (built for an older SDK), which the pass then repairs.
+    if (url_len != 0) PluginStore.webRemembered(id);
+}
+
+/// The page has asked for every plugin it remembered. The store's update pass waits for this and
+/// for each of those loads to land before deciding what is running and what needs a newer build.
+export fn FizzyWebStartupPluginsRequested() void {
+    if (comptime builtin.target.cpu.arch != .wasm32) return;
+    PluginStore.webStartupRequested();
 }
 /// The page opens a file it fetched (`?open=<url>` — a zip vault for a demo, say) exactly as
 /// an upload: by name and bytes, through the plugin that owns the extension.
@@ -1722,6 +1756,9 @@ pub fn uninstallPlugin(editor: *Editor, id: []const u8, force: bool) !void {
             error.NotUnloadable => {}, // already gone
             else => return err,
         };
+        // As on the desktop: a reinstall asks again (see `clearPluginOwnershipRecord`).
+        editor.app.untrackDisabledPlugin(id);
+        editor.clearPluginOwnershipRecord(id);
         editor.rebuildExtensionOwnerCache();
         return;
     }
@@ -5549,7 +5586,11 @@ const plugin_manager_vtable: PluginManager.VTable = .{
     }.f,
     .installFromUrl = struct {
         fn f(ctx: *anyopaque, id: []const u8, url: []const u8, sha256: []const u8) anyerror!void {
-            return pmSelf(ctx).loadWebPlugin(id, url, sha256);
+            const editor = pmSelf(ctx);
+            // Installing is choosing it, as on the desktop (`installAndLoadPlugin`).
+            editor.app.untrackDisabledPlugin(id);
+            try editor.setPluginEnabledPersisted(id, true);
+            return editor.loadWebPlugin(id, url, sha256);
         }
     }.f,
     .updateFromUrl = struct {

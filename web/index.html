@@ -395,9 +395,8 @@
           fizzy_web_plugin_forget(idPtr, idLen) {
             forgetPlugin(utf8.decode(new Uint8Array(wasmInstance.exports.memory.buffer, idPtr, idLen)));
           },
-          // An update, on the web, is a change of which URL this page fetches next time: a side
-          // module already linked into the table cannot be replaced in a running page, so the
-          // new version is remembered now and linked on the next load.
+          // Which build to bring back next visit. Written once a module has registered, so a
+          // build the host refused is never what the page asks for again.
           fizzy_web_plugin_remember(idPtr, idLen, urlPtr, urlLen) {
             const mem = wasmInstance.exports.memory.buffer;
             rememberPlugin(
@@ -490,6 +489,9 @@
         if (!inst || !inst.exports.FizzyWebPluginRequest) return;
         for (const [id, url] of Object.entries(rememberedPlugins())) requestPlugin(id, url);
         for (const id of new URLSearchParams(location.search).getAll("plugin")) requestPlugin(id, "");
+        // The store's update pass waits for this: it can only tell a remembered build that runs
+        // from one that needs replacing once every one of them has been tried.
+        if (inst.exports.FizzyWebStartupPluginsRequested) inst.exports.FizzyWebStartupPluginsRequested();
         if (dvuiApp) dvuiApp.requestRender();
         // `?open=<url>`: fetch a file and open it as an upload would be (a zip becomes the
         // root folder). After the plugins, so the one that owns it may be among them.

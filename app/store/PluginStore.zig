@@ -260,7 +260,17 @@ fn refreshDiskScan() void {
     disk_scan_dirty = false;
     freeDiskIds();
     clearManifestCache();
-    if (comptime builtin.target.cpu.arch == .wasm32) return;
+    if (comptime builtin.target.cpu.arch == .wasm32) {
+        // No directory to list: the page's memory is where an installed plugin lives. One the
+        // page has forgotten (uninstalled) is no longer installed, whatever this visit loaded.
+        var url_buf: [512]u8 = undefined;
+        for (web_known.keys()) |id| {
+            if (web_loader.rememberedUrl(id, &url_buf) == null) continue;
+            const dup = app.gpa.dupe(u8, id) catch continue;
+            disk_ids.append(app.gpa, dup) catch app.gpa.free(dup);
+        }
+        return;
+    }
 
     const a = app.gpa;
     const plugins_dir = std.fs.path.join(a, &.{ app.config_folder, "plugins" }) catch return;
@@ -730,8 +740,9 @@ pub fn deinit() void {
         StoreIcon.deinit();
         if (catalog) |*c| c.deinit();
         catalog = null;
-        for (web_in_flight.keys()) |k| app.gpa.free(k);
-        web_in_flight.deinit(app.gpa);
+        freeIds(&web_in_flight);
+        freeIds(&web_known);
+        freeIds(&web_startup_waiting);
         for (pending_actions.items) |action| switch (action) {
             .set_enabled => |a| app.gpa.free(a.id),
             .set_auto_update => |a| app.gpa.free(a.id),
@@ -890,24 +901,68 @@ fn markPendingUpdateFailed(id: []const u8) void {
 /// has not yet accepted or refused the module. `app.gpa`-owned; one entry per id.
 var web_in_flight: std.StringArrayHashMapUnmanaged(void) = .empty;
 
-fn markWebInFlight(id: []const u8) void {
-    const gop = web_in_flight.getOrPut(app.gpa, id) catch return;
+/// The web's plugins directory: every id the page remembers a build for (it brings each back at
+/// startup) or that loaded this visit. `refreshDiskScan` lists the ones the page still remembers
+/// into `disk_ids`, so everything the desktop does with a plugin on disk — the Installed card,
+/// Uninstall and Reinstall, the update pass — applies here too. `app.gpa`-owned keys.
+var web_known: std.StringArrayHashMapUnmanaged(void) = .empty;
+/// Startup loads the page asked for that have not landed yet. The update pass waits for these:
+/// until a remembered build has been accepted or refused, the pass cannot tell a plugin that is
+/// running from one that needs repairing.
+var web_startup_waiting: std.StringArrayHashMapUnmanaged(void) = .empty;
+/// The page has made all of its startup requests (`webStartupRequested`).
+var web_startup_requested = false;
+
+const web_loader = if (builtin.target.cpu.arch == .wasm32) @import("PluginLoader_web.zig") else struct {};
+
+fn putId(set: *std.StringArrayHashMapUnmanaged(void), id: []const u8) void {
+    const gop = set.getOrPut(app.gpa, id) catch return;
     if (!gop.found_existing) {
         gop.key_ptr.* = app.gpa.dupe(u8, id) catch {
-            _ = web_in_flight.swapRemove(id);
+            _ = set.swapRemove(id);
             return;
         };
     }
 }
 
+fn removeId(set: *std.StringArrayHashMapUnmanaged(void), id: []const u8) void {
+    if (set.fetchSwapRemove(id)) |kv| app.gpa.free(kv.key);
+}
+
+fn freeIds(set: *std.StringArrayHashMapUnmanaged(void)) void {
+    for (set.keys()) |k| app.gpa.free(k);
+    set.deinit(app.gpa);
+    set.* = .empty;
+}
+
+/// The page is bringing back a build it remembered for `id` (from a store install on an earlier
+/// visit). Called as the load starts; `webLoadSucceeded` / `webLoadFailed` say how it went.
+pub fn webRemembered(id: []const u8) void {
+    putId(&web_known, id);
+    putId(&web_startup_waiting, id);
+    disk_scan_dirty = true;
+}
+
+/// Every remembered plugin has been asked for: once they have all landed, the update pass may run.
+pub fn webStartupRequested() void {
+    web_startup_requested = true;
+}
+
+fn markWebInFlight(id: []const u8) void {
+    putId(&web_in_flight, id);
+}
+
 fn clearWebInFlight(id: []const u8) void {
-    if (web_in_flight.fetchSwapRemove(id)) |kv| app.gpa.free(kv.key);
+    removeId(&web_in_flight, id);
 }
 
 /// The load or update for `id` registered. Called from the arrival path, which is the first
 /// moment anything here may treat the new build as the one that is running.
 pub fn webLoadSucceeded(id: []const u8) void {
     clearWebInFlight(id);
+    removeId(&web_startup_waiting, id);
+    putId(&web_known, id);
+    disk_scan_dirty = true;
     dropPendingUpdate(id);
     dvui.refresh(null, @src(), null);
 }
@@ -917,6 +972,7 @@ pub fn webLoadSucceeded(id: []const u8) void {
 /// down, so there is something to go back to.
 pub fn webLoadFailed(id: []const u8) void {
     clearWebInFlight(id);
+    removeId(&web_startup_waiting, id);
     if (pendingRowFor(id)) |row| {
         row.started = false;
         row.failed = true;
@@ -1073,11 +1129,17 @@ fn autoUpdateTick() void {
                 auto_phase = .done;
                 return;
             }
+            // On the web: wait until every remembered build has been accepted or refused. Before
+            // that, a plugin still loading looks exactly like one that failed to.
+            if (comptime builtin.target.cpu.arch == .wasm32) {
+                if (!web_startup_requested or web_startup_waiting.count() != 0) return;
+            }
             // Plugins go *after* Fizzy itself. Store builds are made against one SDK
             // generation, so the plugin builds that match the Fizzy release we're about to
             // install only become visible to us once we are running it — see
             // `PluginManager.AppUpdate`.
-            switch (app.appUpdate()) {
+            // The web has no self-update to wait for: the page is whatever the site serves.
+            if (comptime builtin.target.cpu.arch != .wasm32) switch (app.appUpdate()) {
                 // The launch check is still out. Wait: it costs a few frames of a pass nobody
                 // is watching, and answers whether these are even the right plugin builds.
                 .checking => return,
@@ -1089,7 +1151,7 @@ fn autoUpdateTick() void {
                 // new SDK's shard, and only then is there a plugin story worth telling.
                 .pending => return,
                 .none => {},
-            }
+            };
 
             // Nothing installed to update: don't touch the network at all.
             if (disk_scan_dirty) refreshDiskScan();
@@ -1272,6 +1334,7 @@ pub fn tick() void {
         // download queue below is the desktop's alone: on the web a plugin arrives through the
         // page's loader instead (`applyWebUpdate`, `queueInstall`).
         applyPendingActions();
+        autoUpdateTick();
         return;
     }
 
