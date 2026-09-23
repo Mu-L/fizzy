@@ -29,10 +29,15 @@ const DocHandle = sdk.DocHandle;
 /// plugin for ownership of every README in the world.
 pub const extension = ".fizzyplugin";
 
-/// The mount every page lives under. A page's path is `store://<display name><extension>`, so
-/// the tab shows the plugin's name — a tab strip is a row of file names, and "Google Drive" is
-/// what that plugin is called.
-pub const mount_prefix = "store://";
+/// The mount every page lives under. A page's path is `store://pages/<display name><extension>`,
+/// so the tab shows the plugin's name — a tab strip is a row of file names, and "Google Drive"
+/// is what that plugin is called.
+///
+/// Scheme *and* authority, with no trailing slash, because that is what a mount prefix is here:
+/// `FileTable.pathOnMount` asks that the rest of the path start with `/`, so a bare `store://`
+/// matched nothing and every page fell through to the disk — "Failed to open file" for a file
+/// that was right there in memory. `gdrive://<account>` has the same shape for the same reason.
+pub const mount_prefix = "store://pages";
 
 pub const plugin_id = "fizzy.store";
 
@@ -181,7 +186,9 @@ pub fn open(host: *sdk.Host, id: []const u8, title: []const u8, grouping: u64) !
         break;
     }
 
-    const file = try std.fmt.allocPrint(gpa, "{s}{s}", .{ sanitized(title), extension });
+    // Rooted, like every path in a `Mem`: what the mount hands it is the path *after* the
+    // prefix, which always starts with a slash.
+    const file = try std.fmt.allocPrint(gpa, "/{s}{s}", .{ sanitized(title), extension });
     defer gpa.free(file);
     try state.files.put(file, id);
 
