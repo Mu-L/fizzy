@@ -25,7 +25,11 @@ pub fn rebuildWorkspaces(wb: *Workbench) !void {
         for (host.assignedRegionNames()) |region_name| {
             const grouping = Workspace.groupingOfName(region_name) orelse continue;
             _ = try wb.pane(grouping);
-            const ids = host.assignedSurfaces(region_name) orelse continue;
+            // A copy: the assignment is borrowed until the next `assignSurfaces`, and each open
+            // below seats a loading placeholder in this pane, which reassigns it.
+            const borrowed = host.assignedSurfaces(region_name) orelse continue;
+            const ids = try arena.alloc([]const u8, borrowed.len);
+            for (borrowed, ids) |b, *c| c.* = try arena.dupe(u8, b);
             for (ids) |id| {
                 const path = sdk.document.pathOfSurfaceId(id) orelse continue;
                 if (host.docFromPath(path) != null) continue;

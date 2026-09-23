@@ -66,6 +66,7 @@ const SettingsWatcher = @import("app").watch.SettingsWatcher;
 const Constants = @import("Constants.zig");
 const DocumentWatcher = @import("DocumentWatcher.zig");
 const DocumentIo = @import("DocumentIo.zig");
+const Openings = @import("Openings.zig");
 const Watch = @import("app").watch;
 const FolderWatcher = Watch.FolderWatcher;
 
@@ -191,6 +192,8 @@ document_watcher: ?DocumentWatcher = null,
 /// on a mount. `undefined` until `init` has a stable `*Editor` to hand it (it calls back into
 /// the editor on completion).
 doc_io: DocumentIo = undefined,
+/// Documents on their way, each with a placeholder tab until it lands (`Openings`).
+openings: Openings = undefined,
 
 /// Timestamp of the most recent touch press anywhere in the app, or null if there
 /// hasn't been one. `Editor.draw` forces a per-frame refresh during the post-press
@@ -1824,6 +1827,7 @@ pub fn postInit(editor: *Editor) !void {
     // project is, whether the watcher is live, which paths are ignored — and in exchange holds
     // the caches every plugin that draws files then shares.
     editor.doc_io = DocumentIo.init(editor);
+    editor.openings = Openings.init(editor.app.gpa);
     editor.app.file_table.env = .{
         .ctx = editor,
         .root = fileTableRoot,
@@ -2464,9 +2468,12 @@ pub fn insertOpenDoc(editor: *Editor, doc_buf: *anyopaque, owner: *sdk.Plugin, i
     if (editor.document_watcher) |*w| {
         if (editor.app.docById(id)) |doc| w.track(doc);
     }
-    if (editor.app.docById(id)) |doc| editor.registerDocSurface(doc) catch |err| {
-        dvui.log.err("document surface for {s}: {t}", .{ owner.documentPath(doc), err });
-    };
+    if (editor.app.docById(id)) |doc| {
+        editor.registerDocSurface(doc) catch |err| {
+            dvui.log.err("document surface for {s}: {t}", .{ owner.documentPath(doc), err });
+        };
+        editor.openings.land(editor, owner.documentPath(doc), doc);
+    }
 }
 
 fn registerDocSurface(editor: *Editor, doc: sdk.DocHandle) !void {
@@ -3427,7 +3434,7 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
 
     const wd = dvui.currentWindow().data();
     // Save spinner + finish animation are time-based; without input the loop would sleep and
-    // frames would not advance (same pattern as `drawLoadingOverlay`).
+    // frames would not advance.
     if (needs_save_status_anim_tick and dvui.timerDoneOrNone(wd.id)) {
         dvui.timer(wd.id, 16_000);
     }
@@ -3499,6 +3506,7 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
         const t = fizzy.core.hitch.begin(.loading_jobs);
         defer t.end();
         editor.processLoadingJobs();
+        editor.openings.tick(editor);
     }
     if (comptime builtin.target.cpu.arch == .wasm32) fizzy.backend.pollWebFileIo(editor);
 
@@ -3819,10 +3827,6 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
     // look at demo() for examples of dvui widgets, shows in a floating window
     dvui.Examples.demo(.full);
 
-    // Render a centered loading overlay for any background file-load job that has been
-    // running long enough to warrant UI feedback. Small files complete before the threshold
-    // and never flash this. Non-modal — user can keep working in other tabs while loading.
-    editor.drawLoadingOverlay();
     // Render any save-complete toasts in the same centered, content-fill-styled card system.
     // The dvui toast queue holds them with a 2.5s timeout; each toast's display function fades
     // out and removes itself when the timer expires.
@@ -4441,10 +4445,33 @@ pub fn setDocumentPreview(editor: *Editor, doc_id: u64, preview: bool) void {
 /// Open a file — see `EditorAPI.OpenOptions`. A `.preview` open takes the tab of the preview
 /// already in that pane, which is what stops a click-through leaving a trail of tabs.
 pub fn openFile(editor: *Editor, opts: sdk.EditorAPI.OpenOptions) !bool {
-    const replacing: ?u64 = if (opts.mode == .preview) editor.previewIn(opts.grouping) else null;
-    const started = try editor.openFilePath(opts.path, opts.grouping);
-    if (opts.mode == .preview) {
+    const preview = opts.mode == .preview;
+    const replacing: ?u64 = if (preview) editor.previewIn(opts.grouping) else null;
+    // A preview still loading is replaced the same as one that has loaded: its tab slot is the
+    // one the new file takes, and its load stops.
+    const loading_preview = if (preview) editor.openings.previewIn(opts.grouping) else null;
+    const loading_preview_path: ?[]u8 = if (loading_preview) |o| try editor.app.gpa.dupe(u8, o.path) else null;
+    defer if (loading_preview_path) |lp| editor.app.gpa.free(lp);
+    const slot: ?[]const u8 = if (loading_preview) |o|
+        o.surface_id
+    else if (replacing) |old|
+        (if (editor.doc_surfaces.get(old)) |ds| ds.id else null)
+    else
+        null;
+
+    const started = try editor.openPath(opts.path, opts.grouping, .{ .preview = preview, .take_slot_of = slot });
+    if (preview) {
         if (editor.docFromPath(opts.path)) |doc| editor.setDocumentPreview(doc.id, true);
+    }
+    if (loading_preview_path) |lp| {
+        const same = if (fizzy.core.paths.normalize(editor.app.gpa, opts.path)) |canon| blk: {
+            defer editor.app.gpa.free(canon);
+            break :blk std.mem.eql(u8, canon, lp);
+        } else |_| false;
+        if (!same) {
+            editor.cancelOpen(lp);
+            editor.openings.drop(editor, lp);
+        }
     }
     // After the open, so a failed one costs the user nothing. A document the open just landed
     // on is never the one closed — `previewIn` was read before it existed.
@@ -4488,6 +4515,16 @@ fn previewIn(editor: *Editor, grouping: u64) ?u64 {
 }
 
 pub fn openFilePath(editor: *Editor, path_in: []const u8, grouping: u64) !bool {
+    return editor.openPath(path_in, grouping, .{});
+}
+
+/// Where an open's placeholder tab goes (see `Openings.begin`).
+const Placement = struct {
+    preview: bool = false,
+    take_slot_of: ?[]const u8 = null,
+};
+
+fn openPath(editor: *Editor, path_in: []const u8, grouping: u64, placement: Placement) !bool {
     const path = try fizzy.core.paths.normalize(editor.app.gpa, path_in);
     defer editor.app.gpa.free(path);
 
@@ -4510,7 +4547,15 @@ pub fn openFilePath(editor: *Editor, path_in: []const u8, grouping: u64) !bool {
 
     // A mounted path has no file for a worker to open: it is read through the mount and
     // opened from the bytes when they land — on any target, the browser included.
-    if (editor.doc_io.owns(path)) return editor.doc_io.open(path, grouping);
+    if (editor.doc_io.owns(path)) {
+        const started = try editor.doc_io.open(path, grouping);
+        if (started) {
+            if (editor.app.host.pluginForExtension(std.fs.path.extension(path))) |owner| {
+                editor.openings.begin(editor, path, grouping, placement.preview, owner, placement.take_slot_of);
+            }
+        }
+        return started;
+    }
 
     // Resolve the owning plugin from the file-type registry before spawning. No owner
     // means no plugin claims this extension — reject here rather than spawning a worker
@@ -4547,8 +4592,42 @@ pub fn openFilePath(editor: *Editor, path_in: []const u8, grouping: u64) !bool {
         job.destroy(io);
         return err;
     };
+    editor.openings.begin(editor, path, grouping, placement.preview, owner, placement.take_slot_of);
 
     return true;
+}
+
+/// Stop loading `path`, wherever it is loading from. Its document never arrives.
+pub fn cancelOpen(editor: *Editor, path: []const u8) void {
+    if (editor.loading_jobs.get(path)) |job| job.cancelled.store(true, .monotonic);
+    editor.doc_io.cancel(path);
+}
+
+/// The selection key of the pane holding the tab `id`, once that pane's region has been
+/// declared — null before its first draw (an open at launch) or when no pane holds it.
+pub fn tabRegionKey(editor: *Editor, id: []const u8) ?u64 {
+    for (editor.workbench.workspaces.values()) |*ws| {
+        if (!ws.hasTab(id)) continue;
+        var buf: [32]u8 = undefined;
+        const name = Workspace.name(&buf, ws.grouping);
+        // Either list, as `fizzySelectInRegion` reads them: this frame's, else last frame's.
+        for (editor.app.layout.regions_building.items) |r| if (std.mem.eql(u8, r.name, name)) return r.selectionKey();
+        for (editor.app.layout.regions.items) |r| if (std.mem.eql(u8, r.name, name)) return r.selectionKey();
+        return null;
+    }
+    return null;
+}
+
+/// Whether the pane holding the tab `id` is showing it.
+pub fn surfaceSelected(editor: *Editor, id: []const u8) bool {
+    const key = editor.tabRegionKey(id) orelse return false;
+    const sel = editor.app.host.selections.get(key) orelse return false;
+    return std.mem.eql(u8, sel, id);
+}
+
+/// Whether the pane holding the tab `id` exists yet, so selecting in it takes.
+pub fn tabRegionReady(editor: *Editor, id: []const u8) bool {
+    return editor.tabRegionKey(id) != null;
 }
 
 /// Synchronous open from browser file-picker bytes. Takes ownership of `path_in` and registers
@@ -4613,13 +4692,17 @@ pub fn processLoadingJobs(editor: *Editor) void {
 
         const phase = job.currentPhase();
         switch (phase) {
-            .ready => {
+            // Closed while it loaded: the worker finished before it looked, so nothing stopped it.
+            .ready => if (job.cancelled.load(.monotonic)) {
+                job.owner.deinitDocumentBuffer(job.doc_buf.ptr);
+            } else {
                 const owner = job.owner;
                 owner.setDocumentGroupingOnBuffer(job.doc_buf.ptr, job.target_grouping);
                 const id = owner.documentIdFromBuffer(job.doc_buf.ptr);
 
                 editor.insertOpenDoc(job.doc_buf.ptr, owner, id) catch {
                     dvui.log.err("Failed to insert loaded file into open_files: {s}", .{job.path});
+                    _ = editor.openings.fail(editor, job.path, "It loaded, but could not be opened.");
                     owner.deinitDocumentBuffer(job.doc_buf.ptr);
                     job.destroy(io);
                     continue;
@@ -4644,11 +4727,14 @@ pub fn processLoadingJobs(editor: *Editor) void {
                 // plugin's numbering and `@errorName` would print whichever of *our* errors
                 // happens to share it. Only the plugin can say why; it logs that itself.
                 dvui.log.err("Failed to open file: {s}", .{job.path});
-                dvui.toast(@src(), .{ .message = std.fmt.allocPrint(
-                    editor.app.arena.allocator(),
-                    "Could not open {s}.",
-                    .{std.fs.path.basename(job.path)},
-                ) catch "Could not open file." });
+                // Its placeholder says so; only an open with none (a plugin's, say) needs a toast.
+                if (!editor.openings.fail(editor, job.path, "Its plugin could not read it. See the Output panel.")) {
+                    dvui.toast(@src(), .{ .message = std.fmt.allocPrint(
+                        editor.app.arena.allocator(),
+                        "Could not open {s}.",
+                        .{std.fs.path.basename(job.path)},
+                    ) catch "Could not open file." });
+                }
             },
             .cancelled => {
                 job.owner.deinitDocumentBuffer(job.doc_buf.ptr);
@@ -4711,143 +4797,6 @@ pub fn drawSaveToasts(editor: *Editor) void {
         t.display(t.id) catch |err| {
             dvui.log.err("save toast display: {any}", .{err});
         };
-    }
-}
-
-/// Centered floating card listing in-flight file loads that have been running long enough to
-/// warrant UI feedback. Non-modal: the user can keep interacting with the rest of the editor.
-/// Called once per frame from `tick`.
-pub fn drawLoadingOverlay(editor: *Editor) void {
-    if (editor.loading_jobs.count() == 0) return;
-
-    // Skip jobs that completed in under `toast_threshold_ms` to avoid flashing the UI for
-    // small files. If every in-flight job is still under the threshold, render nothing.
-    const toast_threshold_ms: i64 = 150;
-    var visible_count: usize = 0;
-    var earliest_pending_start_ns: ?i128 = null;
-    var it_count = editor.loading_jobs.valueIterator();
-    while (it_count.next()) |job_ptr| {
-        if (job_ptr.*.elapsedExceeds(toast_threshold_ms)) {
-            visible_count += 1;
-        } else {
-            const start = job_ptr.*.started_at_ns;
-            if (earliest_pending_start_ns == null or start < earliest_pending_start_ns.?) {
-                earliest_pending_start_ns = start;
-            }
-        }
-    }
-    // If we have pending jobs that haven't crossed the threshold yet, the app would otherwise
-    // sleep on the click event that started them and the overlay would never appear until some
-    // unrelated input (mouse move, etc.) ticks a frame. Schedule a wakeup at the threshold
-    // boundary so the overlay shows on time even with the cursor parked.
-    if (earliest_pending_start_ns) |start_ns| {
-        const elapsed_ms = @divTrunc(fizzy.core.perf.nanoTimestamp() - start_ns, std.time.ns_per_ms);
-        const remaining_ms: i64 = toast_threshold_ms - @as(i64, @intCast(elapsed_ms));
-        if (remaining_ms > 0) {
-            dvui.timer(dvui.currentWindow().data().id, @intCast(remaining_ms * std.time.us_per_ms));
-        } else {
-            dvui.refresh(null, @src(), dvui.currentWindow().data().id);
-        }
-    }
-    if (visible_count == 0) return;
-
-    // Prefer centering over the active workspace's canvas rect so the toast appears where the
-    // user is looking. Fall back to the OS window rect on the very first frame before any
-    // workspace has drawn, or if there's no active workspace (e.g., empty app state).
-    //
-    // Single-line rows keep multi-file loads compact: spinner + "<basename> — <phase>…" on one
-    // baseline. `row_h` is the natural-pixel height each row contributes to the card; the
-    // header band adds a fixed amount on top.
-    // The card is sized by its content, the way dvui sizes a floating widget: last frame's
-    // recorded min size. That is only known after a frame has drawn it, so the first frame
-    // estimates and asks for another — a fixed height fit the default font and clipped the
-    // rows under a larger one.
-    const src = @src();
-    const card_id = dvui.parentGet().extendId(src, 0);
-    const measured = dvui.minSizeGet(card_id);
-    if (measured == null) dvui.refresh(null, @src(), card_id);
-    const card_w: f32 = @max(320, if (measured) |m| m.w else 0);
-    const row_h: f32 = 26;
-    const header_h: f32 = 32;
-    const card_h: f32 = if (measured) |m| m.h else header_h + @as(f32, @floatFromInt(visible_count)) * row_h;
-    const card_rect: dvui.Rect = blk: {
-        if (editor.workbench.activeWorkspaceCanvasRectPhysical()) |rs_phys| {
-            const rs_natural = rs_phys.toNatural();
-            break :blk .{
-                .x = rs_natural.x + (rs_natural.w - card_w) * 0.5,
-                .y = rs_natural.y + (rs_natural.h - card_h) * 0.5,
-                .w = card_w,
-                .h = card_h,
-            };
-        }
-        const window_rect = dvui.windowRect();
-        break :blk .{
-            .x = (window_rect.w - card_w) * 0.5,
-            .y = (window_rect.h - card_h) * 0.5,
-            .w = card_w,
-            .h = card_h,
-        };
-    };
-
-    var fw: dvui.FloatingWidget = undefined;
-    fw.init(src, .{ .mouse_events = false }, .{
-        .rect = card_rect,
-        .background = true,
-        // Content-fill @ 0.85 matches the look of the other dialog-style popups in the editor.
-        .color_fill = .{ .color = dvui.themeGet().color(.content, .fill).opacity(0.85) },
-        .corners = dvui.CornerRect.all(8),
-        .box_shadow = .{
-            .color = .black,
-            .offset = .{ .x = -2.0, .y = 2.0 },
-            .fade = 12.0,
-            .alpha = 0.35,
-            .corners = dvui.CornerRect.all(8),
-        },
-    });
-    defer fw.deinit();
-
-    var outer = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .both,
-        .padding = .{ .x = 12, .y = 8, .w = 12, .h = 8 },
-    });
-    defer outer.deinit();
-
-    dvui.labelNoFmt(@src(), "Loading…", .{}, .{
-        .font = dvui.Font.theme(.heading),
-        .color_text = .{ .color = dvui.themeGet().color(.content, .text) },
-        .padding = .{ .h = 2 },
-    });
-
-    var key_it = editor.loading_jobs.iterator();
-    var entry_idx: usize = 0;
-    while (key_it.next()) |entry| : (entry_idx += 1) {
-        const job = entry.value_ptr.*;
-        if (!job.elapsedExceeds(toast_threshold_ms)) continue;
-
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .id_extra = entry_idx,
-            .expand = .horizontal,
-            .padding = .{ .y = 1, .h = 1 },
-        });
-        defer row.deinit();
-
-        // Single-line layout: small bubble spinner + "<basename> — <phase>…" on one baseline.
-        // Keeps multi-file load lists compact (each row ~26 nat-px tall) while still showing
-        // both the file identity and what's currently happening to it.
-        fizzy.core.dialogs.bubbleSpinner(@src(), .{
-            .min_size_content = .{ .w = 18, .h = 18 },
-            .gravity_y = 0.5,
-            .color_text = .{ .color = dvui.themeGet().color(.content, .text) },
-            .padding = .{ .w = 8 },
-        }, .{});
-
-        const basename = std.fs.path.basename(job.path);
-        const phase = job.currentPhase();
-        dvui.label(@src(), "{s} — {s}…", .{ basename, FileLoadJob.phaseLabel(phase) }, .{
-            .expand = .horizontal,
-            .gravity_y = 0.5,
-            .color_text = .{ .color = dvui.themeGet().color(.content, .text) },
-        });
     }
 }
 
@@ -5381,6 +5330,7 @@ pub fn deinit(editor: *Editor) !void {
         editor.loading_jobs.deinit(editor.app.gpa);
     }
     editor.doc_io.deinit();
+    editor.openings.deinit();
 
     editor.workbench.clearFileTreeTabDragDropState();
 

@@ -167,7 +167,12 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
     };
 
     for (tabs, 0..) |surface, i| {
-        const doc = documentOf(surface) orelse continue;
+        // A tab has a document, or is the placeholder of one still loading (`Workbench.loading`),
+        // which draws the same tab from what is known before the document exists: its path and
+        // whether it is a preview.
+        const doc_opt = documentOf(surface);
+        const loading = if (doc_opt == null) runtime.workbench().loading.get(surface.id) else null;
+        if (doc_opt == null and loading == null) continue;
 
         var reorderable = reorder.reorderable(@src(), .{}, .{
             .expand = .vertical,
@@ -199,7 +204,7 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
         if (reorderable.floating()) {
             runtime.workbench().dragging_surface = surface.id;
             // Dragging a tab is arranging it, and a tab someone is placing is not on loan.
-            runtime.host().setDocumentPreview(doc.id, false);
+            if (doc_opt) |doc| runtime.host().setDocumentPreview(doc.id, false);
             hbox.data().options.color_fill = .{ .color = dvui.themeGet().color(.control, .fill) };
         }
         hbox.drawBackground();
@@ -219,7 +224,7 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
         }
 
         // Same fixed glyph slot as the file tree.
-        const tab_doc_path = doc.owner.documentPath(doc);
+        const tab_doc_path = if (doc_opt) |doc| doc.owner.documentPath(doc) else loading.?.path;
         const tab_icon_color = dvui.themeGet().color(.control, .text);
         {
             var icon_slot = core.widgets.treeRowGlyph(@src(), .{ .gravity_y = 0.5, .margin = .{ .x = 4, .w = 2 } });
@@ -236,7 +241,8 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
         // other. Borrowed from every editor that has the idea, because it is the one signal that
         // does not cost a control.
         var title_font = dvui.Font.theme(.body);
-        if (runtime.host().documentIsPreview(doc.id)) title_font.style = .italic;
+        const is_preview = if (doc_opt) |doc| runtime.host().documentIsPreview(doc.id) else loading.?.preview;
+        if (is_preview) title_font.style = .italic;
         dvui.labelNoFmt(@src(), surface.title, .{}, .{
             .color_text = .{ .color = if (is_selected) dvui.themeGet().color(.window, .text) else dvui.themeGet().color(.control, .text) },
             .padding = dvui.Rect.all(4),
@@ -258,13 +264,15 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
         // Saving has priority over hover/close/dirty indicators: the user wants visible
         // confirmation that the save is in flight, and the slot's size matches the close button
         // so the layout doesn't shift when saving starts/ends.
-        const save_flash_elapsed = doc.owner.timeSinceSaveCompleteNs(doc);
+        const save_flash_elapsed = if (doc_opt) |doc| doc.owner.timeSinceSaveCompleteNs(doc) else null;
         const save_in_check_phase = if (save_flash_elapsed) |elapsed|
             core.dialogs.bubbleSpinnerSaveInCheckPhase(elapsed)
         else
             false;
-        const save_blocks_tab_close = doc.owner.isDocumentSaving(doc) or
-            (doc.owner.showsSaveStatusIndicator(doc) and !save_in_check_phase);
+        const save_blocks_tab_close = if (doc_opt) |doc|
+            doc.owner.isDocumentSaving(doc) or (doc.owner.showsSaveStatusIndicator(doc) and !save_in_check_phase)
+        else
+            false;
 
         if (save_blocks_tab_close or (save_in_check_phase and !tab_hovered)) {
             core.dialogs.bubbleSpinner(@src(), .{
@@ -290,7 +298,7 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
 
             tab_close_button.processEvents();
 
-            const dirty = doc.owner.isDirty(doc);
+            const dirty = if (doc_opt) |doc| doc.owner.isDirty(doc) else false;
             const show_close_visible = tab_hovered or (is_selected and !dirty);
             const err_accent = dvui.themeGet().color(.err, .fill);
             const close_hovered = tab_close_button.hovered();
@@ -336,9 +344,14 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
             }
 
             if (tab_close_button.clicked()) {
-                runtime.host().closeDocById(doc.id) catch |err| {
-                    dvui.log.err("closeFile: {d} failed: {s}", .{ i, @errorName(err) });
-                };
+                if (doc_opt) |doc| {
+                    runtime.host().closeDocById(doc.id) catch |err| {
+                        dvui.log.err("closeFile: {d} failed: {s}", .{ i, @errorName(err) });
+                    };
+                } else {
+                    // Closing a load: the app sees its placeholder gone and cancels it.
+                    self.removeTab(surface.id);
+                }
                 break;
             }
         }
@@ -352,7 +365,9 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
 
         // The tab's own menu. Right-click only, so it never competes with the press above,
         // which is the left button's (select, then drag).
-        if (drawTabMenu(tabs, i, doc, self.grouping, hbox.data().borderRectScale().r)) break;
+        if (doc_opt) |doc| {
+            if (drawTabMenu(tabs, i, doc, self.grouping, hbox.data().borderRectScale().r)) break;
+        }
 
         loop: for (dvui.events()) |*e| {
             if (!hbox.matchEvent(e)) continue;

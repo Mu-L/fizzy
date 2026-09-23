@@ -65,6 +65,18 @@ api: Api = undefined,
 /// (`Editor.loadWorkbenchDylib`), so both copies see this exact field.
 pending_new_file_path: ?[]u8 = null,
 
+/// Documents on their way, by the placeholder surface id their tab shows while they load: the
+/// app fills this in (`Openings` in fizzy) and the tab strip reads it to draw a tab that has no
+/// document yet. Strings are the app's; this only borrows them.
+loading: std.StringArrayHashMapUnmanaged(Loading) = .empty,
+
+pub const Loading = struct {
+    /// The file being opened: the tab's icon comes from its extension.
+    path: []const u8,
+    /// Opened as a preview — its tab is italic, as the document's will be.
+    preview: bool,
+};
+
 /// Queue `path` to be revealed by the file tree on an upcoming frame, replacing any path already
 /// queued. Safe from either copy of the module; the tree consumes it when the row exists.
 pub fn setPendingNewFilePath(self: *Workbench, path: []const u8) !void {
@@ -87,6 +99,7 @@ pub fn init(allocator: std.mem.Allocator) Workbench {
 }
 
 pub fn deinit(self: *Workbench) void {
+    self.loading.deinit(self.allocator);
     files.deinitCaches();
     self.decorators.deinit(self.allocator);
     self.clearPendingNewFilePath();
@@ -209,33 +222,76 @@ pub fn documentClosed(self: *Workbench, doc: sdk.DocHandle) void {
 /// no document at the old path and skips drawing it, `active` goes null, and every command that
 /// starts from `activeDoc()` — Save first among them — quietly does nothing.
 pub fn documentRenamed(self: *Workbench, doc: sdk.DocHandle, old_id: []const u8) void {
+    const new_id = sdk.document.surfaceId(runtime.host().arena(), doc.owner.id, doc.owner.documentPath(doc)) catch return;
+    const ws = self.swapTabId(old_id, new_id) orelse return;
+    // Selection is by id too. Only the pane showing this document re-selects, and only
+    // within itself — this is not a focus change, so `open_workspace_grouping` stays.
+    if (ws.active) |active| {
+        if (active.id == doc.id) {
+            var buf: [32]u8 = undefined;
+            runtime.host().selectInRegion(Workspace.name(&buf, ws.grouping), new_id);
+        }
+    }
+}
+
+/// Give the tab named `old_id` the id `new_id`, in place: same slot. A pane that already holds
+/// `new_id` just loses `old_id` (a restored tab slot the document already had). The pane it
+/// happened in, or null. Selection is the caller's: it is keyed by id, and only the caller
+/// knows whether the swapped tab was the one showing.
+pub fn swapTabId(self: *Workbench, old_id: []const u8, new_id: []const u8) ?*Workspace {
     const host = runtime.host();
     const arena = host.arena();
-    const new_id = sdk.document.surfaceId(arena, doc.owner.id, doc.owner.documentPath(doc)) catch return;
     for (self.workspaces.values()) |*ws| {
         var buf: [32]u8 = undefined;
         const region_name = Workspace.name(&buf, ws.grouping);
         const existing = host.assignedSurfaces(region_name) orelse continue;
+        var has_new = false;
+        for (existing) |e| if (std.mem.eql(u8, e, new_id)) {
+            has_new = true;
+        };
         var ids: std.ArrayListUnmanaged([]const u8) = .empty;
         var found = false;
         for (existing) |e| {
-            const keep = if (std.mem.eql(u8, e, old_id)) blk: {
+            if (std.mem.eql(u8, e, old_id)) {
                 found = true;
-                break :blk new_id;
-            } else e;
-            ids.append(arena, keep) catch return;
+                if (!has_new) ids.append(arena, new_id) catch return null;
+            } else ids.append(arena, e) catch return null;
         }
         if (!found) continue;
         host.assignSurfaces(region_name, ids.items) catch |err| {
             dvui.log.err("pane {d}: {s}", .{ ws.grouping, @errorName(err) });
             continue;
         };
-        // Selection is by id too. Only the pane showing this document re-selects, and only
-        // within itself — this is not a focus change, so `open_workspace_grouping` stays.
-        if (ws.active) |active| {
-            if (active.id == doc.id) host.selectInRegion(region_name, new_id);
-        }
+        return ws;
     }
+    return null;
+}
+
+/// Show the placeholder `id` in `ws`, making it the active pane.
+pub fn selectLoading(self: *Workbench, ws: *Workspace, id: []const u8) void {
+    var buf: [32]u8 = undefined;
+    runtime.host().selectInRegion(Workspace.name(&buf, ws.grouping), id);
+    self.open_workspace_grouping = ws.grouping;
+    ws.active = null;
+}
+
+/// Show the placeholder `id` in whichever pane holds it.
+pub fn selectLoadingById(self: *Workbench, id: []const u8) void {
+    for (self.workspaces.values()) |*ws| {
+        if (ws.hasTab(id)) return self.selectLoading(ws, id);
+    }
+}
+
+/// Whether any pane still has a tab named `id` — a loading placeholder whose tab the user
+/// closed does not.
+pub fn hasTabAnywhere(self: *Workbench, id: []const u8) bool {
+    for (self.workspaces.values()) |*ws| if (ws.hasTab(id)) return true;
+    return false;
+}
+
+/// Take the tab named `id` out of every pane.
+pub fn removeTabEverywhere(self: *Workbench, id: []const u8) void {
+    for (self.workspaces.values()) |*ws| ws.removeTab(id);
 }
 
 pub fn rebuildWorkspaces(self: *Workbench) !void {

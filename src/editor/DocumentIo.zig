@@ -131,6 +131,14 @@ pub fn open(self: *DocumentIo, path: []const u8, grouping: u64) !bool {
     return true;
 }
 
+/// Stop reading `path`: the read is cancelled and nothing is opened. No-op when none is in flight.
+pub fn cancel(self: *DocumentIo, path: []const u8) void {
+    const kv = self.loads.fetchSwapRemove(path) orelse return;
+    const load = kv.value;
+    self.editor.app.file_table.resolve(load.path).fs.cancel(load.job);
+    load.destroy();
+}
+
 const Load = struct {
     io: *DocumentIo,
     path: []u8,
@@ -162,11 +170,15 @@ const Load = struct {
 
         const read = result catch |err| {
             dvui.log.err("Failed to open {s}: {t}", .{ load.path, err });
-            dvui.toast(@src(), .{ .message = std.fmt.allocPrint(
-                editor.app.arena.allocator(),
-                "Could not open {s}.",
-                .{std.fs.path.basename(load.path)},
-            ) catch "Could not open file." });
+            // Its placeholder says so; only an open with none needs a toast.
+            const why = std.fmt.allocPrint(editor.app.arena.allocator(), "Reading it failed ({t}).", .{err}) catch "Reading it failed.";
+            if (!editor.openings.fail(editor, load.path, why)) {
+                dvui.toast(@src(), .{ .message = std.fmt.allocPrint(
+                    editor.app.arena.allocator(),
+                    "Could not open {s}.",
+                    .{std.fs.path.basename(load.path)},
+                ) catch "Could not open file." });
+            }
             return;
         };
         const bytes = read.bytes;
@@ -175,7 +187,12 @@ const Load = struct {
         // `openFileFromBytes` takes the path; it wants its own copy to own.
         const path_for_open = gpa.dupe(u8, load.path) catch return;
         const id = editor.openFileFromBytes(path_for_open, bytes, load.grouping) catch |err| {
-            if (err != error.AlreadyOpen) dvui.log.err("Failed to open {s}: {t}", .{ load.path, err });
+            if (err == error.AlreadyOpen) {
+                editor.openings.drop(editor, load.path);
+            } else {
+                dvui.log.err("Failed to open {s}: {t}", .{ load.path, err });
+                _ = editor.openings.fail(editor, load.path, "Its plugin could not read it. See the Output panel.");
+            }
             return;
         };
         if (read.modified_ms != 0) io.known_mtime.put(gpa, id, read.modified_ms) catch {};
