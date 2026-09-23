@@ -808,6 +808,21 @@ pub fn drawPluginRegionContents(self: *Layout, token: sdk.RegionSpec.Token) !dvu
     // Contents fade in on a switch; a swap someone asked for (`State.armSwap` — a document
     // landing over its loading placeholder) blurs from one to the other instead.
     const key = r.selectionKey();
+    // One waiting warm-up a frame (`State.warmIn`), under the parent the surface will be shown
+    // in, clipped to nothing, then the parent's packing reset — the same pass a swap's capture
+    // makes — so the shown surface lays out as if the warm-up had not happened.
+    if (self.state.takeWarm(key)) |id| {
+        defer self.gpa.free(id);
+        if (self.host.surfaceById(id)) |w| if (w != s) {
+            const prev_clip = dvui.clipGet();
+            dvui.clipSet(.{});
+            _ = w.draw(w.ctx) catch {};
+            dvui.clipSet(prev_clip);
+            self.resetInnermostPack();
+            // Another may be waiting; this one's work is done.
+            dvui.refresh(null, @src(), null);
+        };
+    }
     if (self.state.swapping(key)) return self.drawSwapped(key, s);
     return self.draw(s);
 }

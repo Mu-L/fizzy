@@ -143,6 +143,8 @@ center_transition: core.anim.Transition = .{},
 /// dangling the outer frame's pointer. GPU textures, so every entry must be
 /// `discard`ed on teardown.
 swaps: std.AutoHashMapUnmanaged(u64, *core.anim.Transition) = .empty,
+/// Surfaces to draw once, unseen, in a place before they are shown there (`warmIn`).
+warm: std.ArrayListUnmanaged(Warm) = .empty,
 /// Keyword sets qualified by the region enclosing theirs, interned. See `qualify`.
 qualified: std.ArrayListUnmanaged(Qualified) = .empty,
 /// Region names interned. The shape's own names are literals; a plugin's are formatted per
@@ -542,7 +544,10 @@ pub fn deinitExtents(self: *State, gpa: std.mem.Allocator) void {
 
 /// Drop every per-place overlay texture. Safe to call twice — the map is
 /// emptied. Tests that only tear down extents or assignments both reach here.
+pub const Warm = struct { key: u64, id: []u8 };
+
 pub fn deinitSwaps(self: *State, gpa: std.mem.Allocator) void {
+    self.deinitWarm(gpa);
     var it = self.swaps.valueIterator();
     while (it.next()) |t| {
         t.*.discard();
@@ -579,6 +584,30 @@ pub fn armSwap(self: *State, gpa: std.mem.Allocator, key: u64, outgoing_id: []co
     t.prev_id = outgoing_id;
     t.prev_key = std.hash.Wyhash.hash(0, outgoing_id);
     t.armed = true;
+}
+
+/// Draw the surface `id` once, invisibly, in the place `key` — before it is ever shown there.
+/// A view that measures itself on its first draw (a large text document laying out every line)
+/// does that now, while it is not what anyone is waiting on, instead of on the click that
+/// shows it. Drawn in its own place because widget ids follow their parents: a warm-up drawn
+/// anywhere else would measure under ids the real draw never uses.
+pub fn warmIn(self: *State, gpa: std.mem.Allocator, key: u64, id: []const u8) void {
+    const copy = gpa.dupe(u8, id) catch return;
+    self.warm.append(gpa, .{ .key = key, .id = copy }) catch gpa.free(copy);
+}
+
+/// The next surface waiting to be warmed in `key`, if any. The caller frees it with `gpa`.
+pub fn takeWarm(self: *State, key: u64) ?[]u8 {
+    for (self.warm.items, 0..) |w, i| {
+        if (w.key == key) return self.warm.orderedRemove(i).id;
+    }
+    return null;
+}
+
+pub fn deinitWarm(self: *State, gpa: std.mem.Allocator) void {
+    for (self.warm.items) |w| gpa.free(w.id);
+    self.warm.deinit(gpa);
+    self.warm = .empty;
 }
 
 /// Whether the place `key` is mid-swap, or armed for one (`armSwap`).
