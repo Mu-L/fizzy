@@ -11,18 +11,14 @@
 //! `collectGroups` and renders only the commands that survived, with the matched characters of
 //! each title tinted. A query that matches one keybind draws one branch with one row.
 //!
-//! **Columns fit the pane:** the grid measures columns and rows from their cell contents, re-fit
-//! whenever the row set changes, and Shortcut/Reset are declared `cols_rigid` so the horizontal
-//! expand lands entirely on Command. No header resize handles — user-resizable columns fight a
-//! fit-to-pane layout.
+//! **Columns fit the pane:** the grid measures columns and rows from their cells, re-fit whenever
+//! the row set changes, and fills the pane's width. The extra width goes to the first column —
+//! a grid column expands when its cells are `.expand = .horizontal`, so column 0's cells (header
+//! and body) say so and the others do not. A pane narrower than the columns scrolls the grid.
 //!
-//! **The grids never report a width to the explorer.** The explorer pane is a horizontally
-//! scrolling area, so a child that asks for more width than the viewport makes the pane scroll —
-//! and because a scroll container hands its children `max(virtual_size.w, viewport.w)`, a grid
-//! sized from its parent's width would then ask for that new, larger width the next frame and
-//! ratchet wider every frame. The grid is capped with `max_size_content = .width(0)` so it
-//! contributes nothing to the pane's virtual width; a table wider than the pane scrolls inside
-//! its own grid rather than widening the explorer.
+//! **The grids never report a width to the explorer** (`max_size_content = .width(0)`). The
+//! explorer is a horizontally scrolling area; a grid sized from its parent's width that also
+//! asked for that width would ratchet the pane wider every frame.
 const std = @import("std");
 const builtin = @import("builtin");
 const dvui = @import("dvui");
@@ -429,14 +425,10 @@ fn drawOwnerGrid(
             .horizontal_bar = .auto_overlay,
             .vertical_bar = .hide,
         },
-        // Shortcut and Reset are exempt from the horizontal expand, so they stay at the width
-        // their contents need and the Command column absorbs everything left over. This is the
-        // new grid's replacement for the old `col_ratios` (-1, 140, 64) proportional layout.
     }, .{
         .id_extra = id_extra,
         .expand = .horizontal,
-        // Ask the pane for nothing: see this file's header comment. Height is left unbounded so
-        // the grid still reports its full row stack and grows to fit.
+        // Ask the pane for nothing: see this file's header comment.
         .max_size_content = .width(0),
         .padding = .all(0),
         .background = true,
@@ -499,7 +491,7 @@ fn drawOwnerGrid(
     };
 
     inline for (.{ .{ 0, "Command" }, .{ 1, "Shortcut" } }) |heading| {
-        const cell = grid.colHeader(.{ .col = heading[0] }, heading_cell_opts);
+        const cell = grid.colHeader(.{ .col = heading[0] }, heading_cell_opts.override(.{ .expand = expandFor(heading[0]) }));
         defer cell.deinit();
         _ = cell.headerSortable(heading[1], heading_label_opts);
     }
@@ -527,13 +519,20 @@ fn drawOwnerGrid(
     core.draw.drawScrollEdgeShadows(null, grid_rs, &si, .{});
 }
 
+/// The first column takes the width the pane has beyond what the columns need; dvui's grid
+/// expands exactly the columns whose cells ask to.
+fn expandFor(col: usize) dvui.Options.Expand {
+    return if (col == 0) .horizontal else .none;
+}
+
 /// Zebra striping for the body rows. dvui dropped `GridWidget.CellStyle.Banded` when the grid
 /// was reworked, so the alternating fill lives here now.
 const Banded = struct {
     theme: dvui.Theme,
 
-    fn cellOptions(self: Banded, row: usize) dvui.Options {
+    fn cellOptions(self: Banded, row: usize, col: usize) dvui.Options {
         return .{
+            .expand = expandFor(col),
             .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
             .background = true,
             .color_fill = if (row % 2 == 1) .{ .color = self.theme.color(.control, .fill).opacity(0.22) } else null,
@@ -572,7 +571,7 @@ fn drawCommandRow(
     const has_override = Keybinds.hasUserOverride(editor, c.id);
 
     {
-        const cell = grid.cell(.{ .col = 0, .row = row }, banded.cellOptions(row));
+        const cell = grid.cell(.{ .col = 0, .row = row }, banded.cellOptions(row, 0));
         defer cell.deinit();
 
         var left = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -600,7 +599,7 @@ fn drawCommandRow(
     }
 
     {
-        const cell = grid.cell(.{ .col = 1, .row = row }, banded.cellOptions(row));
+        const cell = grid.cell(.{ .col = 1, .row = row }, banded.cellOptions(row, 1));
         defer cell.deinit();
 
         // Hand-built rather than `dvui.button` so the recording state can put a dot next to the
@@ -668,7 +667,7 @@ fn drawCommandRow(
     }
 
     {
-        const cell = grid.cell(.{ .col = 2, .row = row }, banded.cellOptions(row));
+        const cell = grid.cell(.{ .col = 2, .row = row }, banded.cellOptions(row, 2));
         defer cell.deinit();
 
         // Always occupy the reset column so binding/unbinding never shifts column widths.

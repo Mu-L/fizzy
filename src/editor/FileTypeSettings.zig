@@ -228,13 +228,19 @@ fn drawConflicts(theme: dvui.Theme) void {
     }
 }
 
+/// The extra width goes to Extension, the same as Command in `KeybindSettings`.
+fn expandFor(col: usize) dvui.Options.Expand {
+    return if (col == 0) .horizontal else .none;
+}
+
 /// Zebra striping for the body rows, same as `KeybindSettings`' — dvui's grid dropped its own
 /// banded cell style when it was reworked.
 const Banded = struct {
     theme: dvui.Theme,
 
-    fn cellOptions(self: Banded, row: usize) dvui.Options {
+    fn cellOptions(self: Banded, row: usize, col: usize) dvui.Options {
         return .{
+            .expand = expandFor(col),
             .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
             .background = true,
             .color_fill = if (row % 2 == 1) .{ .color = self.theme.color(.control, .fill).opacity(0.22) } else null,
@@ -250,8 +256,6 @@ fn drawGrid(rows: []Row, query: *const fuzzy.Query, theme: dvui.Theme) void {
             .horizontal_bar = .auto_overlay,
             .vertical_bar = .hide,
         },
-        // Opens in and Reopen stay at the width their contents need; Extension absorbs the
-        // leftover — same division of labour as Command / Shortcut / Reset.
     }, .{
         .expand = .horizontal,
         .max_size_content = .width(0),
@@ -303,7 +307,7 @@ fn drawGrid(rows: []Row, query: *const fuzzy.Query, theme: dvui.Theme) void {
     };
 
     inline for (.{ .{ 0, "Extension" }, .{ 1, "Opens in" } }) |heading| {
-        const cell = grid.colHeader(.{ .col = heading[0] }, heading_cell_opts);
+        const cell = grid.colHeader(.{ .col = heading[0] }, heading_cell_opts.override(.{ .expand = expandFor(heading[0]) }));
         defer cell.deinit();
         _ = cell.headerSortable(heading[1], heading_label_opts);
     }
@@ -357,7 +361,7 @@ fn drawRow(
     banded: Banded,
 ) void {
     {
-        const cell = grid.cell(.{ .col = 0, .row = ri }, banded.cellOptions(ri));
+        const cell = grid.cell(.{ .col = 0, .row = ri }, banded.cellOptions(ri, 0));
         defer cell.deinit();
 
         var left = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -385,13 +389,13 @@ fn drawRow(
     }
 
     {
-        const cell = grid.cell(.{ .col = 1, .row = ri }, banded.cellOptions(ri));
+        const cell = grid.cell(.{ .col = 1, .row = ri }, banded.cellOptions(ri, 1));
         defer cell.deinit();
         drawOwnerDropdown(row, ri);
     }
 
     {
-        const cell = grid.cell(.{ .col = 2, .row = ri }, banded.cellOptions(ri));
+        const cell = grid.cell(.{ .col = 2, .row = ri }, banded.cellOptions(ri, 2));
         defer cell.deinit();
         drawReopenAction(row, ri);
     }
