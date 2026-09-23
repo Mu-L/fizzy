@@ -290,7 +290,15 @@ pub fn fromPath(path: []const u8) !Document {
     return fromBytes(path, bytes);
 }
 
+/// The token its editor keeps its measured layout under while hidden (`TextEntryWidget
+/// .InitOptions.retain_layout`), released when the document closes.
+pub fn layoutToken(self: *const Document) dvui.data.Token {
+    return @enumFromInt(std.hash.Wyhash.hash(0x7e47_1a70, std.mem.asBytes(&self.id)));
+}
+
 pub fn deinit(self: *Document) void {
+    // Outside a frame (quitting) there is nothing to release: the window frees its data itself.
+    if (dvui.current_window != null) dvui.releaseAllToken(self.layoutToken());
     const gpa = sdk.allocator();
     gpa.free(self.path);
     self.text.deinit(gpa);

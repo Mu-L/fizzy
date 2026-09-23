@@ -284,6 +284,7 @@ fn drawEditor(doc: *Document, ext: []const u8, id_extra: u64, gpa: std.mem.Alloc
         // Indent-level rainbow from `core.palette.bracket` — same-kind pairs match; kinds
         // at the same indent take different slots.
         .rainbow_brackets = plugin_impl.statePtr().settings.rainbow_brackets.get(),
+        .retain_layout = doc.layoutToken(),
     }, chromeless.override(.{
         .expand = .both,
         .font = font,

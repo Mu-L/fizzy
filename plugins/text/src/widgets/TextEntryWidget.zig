@@ -343,6 +343,11 @@ pub const InitOptions = struct {
     /// paren and a brace at the same indent do not. Off by default for the same reusability
     /// reason as `tab_inserts_indent`.
     rainbow_brackets: bool = false,
+    /// Keep this view's measured layout alive under `token` while it is not drawn: a hidden tab
+    /// is not drawn, dvui frees what an undrawn widget kept, and without its line heights the
+    /// first frame back measures the whole document — about a second and a half for a 57MB
+    /// file. The owner releases the token (`dvui.releaseAllToken`) when the document closes.
+    retain_layout: ?dvui.data.Token = null,
 };
 
 /// Byte span of a tree-sitter token, used by `hovered_span` below.
@@ -2363,7 +2368,14 @@ pub fn deinit(self: *TextEntryWidget) void {
     // set clip back to what textLayout had, because it might need it to set
     // the mouse cursor
     dvui.clipSet(self.textClip);
+    const layout_id = self.textLayout.data().id;
     self.textLayout.deinit();
+    // After `deinit`, which is what writes these: writing a key can replace its value, and the
+    // retain goes with the old one.
+    if (self.init_opts.retain_layout) |token| {
+        dvui.dataRetain(null, layout_id, "_byte_heights", token);
+        dvui.dataRetain(null, layout_id, "__line_ascents", token);
+    }
     self.scroll.deinit();
 
     dvui.clipSet(self.prevClip);
