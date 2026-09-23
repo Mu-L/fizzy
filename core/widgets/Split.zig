@@ -245,7 +245,14 @@ pub fn close(id: dvui.Id) void {
 }
 
 /// Reopen to the remembered extent, or `fallback` if it has never been open.
+///
+/// A no-op for something already open, because then there is nothing to remember *back* to: its
+/// extent is whatever the user last dragged it to, and `_open` is the older answer from the last
+/// time it shut. Without this, "make sure the sidebar is open" — which is what clicking a rail
+/// icon for another view means — threw away a drag and snapped back to the width the sidebar had
+/// when it was last closed.
 pub fn open(id: dvui.Id, fallback: f32) void {
+    if (sizeOf(id) > 0) return;
     const was = dvui.dataGet(null, id, "_open", f32) orelse fallback;
     dvui.dataSet(null, id, "_size", @max(1, was));
 }
@@ -1071,4 +1078,31 @@ test "reopening a shut region restores the extent it was shut at" {
     open(t_target, 100);
     _ = try dvui.testing.step(twoPaneFrame);
     try testing.expectApproxEqAbs(@as(f32, 220), t_size, 1.0);
+}
+
+test "opening something already open leaves the width the user dragged it to" {
+    // The bug this exists for: clicking a rail icon for another sidebar view is "make sure the
+    // sidebar is open", and that used to run the reopen path — which restores the width from the
+    // last *close*. A sidebar dragged wider snapped back the moment you switched tabs, while
+    // closing and reopening it kept the new width, because closing records it first.
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 400, .h = 300 } });
+    defer t.deinit();
+
+    try dvui.testing.settle(twoPaneFrame);
+    dvui.dataSet(null, t_target, "_size", @as(f32, 140));
+    _ = try dvui.testing.step(twoPaneFrame);
+
+    // Closed and reopened: back to 140, the width it was closed at.
+    close(t_target);
+    for (0..3) |_| _ = try dvui.testing.step(twoPaneFrame);
+    open(t_target, 100);
+    _ = try dvui.testing.step(twoPaneFrame);
+    try testing.expectApproxEqAbs(@as(f32, 140), t_size, 1.0);
+
+    // Now widened, and opened again without being closed: the drag stands.
+    dvui.dataSet(null, t_target, "_size", @as(f32, 230));
+    _ = try dvui.testing.step(twoPaneFrame);
+    open(t_target, 100);
+    _ = try dvui.testing.step(twoPaneFrame);
+    try testing.expectApproxEqAbs(@as(f32, 230), t_size, 1.0);
 }

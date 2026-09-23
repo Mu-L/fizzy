@@ -219,6 +219,13 @@ pub const VTable = struct {
     /// Draw an open document (center/workspace region), dispatched via `DocHandle.owner`.
     drawDocument: ?*const fn (state: *anyopaque, doc: DocHandle) anyerror!void = null,
 
+    /// What this document's tab says, or null to use the file name.
+    ///
+    /// For a document whose path is an address rather than a name: a store page lives at
+    /// `store://pages/<plugin id>.fizzyplugin`, because a path has to be stable enough to
+    /// reopen from a saved layout, and its tab should still read "Google Drive".
+    documentTitle: ?*const fn (state: *anyopaque, doc: DocHandle) ?[]const u8 = null,
+
     /// The context menu to open on a right-click inside this document, or null for none.
     ///
     /// Null is the default, and the default is *no menu*: a right-click belongs to whoever
@@ -585,6 +592,12 @@ pub fn canRedo(self: Plugin, doc: DocHandle) bool {
 
 /// Draw an open document into the current dvui parent (the workbench sets up the
 /// container, then routes here). Returns whether the plugin drew anything.
+/// What `doc`'s tab says, or null for the file name.
+pub fn documentTitle(self: Plugin, doc: DocHandle) ?[]const u8 {
+    const f = self.vtable.documentTitle orelse return null;
+    return f(self.state, doc);
+}
+
 /// The menu id for a right-click inside `doc`, or null when this plugin keeps its right-click.
 pub fn documentContextMenu(self: Plugin, doc: DocHandle) ?[]const u8 {
     const f = self.vtable.documentContextMenu orelse return null;

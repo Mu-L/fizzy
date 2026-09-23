@@ -52,6 +52,9 @@ pub const PageDraw = struct {
     /// Where this plugin's README lives: the repo URL and the path within it. Null when the
     /// store cannot say, which shows the "no README" state rather than fetching nothing.
     source: *const fn (plugin_id: []const u8) ?Source,
+    /// What this plugin is called, for the tab. Null when the store has never heard of it, and
+    /// then the tab falls back to the file name — which is the id, and still says something.
+    title: *const fn (plugin_id: []const u8) ?[]const u8,
     /// Draw the page's tab strip with `tab` selected; returns the tab after any click. Drawn by
     /// the store because it is the store's styling, chosen per page because the tab is a
     /// property of the page you are looking at, not of the app.
@@ -109,8 +112,6 @@ pub const Document = struct {
 
 const State = struct {
     docs: std.AutoArrayHashMapUnmanaged(u64, Document) = .empty,
-    /// The pages' own filesystem. Owned here; one entry per page ever opened this session.
-    files: core.vfs.Mem = undefined,
     mounted: bool = false,
 };
 
@@ -141,6 +142,7 @@ const vtable: sdk.Plugin.VTable = .{
     .documentGrouping = documentGrouping,
     .setDocumentGrouping = setDocumentGrouping,
     .documentPath = documentPath,
+    .documentTitle = documentTitle,
     .drawDocument = drawDocument,
     .closeDocument = closeDocument,
     .isDirty = isDirty,
@@ -155,22 +157,20 @@ comptime {
 /// which is the only thing that opens one.
 pub fn register(host: *sdk.Host, draw: PageDraw) !void {
     page_draw = draw;
-    state.files = try core.vfs.Mem.init(host.allocator);
     try host.registerPlugin(&plugin);
-    try host.mount(mount_prefix, state.files.fs());
+    try host.mount(mount_prefix, pages_fs);
     state.mounted = true;
 }
 
 pub fn deinit() void {
     for (state.docs.values()) |*doc| doc.deinit();
     state.docs.deinit(sdk.allocator());
-    if (state.mounted) state.files.deinit();
     state.mounted = false;
 }
 
 /// Open (or focus) the store page for `plugin_id`, titled `title`. The path is the title, so a
 /// page's tab reads as the plugin's name.
-pub fn open(host: *sdk.Host, id: []const u8, title: []const u8, grouping: u64) !void {
+pub fn open(host: *sdk.Host, id: []const u8, grouping: u64) !void {
     if (!state.mounted) return;
     const gpa = host.allocator;
 
@@ -179,13 +179,7 @@ pub fn open(host: *sdk.Host, id: []const u8, title: []const u8, grouping: u64) !
         if (std.mem.eql(u8, doc.plugin, id)) return focus(host, doc.*);
     }
 
-    // Rooted, like every path in a `Mem`: what the mount hands it is the path *after* the
-    // prefix, which always starts with a slash.
-    const file = try std.fmt.allocPrint(gpa, "/{s}{s}", .{ sanitized(title), extension });
-    defer gpa.free(file);
-    try state.files.put(file, id);
-
-    const path = try std.fmt.allocPrint(gpa, "{s}{s}", .{ mount_prefix, file });
+    const path = try pathFor(gpa, id);
     defer gpa.free(path);
     // `.preview`: the page takes the tab of whatever preview is in that pane, so clicking down
     // a list of plugins reads them one after another in place. The store used to do that itself,
@@ -193,22 +187,102 @@ pub fn open(host: *sdk.Host, id: []const u8, title: []const u8, grouping: u64) !
     _ = try host.openFile(.{ .path = path, .grouping = grouping, .mode = .preview });
 }
 
+/// A page's address: the plugin's id, not its name. The path is what a saved layout stores and
+/// reopens from, so it has to be the stable thing — and the tab still reads "Google Drive",
+/// because `documentTitle` answers that separately.
+fn pathFor(gpa: std.mem.Allocator, id: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, "{s}/{s}{s}", .{ mount_prefix, id, extension });
+}
+
+/// The plugin id a page path is about: its basename without the extension.
+fn pluginOfPath(path: []const u8) ?[]const u8 {
+    const base = std.fs.path.basename(path);
+    if (!std.mem.endsWith(u8, base, extension)) return null;
+    const id = base[0 .. base.len - extension.len];
+    return if (id.len == 0) null else id;
+}
+
 /// Bring an already-open page to the front.
 fn focus(host: *sdk.Host, doc: Document) !void {
     _ = try host.openFile(.{ .path = doc.path, .grouping = doc.grouping });
 }
 
-/// A title as a filename: a page is addressed by its path, and a path with a separator in it is
-/// a different directory. Plugin display names are free text, so this is not hypothetical.
-fn sanitized(title: []const u8) []const u8 {
-    // In place is impossible (the caller owns the string), and an allocation here would need
-    // freeing by every caller — so reject rather than rewrite, and fall back to something that
-    // is always a valid file name. A display name with a slash in it is the rare case.
-    for (title) |c| {
-        if (c == '/' or c == '\\' or c == 0) return "Plugin";
-    }
-    return title;
+// ---- the pages' filesystem -------------------------------------------------------------------
+//
+// There is nothing behind it. A page's whole content is the plugin id in its own path, so this
+// answers a read by parsing the path it was asked about — which is what makes a page restorable
+// from a saved layout with no state at all. A `Mem` filled in as pages opened could not: on the
+// next run the layout asks for `store://pages/pixi.fizzyplugin` before anything has opened one,
+// the file is not there, and the tab is dropped with "NotFound".
+
+const pages_fs: core.vfs.Fs = .{ .ptr = undefined, .vtable = &fs_vtable };
+
+const fs_vtable: core.vfs.Fs.VTable = .{
+    .listDir = fsListDir,
+    .stat = fsStat,
+    .readFile = fsReadFile,
+    .writeFile = fsWrite,
+    .createFile = fsCreateOrRemove,
+    .mkdir = fsCreateOrRemove,
+    .rename = fsRename,
+    .remove = fsCreateOrRemove,
+    .cancel = fsCancel,
+    .pump = fsPump,
+};
+
+/// Every answer is immediate: there is nothing to wait for, so a job never exists and `pump` has
+/// nothing to deliver.
+const immediate: core.vfs.Job = .{ .id = 0 };
+
+fn fsListDir(_: *anyopaque, allocator: std.mem.Allocator, _: []const u8, cb: core.vfs.ListDirFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
+    // Not browsable: a page exists because someone asked for it by id, and a listing of every
+    // plugin that *could* have one is the store's job, in the store.
+    _ = allocator;
+    cb(ctx, &.{});
+    return immediate;
 }
+
+fn fsStat(_: *anyopaque, path: []const u8, cb: core.vfs.StatFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
+    const id = pluginOfPath(path) orelse {
+        cb(ctx, error.NotFound);
+        return immediate;
+    };
+    cb(ctx, .{ .kind = .file, .size = id.len, .modified_ms = 0 });
+    return immediate;
+}
+
+fn fsReadFile(_: *anyopaque, allocator: std.mem.Allocator, path: []const u8, cb: core.vfs.ReadFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
+    const id = pluginOfPath(path) orelse {
+        cb(ctx, error.NotFound);
+        return immediate;
+    };
+    const bytes = allocator.dupe(u8, id) catch {
+        cb(ctx, error.OutOfMemory);
+        return immediate;
+    };
+    cb(ctx, .{ .bytes = bytes, .modified_ms = 0 });
+    return immediate;
+}
+
+/// Read-only: a page is a view of the store. Every mutation answers `Unsupported` rather than
+/// pretending, so a "save" here fails loudly instead of quietly doing nothing.
+fn fsWrite(_: *anyopaque, _: []const u8, _: []const u8, _: core.vfs.WriteOptions, cb: core.vfs.DoneFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
+    cb(ctx, error.Unsupported);
+    return immediate;
+}
+
+fn fsCreateOrRemove(_: *anyopaque, _: []const u8, cb: core.vfs.DoneFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
+    cb(ctx, error.Unsupported);
+    return immediate;
+}
+
+fn fsRename(_: *anyopaque, _: []const u8, _: []const u8, cb: core.vfs.DoneFn, ctx: ?*anyopaque) core.vfs.Error!core.vfs.Job {
+    cb(ctx, error.Unsupported);
+    return immediate;
+}
+
+fn fsCancel(_: *anyopaque, _: core.vfs.Job) void {}
+fn fsPump(_: *anyopaque) void {}
 
 // ---- the document vtable ---------------------------------------------------------------------
 
@@ -280,6 +354,14 @@ fn closeDocument(_: *anyopaque, handle: DocHandle) void {
     const doc = docFrom(handle) orelse return;
     doc.deinit();
     _ = state.docs.swapRemove(handle.id);
+}
+
+/// "Google Drive", not "drive.fizzyplugin". The path is the id because a saved layout reopens
+/// from it; what the tab says is a different question, and this is where it is answered.
+fn documentTitle(_: *anyopaque, handle: DocHandle) ?[]const u8 {
+    const doc = docFrom(handle) orelse return null;
+    const draw = page_draw orelse return null;
+    return draw.title(doc.plugin);
 }
 
 fn drawDocument(_: *anyopaque, handle: DocHandle) anyerror!void {

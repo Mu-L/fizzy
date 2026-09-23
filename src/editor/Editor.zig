@@ -2457,9 +2457,12 @@ fn registerDocSurface(editor: *Editor, doc: sdk.DocHandle) !void {
     try editor.app.host.registerSurface(.{
         .id = ds.id,
         .owner = doc.owner,
-        // The path half of the id, not the whole id: a browser upload's path is a bare name
-        // with no separator, and `basename` of the whole id would then be `owner.doc:name`.
-        .title = std.fs.path.basename(sdk.document.pathOfSurfaceId(ds.id) orelse ds.id),
+        // The owner's name for it when it has one (a synthetic document whose path is an
+        // address), else the file name. The path half of the id, not the whole id: a browser
+        // upload's path is a bare name with no separator, and `basename` of the whole id would
+        // then be `owner.doc:name`.
+        .title = doc.owner.documentTitle(doc) orelse
+            std.fs.path.basename(sdk.document.pathOfSurfaceId(ds.id) orelse ds.id),
         .keywords = sdk.document.keywords,
         .ctx = ds,
         .draw = drawDocSurface,

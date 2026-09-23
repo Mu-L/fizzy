@@ -408,6 +408,7 @@ pub fn register(manager: PluginManager) !void {
         .source = pageSource,
         .tabs = drawPageTabs,
         .otherTab = drawPageOtherTab,
+        .title = pageTitle,
     });
 
     try host.registerSurface(.{
@@ -1401,6 +1402,16 @@ fn drawPageHeader(id: []const u8) bool {
     const entry = entryFor(id, snap) orelse return false;
     drawDetailHeader(entry);
     return true;
+}
+
+/// What that plugin is called, for its page's tab. Remembered names first: the catalog can be
+/// between snapshots, and a tab that blinks to an id and back is worse than one that does not.
+fn pageTitle(id: []const u8) ?[]const u8 {
+    if (name_cache.get(id)) |name| return name;
+    const snap = if (catalog) |*c| c.acquire() else null;
+    defer if (catalog) |*c| c.release();
+    const entry = entryFor(id, snap) orelse return null;
+    return entry.title;
 }
 
 /// Where that plugin's README lives, for the page to fetch.
@@ -2613,7 +2624,7 @@ fn drawSelectionToggles(
             // Grouping 0: the pane the user is in. The workbench's own default
             // (`open_workspace_grouping`), which is what "open this where I am" means — the store
             // has no business choosing a pane, and "open to the side" is the tab strip's job.
-            Page.open(app.host, entry.id, entry.title, 0) catch |err|
+            Page.open(app.host, entry.id, 0) catch |err|
                 reportError("could not open the page for '{s}': {s}", .{ entry.id, @errorName(err) });
         }
     }
@@ -3203,7 +3214,11 @@ fn repoSource(entry: StoreEntry) ?RepoSource {
     if (entry.registry) |r| {
         if (r.homepage.len > 0) return .{ .repo = r.homepage };
     }
-    if (isBundled(entry.id)) return .{ .repo = fizzy_repo_url, .subpath = builtinSubpath(entry.id) };
+    if (isBundled(entry.id)) return .{
+        .repo = fizzy_repo_url,
+        // The frame arena: a card's source is read and used within the frame that drew it.
+        .subpath = builtinSubpath(app.host.arena(), entry.id) orelse "",
+    };
     return null;
 }
 
@@ -3211,13 +3226,16 @@ fn readmeSource(entry: StoreEntry) ?RepoSource {
     return repoSource(entry);
 }
 
-/// `plugins/<id>` — only ever called for `isBundled` ids.
-fn builtinSubpath(id: []const u8) []const u8 {
-    if (std.mem.eql(u8, id, "workbench")) return "plugins/workbench";
-    if (std.mem.eql(u8, id, "text")) return "plugins/text";
-    if (std.mem.eql(u8, id, "markdown")) return "plugins/markdown";
-    if (std.mem.eql(u8, id, "image")) return "plugins/image";
-    unreachable;
+/// Where a bundled built-in's source sits in the fizzy repo: `plugins/<id>`, which is the shape
+/// every one of them has (`plugins/text/`, `plugins/archive/`, …).
+///
+/// This used to be four `if`s and an `unreachable`, which held only while `isBundled` was the
+/// same four names written out somewhere else. The moment it started asking the build — and so
+/// answered yes for archive — drawing that card walked into the `unreachable` and took the
+/// process with it. Derived from the id now, so a plugin added to the bundle is a plugin this
+/// already knows about.
+fn builtinSubpath(arena: std.mem.Allocator, id: []const u8) ?[]const u8 {
+    return std.fmt.allocPrint(arena, "plugins/{s}", .{id}) catch null;
 }
 
 fn drawHeader() !void {
