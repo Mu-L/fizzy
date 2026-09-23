@@ -121,6 +121,8 @@ pub var plugin: sdk.Plugin = .{
     .vtable = &vtable,
     .id = plugin_id,
     .display_name = "Plugin Store",
+    // Fizzy's own: a document owner so pages can be tabs, not something in the store's lists.
+    .internal = true,
 };
 
 const vtable: sdk.Plugin.VTable = .{

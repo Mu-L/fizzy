@@ -53,6 +53,17 @@ id: []const u8,
 /// User-facing name shown in UI.
 display_name: []const u8,
 
+/// Fizzy's own, not something a user installed. Kept out of the plugin store's lists and out
+/// of anything else that offers to enable, update or remove a plugin, because none of those
+/// verbs mean anything for it: it is part of the binary.
+///
+/// The app registers a few of these so its own things can use the plugin machinery — the store
+/// page owner is a document owner, which *is* a plugin as far as document routing is concerned,
+/// and appeared in the installed list the moment it existed. A flag rather than an id
+/// convention: "starts with fizzy." is a rule nothing enforces and an app built on fizzy would
+/// not share.
+internal: bool = false,
+
 /// Mode for an owner's pre-save confirmation (`requestSaveConfirmation`). `editor_save` is a
 /// plain in-place save; `save_and_close` is part of a close/quit flow and resumes fizzy
 /// close walk once the save settles.

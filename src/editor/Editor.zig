@@ -1814,6 +1814,15 @@ pub fn postInit(editor: *Editor) !void {
     // in. None of the bundled four ship as dylibs today, so the load "fails" and the static
     // copy registers on every run; not worth logging until that changes. The workbench's
     // dylib entry takes the workbench state fizzy still holds as `arg_c`.
+    // What this build bundles, for anything that needs to know a plugin is compiled in rather
+    // than installed (the store, which must not offer to uninstall one).
+    editor.app.bundled_plugin_ids = comptime blk: {
+        var ids: [bundled_plugins.len][]const u8 = undefined;
+        for (bundled_plugins, 0..) |m, i| ids[i] = m.plugin_id;
+        const frozen = ids;
+        break :blk &frozen;
+    };
+
     inline for (bundled_plugins) |m| {
         const extra: ?*anyopaque = if (comptime std.mem.eql(u8, m.plugin_id, "workbench")) @ptrCast(&editor.workbench) else null;
         if (App.bundledDylibEnabled(editor.app.gpa, m.plugin_id)) {
@@ -5596,6 +5605,7 @@ pub fn pluginManager(editor: *Editor) PluginManager {
         .host = &editor.app.host,
         .gpa = editor.app.gpa,
         .config_folder = editor.app.config_folder,
+        .bundled_plugin_ids = editor.app.bundled_plugin_ids,
         .root_path = std.mem.sliceTo(fizzy.entry().root_path, 0),
         .registry_url = AppInfo.current.registry_url,
         .vtable = &plugin_manager_vtable,

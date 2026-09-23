@@ -74,6 +74,16 @@ palette_folder: []const u8,
 /// Plugin registry + service locator exposed to plugins
 host: Host,
 
+/// The ids this executable links in statically, as its build listed them — see
+/// `build/sdk.zig`'s `bundledPluginsModule`. Borrowed comptime strings; the runtime fills this
+/// in when it registers them.
+///
+/// Here rather than in the store, which used to keep its own hardcoded list of four and so
+/// called the fifth bundled plugin (archive) a stray local build: offering to uninstall
+/// something that is compiled into the binary. An app built on fizzy bundles whatever it likes,
+/// so nothing may have a list of its own.
+bundled_plugin_ids: []const []const u8 = &.{},
+
 /// Fizzy's implementation of the `files` service, registered in `postInit`. A field rather than
 /// a temporary because the host stores the pointer.
 files_service: sdk.services.files.Api = undefined,

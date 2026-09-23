@@ -1682,11 +1682,16 @@ fn latestRegistryVersion(entry: StoreEntry) ?[]const u8 {
     return if (r.latest_version.len > 0) r.latest_version else null;
 }
 
+/// Whether `id` is compiled into this executable. Asked of the build (`App.bundled_plugin_ids`)
+/// rather than answered from a list here: this was four hardcoded names, and the fifth bundled
+/// plugin — archive — was shown as a stray local build the user could uninstall, which is not a
+/// thing that can happen to something linked into the binary. An app built on fizzy bundles
+/// whatever it likes, so a list here could only ever be fizzy's own, and out of date.
 fn isBundled(id: []const u8) bool {
-    return std.mem.eql(u8, id, "workbench") or
-        std.mem.eql(u8, id, "text") or
-        std.mem.eql(u8, id, "markdown") or
-        std.mem.eql(u8, id, "image");
+    for (app.bundled_plugin_ids) |bundled| {
+        if (std.mem.eql(u8, bundled, id)) return true;
+    }
+    return false;
 }
 
 /// One deterministic row in the store tree, merged from the registry index plus the local
@@ -1875,6 +1880,9 @@ fn draw(_: ?*anyopaque) anyerror!dvui.App.Result {
     // registry row (for "store vX" / Update-availability) wherever the registry knows the id too.
     var installed_entries: std.ArrayListUnmanaged(StoreEntry) = .empty;
     for (app.host.plugins.items) |plugin| {
+        // The app's own registrations (the store page owner) are plugins to the document
+        // machinery and nothing a user manages: no version, no update, nothing to uninstall.
+        if (plugin.internal) continue;
         rememberName(plugin.id, plugin.display_name);
         if (installedVersion(plugin.id)) |v| rememberVersion(plugin.id, v);
         installed_entries.append(arena, .{
