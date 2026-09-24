@@ -644,6 +644,7 @@ pub fn drawHomePage(_: *Workspace) !void {
         .color_fill = .transparent,
     });
     defer page_scroll.deinit();
+    defer core.widgets.scrollShadows(page_scroll);
 
     var content_vbox = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .none,

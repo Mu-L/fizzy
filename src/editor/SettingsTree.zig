@@ -270,6 +270,7 @@ pub fn draw() !void {
         .background = false,
     });
     defer scroll.deinit();
+    defer core.widgets.scrollShadows(scroll);
 
     // Cap the pane at that viewport's width.
     //

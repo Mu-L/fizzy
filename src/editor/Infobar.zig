@@ -157,6 +157,7 @@ fn drawPluginEntries(bar_h: f32) void {
         .max_size_content = .height(bar_h),
     });
     defer scrollarea.deinit();
+    defer fizzy.core.widgets.scrollShadows(scrollarea);
 
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .none,

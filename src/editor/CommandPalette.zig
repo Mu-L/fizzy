@@ -678,6 +678,7 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
         if (end < rows.len) {
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = @as(f32, @floatFromInt(rows.len - end)) * pitch }, .expand = .horizontal, .id_extra = 1 });
         }
+        core.widgets.scrollShadows(scroll);
         scroll.deinit();
 
         self.list_content_h = si.virtual_size.h;

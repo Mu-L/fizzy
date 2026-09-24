@@ -209,6 +209,7 @@ pub fn draw(self: *Picker, f: *Layout) void {
         .background = false,
     });
     defer scroll.deinit();
+    defer core.widgets.scrollShadows(scroll);
 
     var grid = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
     defer grid.deinit();

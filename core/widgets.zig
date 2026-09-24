@@ -323,6 +323,16 @@ pub fn treeRowGlyph(src: std.builtin.SourceLocation, opts: dvui.Options) *dvui.B
     return dvui.box(src, .{ .dir = .horizontal }, defaults.override(opts));
 }
 
+/// Shade `area`'s edges where its content continues past them (`draw.drawScrollEdgeShadows`),
+/// over its viewport — the scroll container, bars excluded. Call after the content, just before
+/// the area's `deinit`: `defer core.widgets.scrollShadows(scroll);` written after
+/// `defer scroll.deinit();` runs first. Every scroll area that does not hint its edges some
+/// other way takes this, so none of them shows content cut off at a bare edge.
+pub fn scrollShadows(area: *dvui.ScrollAreaWidget) void {
+    const rs = if (area.scroll) |*s| s.data().borderRectScale() else area.data().contentRectScale();
+    draw.drawScrollEdgeShadows(rs, rs, area.si, .{});
+}
+
 pub fn floatingWindow(src: std.builtin.SourceLocation, floating_opts: FloatingWindowWidget.InitOptions, opts: dvui.Options) *FloatingWindowWidget {
     var ret = dvui.widgetAlloc(FloatingWindowWidget);
     ret.init(src, floating_opts, opts);

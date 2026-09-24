@@ -147,6 +147,7 @@ pub fn draw(_: ?*anyopaque) anyerror!dvui.App.Result {
     if (after > 0) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = @as(f32, @floatFromInt(after)) * line_pitch }, .expand = .horizontal });
     }
+    @import("core").widgets.scrollShadows(scroll);
     scroll.deinit();
 
     // Following breaks only when the user scrolls up from where it was put — a viewport that

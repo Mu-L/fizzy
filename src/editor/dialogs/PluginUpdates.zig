@@ -110,6 +110,7 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
             .max_size_content = .{ .w = std.math.floatMax(f32), .h = max_list_h },
         });
         defer scroll.deinit();
+        defer fizzy.core.widgets.scrollShadows(scroll);
         PluginStore.drawPendingUpdateCards();
     }
 
