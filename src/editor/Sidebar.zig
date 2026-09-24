@@ -222,8 +222,8 @@ fn drawOption(
 
         if (tooltip.shown()) {
             // The floating surface every tooltip wears, fading in with its contents
-            // (`core.dialogs.tooltipBegin`).
-            const prev_alpha = fizzy.core.dialogs.tooltipBegin(tooltip.data(), 350_000);
+            // (`core.dialogs.tooltipBeginFor`: by the tooltip's own delay fade).
+            const prev_alpha = fizzy.core.dialogs.tooltipBeginFor(&tooltip, 350_000);
             defer dvui.alphaSet(prev_alpha);
 
             var vbox2 = dvui.box(@src(), .{ .dir = .vertical }, dvui.FloatingTooltipWidget.defaults.override(.{

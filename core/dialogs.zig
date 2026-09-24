@@ -181,14 +181,23 @@ pub fn tooltipSurface(wd: *dvui.WidgetData) void {
 /// tooltip fading in goes from invisible to glass rather than appearing whole while its text
 /// fades in over it.
 pub fn tooltipSurfaceFaded(wd: *dvui.WidgetData, fade: f32) void {
-    const t = std.math.clamp(fade, 0, 1);
+    tooltipSurfaceWith(wd, fade, fade);
+}
+
+/// `tooltipSurfaceFaded` with the frost's fade and the plain paint's (shadow, blur-off fill)
+/// apart: under a fade that already scales everything drawn (a tooltip's own alpha animation),
+/// the plain paint takes 1 — it is faded once by that alpha — while the frost, drawn later and
+/// outside it, still needs the fade to form by.
+fn tooltipSurfaceWith(wd: *dvui.WidgetData, frost_fade: f32, paint_fade: f32) void {
+    const t = std.math.clamp(frost_fade, 0, 1);
+    const p = std.math.clamp(paint_fade, 0, 1);
     const brs = wd.borderRectScale();
     const phys_corners = tooltip_corners.scale(brs.s, dvui.CornerRect.Physical);
     const bs = surfaceShadow();
     const prect = brs.r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
-    prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha * t) }, .fade = brs.s * bs.fade });
+    prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha * p) }, .fade = brs.s * bs.fade });
     const f = dialogFrost() orelse {
-        brs.r.fill(phys_corners, .{ .color = .{ .color = dialogFill().opacity(t) } });
+        brs.r.fill(phys_corners, .{ .color = .{ .color = dialogFill().opacity(p) } });
         return;
     };
     // Under a pixel of blur there is nothing to see yet — and a backdrop kept from an earlier
@@ -232,6 +241,21 @@ pub fn tooltipBegin(wd: *dvui.WidgetData, duration_us: i32) f32 {
     const t = tooltipFade(wd, duration_us);
     tooltipSurfaceFaded(wd, t);
     return dvui.alpha(t);
+}
+
+/// `tooltipBegin` for a `dvui.FloatingTooltipWidget`, following the widget's own fade when it
+/// has one. A tooltip with a `delay` is "shown" from the moment the pointer arrives and hides
+/// its contents behind its own alpha animation (nothing for 80% of the delay, then a fade) — a
+/// clock of our own started then formed the glass, dark tint and all, while the text still
+/// waited out the delay. With a delay the frost forms by that same animation, and the plain
+/// paint and contents are left to it; without one, `tooltipBegin`'s own fade over
+/// `duration_us`. Returns the alpha to restore after the contents, as `tooltipBegin` does.
+pub fn tooltipBeginFor(tt: *dvui.FloatingTooltipWidget, duration_us: i32) f32 {
+    if (tt.animate) |fade_in| {
+        tooltipSurfaceWith(tt.data(), fade_in.val orelse 1, 1);
+        return dvui.alpha(1);
+    }
+    return tooltipBegin(tt.data(), duration_us);
 }
 
 /// The wash under the pointer, and under the palette's selected row — the same colour, so a
