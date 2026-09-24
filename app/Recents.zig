@@ -3,6 +3,7 @@ const core = @import("core");
 const sdk = @import("fizzy_sdk");
 const dvui = @import("dvui");
 const RecentsMigration = @import("RecentsMigration.zig");
+const RecentCommands = @import("RecentCommands.zig");
 const max_recents: usize = 10;
 
 const Recents = @This();
@@ -12,11 +13,14 @@ const Disk = struct {
     last_save_folder: []const u8 = "",
     last_open_folder: []const u8 = "",
     folders: []const []const u8 = &.{},
+    commands: []const []const u8 = &.{},
 };
 
 last_save_folder: ?[]const u8 = null,
 last_open_folder: ?[]const u8 = null,
 folders: std.array_list.Managed([]const u8),
+/// Commands run from the command palette — what it lists as recently used (`RecentCommands`).
+commands: RecentCommands = .{},
 
 /// Treats "/" and `\` at the end like extra directory hints: `/foo` and `/foo/` compare equal.
 fn trimTrailingPathSeparators(path: []const u8) []const u8 {
@@ -70,6 +74,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Recents {
 
             return .{
                 .folders = folders,
+                .commands = RecentCommands.fromIds(allocator, disk.commands),
                 .last_open_folder = if (disk.last_open_folder.len > 0)
                     try canonicalize(allocator, disk.last_open_folder)
                 else
@@ -126,9 +131,20 @@ pub fn appendFolder(recents: *Recents, path: []const u8) !void {
     try recents.folders.append(canon_owned);
 }
 
+/// Record `id` as just run from the command palette (`RecentCommands.use`).
+pub fn useCommand(recents: *Recents, id: []const u8) !void {
+    try recents.commands.use(recents.folders.allocator, id);
+}
+
+/// How recently `id` was run from the palette: 0 for the most recent, null if not remembered.
+pub fn commandRecency(recents: *const Recents, id: []const u8) ?usize {
+    return recents.commands.recency(id);
+}
+
 pub fn save(recents: *Recents, allocator: std.mem.Allocator, path: []const u8) !void {
     const disk: Disk = .{
         .folders = recents.folders.items,
+        .commands = recents.commands.ids.items,
         .last_save_folder = recents.last_save_folder orelse "",
         .last_open_folder = recents.last_open_folder orelse "",
     };
@@ -147,4 +163,6 @@ pub fn deinit(recents: *Recents, allocator: std.mem.Allocator) void {
 
     recents.folders.clearAndFree();
     recents.folders.deinit();
+
+    recents.commands.deinit(allocator);
 }

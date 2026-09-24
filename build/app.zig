@@ -570,6 +570,9 @@ pub fn construct(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         // Ring buffering and dot-segment filtering for the folder watcher. std-only so it can
         // be tested here; FolderWatcher.zig itself needs a live editor.
         .{ "fizzy-folder-events-tests", "app/watch/folder_events.zig" },
+        // The command palette's recently used commands: order, re-use, the cap. std-only
+        // (see RecentCommands.zig); `Recents` holds it and stores it in recents.zon.
+        .{ "fizzy-recent-commands-tests", "app/RecentCommands.zig" },
     }) |entry| {
         try unit_test_artifacts.append(b.allocator, b.addTest(.{
             .name = entry[0],

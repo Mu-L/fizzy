@@ -22,6 +22,7 @@ const Keymap = @import("app").keymap.Keymap;
 const Keybinds = @import("Keybinds.zig");
 
 const Editor = @import("Editor.zig");
+const sdk = Editor.sdk;
 const CommandPalette = @This();
 
 /// Same guards the explorer's own filter index uses — a palette must never be the reason
@@ -275,6 +276,11 @@ const Row = union(Mode) {
         /// TVG icon bytes off the registered `Command` (`sdk.Command.icon`) — the same one the
         /// menu bar draws for this command, so a row looks the same wherever it's reachable from.
         icon: ?[]const u8,
+        /// Set on the first row of a group ("recently used", "other commands") while the list is
+        /// split into the two — drawn dim at the row's right, the way VS Code marks them. A tag
+        /// on a real row rather than a header row of its own, so selection and indexing stay the
+        /// rows'.
+        group: ?[]const u8 = null,
     },
 };
 
@@ -348,8 +354,13 @@ fn shouldShowCommand(editor: *Editor, id: []const u8) bool {
 
 fn collectCommandRows(editor: *Editor, query: *const fuzzy.Query) []Row {
     const arena = dvui.currentWindow().arena();
+    const recents = &editor.app.recents;
 
-    var hits: std.ArrayListUnmanaged(fuzzy.Ranked(usize)) = .empty;
+    // Two groups, as VS Code has them: the commands recently run from the palette
+    // (`Recents.commands`), most recent first, then everything else — alphabetical with no query,
+    // best match first with one. A query filters both, so the recent matches lead the results.
+    const Hit = struct { item: usize, score: f64, recency: ?usize };
+    var hits: std.ArrayListUnmanaged(Hit) = .empty;
     for (editor.app.host.commands.items, 0..) |c, i| {
         if (!shouldShowCommand(editor, c.id)) continue;
         // Match against the title, the id, *and* the owning plugin's name, so "Save All",
@@ -362,20 +373,49 @@ fn collectCommandRows(editor: *Editor, query: *const fuzzy.Query) []Row {
                 query,
                 .{ .plain = true },
             ) orelse continue);
-        hits.append(arena, .{ .item = i, .score = score, .tie = c.title.len }) catch break;
+        hits.append(arena, .{ .item = i, .score = score, .recency = recents.commandRecency(c.id) }) catch break;
     }
-    fuzzy.sort(usize, hits.items);
 
+    const commands = editor.app.host.commands.items;
+    const Order = struct {
+        commands: []const sdk.Command,
+        by_score: bool,
+        fn lessThan(ctx: @This(), x: Hit, y: Hit) bool {
+            // Recent before the rest; among recents, the most recent first.
+            if (x.recency != null or y.recency != null) {
+                if (x.recency == null) return false;
+                if (y.recency == null) return true;
+                return x.recency.? < y.recency.?;
+            }
+            // The rest: best match first (fuzzy scores are lower-is-better), then by title.
+            if (ctx.by_score and x.score != y.score) return x.score < y.score;
+            return std.ascii.lessThanIgnoreCase(ctx.commands[x.item].title, ctx.commands[y.item].title);
+        }
+    };
+    std.mem.sort(Hit, hits.items, Order{ .commands = commands, .by_score = !query.isEmpty() }, Order.lessThan);
+
+    const any_recent = hits.items.len > 0 and hits.items[0].recency != null;
     var rows: std.ArrayListUnmanaged(Row) = .empty;
-    for (hits.items) |h| {
+    for (hits.items, 0..) |h, n| {
         if (rows.items.len >= max_rows) break;
-        const c = editor.app.host.commands.items[h.item];
+        const c = commands[h.item];
+        // Tags only when there is a split to mark: the first recent row, and the first of the
+        // rest after it.
+        const group: ?[]const u8 = if (!any_recent)
+            null
+        else if (n == 0)
+            "recently used"
+        else if (h.recency == null and hits.items[n - 1].recency != null)
+            "other commands"
+        else
+            null;
         rows.append(arena, .{ .commands = .{
             .id = c.id,
             .title = c.title,
             .source = if (c.owner) |o| o.display_name else null,
             .enabled = editor.app.host.commandEnabled(c.id),
             .icon = c.icon,
+            .group = group,
         } }) catch break;
     }
     return rows.items;
@@ -411,6 +451,7 @@ fn activate(self: *CommandPalette, editor: *Editor, rows: []const Row) void {
             if (!c.enabled) return;
             self.activated = idx;
             self.close();
+            editor.rememberPaletteCommand(c.id);
             editor.app.host.runCommand(c.id) catch |err| {
                 dvui.log.err("palette: command '{s}' failed: {s}", .{ c.id, @errorName(err) });
             };
@@ -803,11 +844,20 @@ fn drawRow(
                     });
                 }
             }
-            if (shortcutFor(editor, c.id)) |stroke| {
-                // The spacer takes what the title does not, so the keycaps sit against the right
-                // edge — the column every row's shortcut lines up in.
-                _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-                core.keycaps.draw(@src(), Keybinds.keycapsStroke(stroke), .{
+            const stroke = shortcutFor(editor, c.id);
+            // The spacer takes what the title does not, so the tag and keycaps sit against the
+            // right edge — the column every row's shortcut lines up in.
+            if (c.group != null or stroke != null) _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+            if (c.group) |g| {
+                dvui.labelNoFmt(@src(), g, .{}, .{
+                    .font = dvui.Font.theme(.body).larger(-2),
+                    .color_text = .{ .color = text_color.opacity(0.45) },
+                    .gravity_y = 0.5,
+                    .padding = .{ .x = 4, .w = 8 },
+                });
+            }
+            if (stroke) |s_| {
+                core.keycaps.draw(@src(), Keybinds.keycapsStroke(s_), .{
                     .style = .caps,
                     .color = text_color.opacity(0.7),
                 });

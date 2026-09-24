@@ -1314,6 +1314,20 @@ pub fn rebuildKeybinds(editor: *Editor) void {
         dvui.log.err("keymap rebuild failed: {s}", .{@errorName(err)});
 }
 
+/// `id` was just run from the command palette: remember it as recently used (`Recents.commands`)
+/// and write `recents.zon` now — a browser tab is closed, never quit, so the web keeps it only if
+/// it is stored as it changes (as recent folders are).
+pub fn rememberPaletteCommand(editor: *Editor, id: []const u8) void {
+    editor.app.recents.useCommand(id) catch |err| {
+        dvui.log.warn("recents: command not remembered: {s}", .{@errorName(err)});
+        return;
+    };
+    if (std.fs.path.join(editor.app.gpa, &.{ editor.app.config_folder, "recents.zon" })) |recents_path| {
+        defer editor.app.gpa.free(recents_path);
+        editor.app.recents.save(editor.app.gpa, recents_path) catch |err| dvui.log.warn("recents: not saved: {s}", .{@errorName(err)});
+    } else |_| {}
+}
+
 pub const UnloadError = error{ NotUnloadable, DirtyDocuments };
 
 /// Load `{config}/plugins/{id}/{id}.{ext}` live and register it. Reuses the same loader +
