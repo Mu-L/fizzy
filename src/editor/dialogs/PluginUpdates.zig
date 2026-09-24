@@ -142,6 +142,9 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
     // downloading finishes.
     if (dialogButton(@src(), "Not now", .control, 1, 0) and !closing) {
         closing = true;
+        // Put the offer away as the close button does — its `callAfter` never runs for this
+        // button, and the list stayed populated behind a closed dialog.
+        PluginStore.dismissPendingUpdates();
         fizzy.core.dialogs.closeFloatingDialogAnchored();
     }
     if (PluginStore.anyPendingUpdateUnstarted()) {

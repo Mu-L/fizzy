@@ -984,17 +984,24 @@ pub fn webLoadFailed(id: []const u8) void {
 /// and only takes the id over once it has passed (`Editor.updateWebPlugin`). The old module
 /// stays linked in the page — nothing can unlink it — but it owns nothing after the swap.
 fn applyWebUpdate(id: []const u8, url: []const u8, sha256: []const u8) void {
-    app.updateFromUrl(id, url, sha256) catch |err| {
-        reportError("could not update '{s}': {s}", .{ id, @errorName(err) });
-        if (pendingRowFor(id)) |row| row.failed = true;
-        return;
-    };
-    // Not dropped here: the fetch has only *started*. `webLoadSucceeded` retires the row.
+    // Marked *before* the call, as `queueInstall` does: the load can report inside it (a build
+    // already in flight for this id, a refusal), and marking afterwards overwrote that report —
+    // the row stayed on "Update" (or on "Updating…" forever) with the work already done or
+    // already failed. Not dropped here either: the fetch has only *started*;
+    // `webLoadSucceeded` retires the row.
     markWebInFlight(id);
     if (pendingRowFor(id)) |row| {
         row.started = true;
         row.failed = false;
     }
+    app.updateFromUrl(id, url, sha256) catch |err| {
+        clearWebInFlight(id);
+        reportError("could not update '{s}': {s}", .{ id, @errorName(err) });
+        if (pendingRowFor(id)) |row| {
+            row.started = false;
+            row.failed = true;
+        }
+    };
     dvui.refresh(null, @src(), null);
 }
 
