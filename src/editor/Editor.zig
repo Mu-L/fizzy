@@ -1288,8 +1288,12 @@ pub fn reopenDocsUnderCurrentOwner(editor: *Editor, doc_ids: []const u64) struct
 /// registered* plugin's `contributeKeybinds`. Used after a plugin is unregistered so its
 /// binds (whose key strings live in the soon-to-be-`dlclose`d image) are dropped. Also
 /// called after the Keyboard Shortcuts pane writes `keybinds.zon`.
+///
+/// On every target, the web included: it is the only way a plugin that arrives after startup —
+/// every plugin on the web, which loads them asynchronously — gets its binds into the map. Gated
+/// off on wasm32, a web plugin's keys (pixi's E for the eraser, space for its wheel) matched
+/// nothing.
 pub fn rebuildKeybinds(editor: *Editor) void {
-    if (comptime builtin.target.cpu.arch == .wasm32) return;
     const window = dvui.currentWindow();
     window.keybinds.clearRetainingCapacity();
     var defaults = editor.app.dvui_default_keybinds.iterator();
