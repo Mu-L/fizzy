@@ -668,7 +668,15 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
     if (drop_here or showing) {
         ViewDrag.drawHint(self, opts.name, rs.r, rs.s, cardOf(box));
     } else if (filled and !dragging_this and alpha > 0.01) {
-        rs.r.stroke(corners, .{ .color = .{ .color = theme.focus.opacity(alpha) }, .thickness = 2.0 });
+        // Under the region's own border rect, not the content clip `cornerButton` runs inside:
+        // the ring is on the border, in the padding, so a region with padding (every card but
+        // the explorer's) clipped it away entirely — only the explorer ever showed which place
+        // its chooser was for. And inset by half its width, so all of it is inside that rect.
+        const prev_clip = dvui.clipGet();
+        dvui.clipSet(rs.r);
+        defer dvui.clipSet(prev_clip);
+        const half: f32 = 1.0;
+        rs.r.insetAll(half).stroke(corners, .{ .color = .{ .color = theme.focus.opacity(alpha) }, .thickness = 2 * half });
     }
 
     if (alpha < 0.01 and !pressing and !dragging_this and !showing) return;
