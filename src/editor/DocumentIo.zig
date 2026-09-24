@@ -71,7 +71,8 @@ pub fn saving(self: *const DocumentIo, doc_id: u64) bool {
 }
 
 /// `prefix` is going away (`FileTable.Env.unmounting`): drop every open and save against it.
-/// A load just never lands; a save leaves its document dirty, which is the truth.
+/// A load never lands — and its "Loading…" placeholder is told so, which it otherwise waits on
+/// forever; a save leaves its document dirty, which is the truth.
 pub fn unmounting(self: *DocumentIo, prefix: []const u8) void {
     const files = &self.editor.app.file_table;
     var i: usize = 0;
@@ -82,6 +83,7 @@ pub fn unmounting(self: *DocumentIo, prefix: []const u8) void {
             continue;
         }
         files.resolve(load.path).fs.cancel(load.job);
+        _ = self.editor.openings.fail(self.editor, load.path, "What it was in was closed before it finished loading.");
         self.loads.swapRemoveAt(i);
         load.destroy();
     }

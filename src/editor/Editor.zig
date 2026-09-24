@@ -951,7 +951,6 @@ fn clearPluginOwnershipRecord(editor: *Editor, id: []const u8) void {
 pub fn rebuildExtensionOwnerCache(editor: *Editor) void {
     const gpa = editor.app.gpa;
     editor.app.clearExtensionOwnerCache();
-    if (comptime builtin.target.cpu.arch == .wasm32) return;
 
     const settings_path = std.fs.path.join(gpa, &.{ editor.app.config_folder, "settings.zon" }) catch return;
     defer gpa.free(settings_path);
@@ -1108,7 +1107,6 @@ fn flushPluginExtensionWrites(editor: *Editor) !void {
 /// scenario. A plugin-vs-plugin overlap and a plugin-vs-builtin overlap go through this one path
 /// identically; there is no special-casing of builtins.
 pub fn maybeShowFileTypeDialog(editor: *Editor, id: []const u8) !void {
-    if (comptime builtin.target.cpu.arch == .wasm32) return;
     const gpa = editor.app.gpa;
     const plugin = editor.app.host.pluginById(id) orelse return;
 
@@ -1415,7 +1413,10 @@ const WebPluginRequest = struct {
         var registered = false;
         defer {
             if (web_loads_in_flight.fetchRemove(req.id)) |kv| gpa.free(kv.key);
-            if (!registered) PluginStore.webLoadFailed(req.id);
+            if (!registered) {
+                PluginStore.webLoadFailed(req.id);
+                _ = takeWebFileTypePrompt(gpa, req.id);
+            }
             gpa.free(req.id);
             gpa.destroy(req);
             // `url` lives on as `LoadedLib.path` when the load succeeded.
@@ -1469,6 +1470,8 @@ const WebPluginRequest = struct {
         }
         rebuildKeybinds(editor);
         editor.rebuildExtensionOwnerCache();
+        if (takeWebFileTypePrompt(gpa, req.id)) editor.maybeShowFileTypeDialog(req.id) catch |err|
+            dvui.log.err("web plugin '{s}': file-type prompt: {s}", .{ req.id, @errorName(err) });
         // Remembered here, not by the page when it linked the module: the page cannot know
         // whether this host will accept the build (fingerprint, SDK version, declared id), and a
         // remembered build that is refused would greet the user with the same failure every
@@ -1547,6 +1550,24 @@ export fn FizzyWebOpenBytes(name_ptr: [*]const u8, name_len: usize, bytes_ptr: [
 var web_editor: ?*Editor = null;
 /// Plugin ids the page is fetching for us right now.
 var web_loads_in_flight: std.StringHashMapUnmanaged(void) = .empty;
+/// Plugin ids whose file-type prompt (`maybeShowFileTypeDialog`) waits for their web load to
+/// land: a first install or first enable on the web is the same event it is on the desktop, but
+/// the build arrives asynchronously — prompting when it was asked for found no plugin yet.
+var web_file_type_prompts: std.StringHashMapUnmanaged(void) = .empty;
+
+/// Ask about `id`'s file types once its web load lands (see `web_file_type_prompts`).
+fn queueWebFileTypePrompt(gpa: std.mem.Allocator, id: []const u8) void {
+    if (web_file_type_prompts.contains(id)) return;
+    const key = gpa.dupe(u8, id) catch return;
+    web_file_type_prompts.put(gpa, key, {}) catch gpa.free(key);
+}
+
+/// Whether `id` was waiting for its file-type prompt; clears it either way.
+fn takeWebFileTypePrompt(gpa: std.mem.Allocator, id: []const u8) bool {
+    const kv = web_file_type_prompts.fetchRemove(id) orelse return false;
+    gpa.free(kv.key);
+    return true;
+}
 
 /// Install (file already downloaded to the plugins dir by the store backend) + load live.
 /// Writes `.plugins.<id>.enabled = true` immediately so the plugin stays enabled across restarts
@@ -1691,6 +1712,8 @@ pub fn setPluginEnabled(editor: *Editor, id: []const u8, enabled: bool, force: b
                 // path, as does one the user turns back on after a reload.
                 var buf: [1024]u8 = undefined;
                 const url = PluginLoader.rememberedUrl(id, &buf) orelse return error.NotUnloadable;
+                // The load lands later; its file-type prompt waits for it.
+                if (first_load) queueWebFileTypePrompt(editor.app.gpa, id);
                 try editor.loadWebPlugin(id, url, "");
             } else {
                 try editor.loadUserPluginById(id);
@@ -2459,6 +2482,11 @@ const DocSurface = struct {
 };
 
 pub fn insertOpenDoc(editor: *Editor, doc_buf: *anyopaque, owner: *sdk.Plugin, id: u64) !void {
+    // A document that mounts a file system (an archive's `zip://…`) is never a preview, however
+    // it was opened. Files opened from its mount are previews in the same pane, and the next
+    // preview replaces the last — so opening a file from a previewed zip closed the zip, which
+    // unmounted it and cancelled that very file's read, stranding its "Loading…" placeholder.
+    const mounts_before = editor.app.file_table.mountList().len;
     const ptr = try owner.registerOpenDocument(doc_buf);
     try editor.app.open_files.put(editor.app.gpa, id, .{
         .ptr = ptr,
@@ -2474,6 +2502,8 @@ pub fn insertOpenDoc(editor: *Editor, doc_buf: *anyopaque, owner: *sdk.Plugin, i
         };
         editor.openings.land(editor, owner.documentPath(doc), doc);
     }
+    // After `land`, which marks a document opened as a preview as one.
+    if (editor.app.file_table.mountList().len > mounts_before) editor.setDocumentPreview(id, false);
 }
 
 fn registerDocSurface(editor: *Editor, doc: sdk.DocHandle) !void {
@@ -3061,6 +3091,7 @@ pub fn reconcileExternalSettingsChange(editor: *Editor) void {
     editor.app.settings.dialog_opacity = parsed.dialog_opacity;
     editor.app.settings.dialog_blur = parsed.dialog_blur;
     editor.app.settings.dialog_lift = parsed.dialog_lift;
+    editor.app.settings.dialog_detail = parsed.dialog_detail;
     editor.app.settings.input_scheme = parsed.input_scheme;
     editor.app.settings.plugin_update_mode = parsed.plugin_update_mode;
 
@@ -3362,6 +3393,7 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             .opacity = editor.app.settings.dialog_opacity,
             .blur = editor.app.settings.dialog_blur,
             .lift = editor.app.settings.dialog_lift,
+            .detail = editor.app.settings.dialog_detail,
             .chrome = .{ chrome.r, chrome.g, chrome.b, chrome.a },
             .has_chrome = true,
         });
@@ -5529,9 +5561,13 @@ const plugin_manager_vtable: PluginManager.VTable = .{
     .installFromUrl = struct {
         fn f(ctx: *anyopaque, id: []const u8, url: []const u8, sha256: []const u8) anyerror!void {
             const editor = pmSelf(ctx);
-            // Installing is choosing it, as on the desktop (`installAndLoadPlugin`).
+            // Installing is choosing it, as on the desktop (`installAndLoadPlugin`) — and, as
+            // there, the first time is when fizzy asks about its file types; read before the
+            // enabled flag below records that it has been asked.
+            const first_load = editor.app.isPluginUndecided(id);
             editor.app.untrackDisabledPlugin(id);
             try editor.setPluginEnabledPersisted(id, true);
+            if (first_load) queueWebFileTypePrompt(editor.app.gpa, id);
             return editor.loadWebPlugin(id, url, sha256);
         }
     }.f,

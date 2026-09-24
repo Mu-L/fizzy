@@ -68,7 +68,6 @@ fn lowerRow(_: void, a: Row, b: Row) bool {
 /// that row's dropdown is the only way to repair the file).
 fn collectRows(arena: std.mem.Allocator, query: *const fuzzy.Query) std.ArrayListUnmanaged(Row) {
     var rows: std.ArrayListUnmanaged(Row) = .empty;
-    if (comptime builtin.target.cpu.arch == .wasm32) return rows;
 
     const editor = fizzy.editor();
     const table_hit = fuzzy.scoreBest(&table_keywords, query, .{ .plain = true });
@@ -148,9 +147,6 @@ fn collectRows(arena: std.mem.Allocator, query: *const fuzzy.Query) std.ArrayLis
 /// Settings-tree search hook: the best score among the rows this pane would draw, or null when
 /// nothing matches (the whole "File Types" row then disappears from the tree).
 pub fn score(query: *const fuzzy.Query) ?f64 {
-    if (comptime builtin.target.cpu.arch == .wasm32) {
-        return fuzzy.scoreBest(&table_keywords, query, .{ .plain = true });
-    }
     if (query.isEmpty()) return 0;
     const rows = collectRows(dvui.currentWindow().arena(), query);
     var best: ?f64 = null;
@@ -161,13 +157,6 @@ pub fn score(query: *const fuzzy.Query) ?f64 {
 }
 
 pub fn draw(query: *const fuzzy.Query) void {
-    if (comptime builtin.target.cpu.arch == .wasm32) {
-        dvui.label(@src(), "Plugins are not installable on the web build, so there is nothing to assign.", .{}, .{
-            .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) },
-        });
-        return;
-    }
-
     const theme = dvui.themeGet();
     const arena = dvui.currentWindow().arena();
 
