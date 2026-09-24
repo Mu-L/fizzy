@@ -135,10 +135,11 @@ pub fn draw(
         // the next, as every region does. The body's own box, so the capture of the outgoing
         // view can be unpacked before the incoming one draws. The blur bleeds past the pane's
         // edge and feathers out over the rail beside it: the pane has no card, and a blur that
-        // stopped dead at an edge nothing on screen draws read as clipped.
+        // stopped dead at an edge nothing on screen draws read as clipped. Not upward: the title
+        // above is the explorer's own, already names the new view, and stays sharp.
         var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = false });
         defer body.deinit();
-        _ = try f.drawSwappedIn(fizzy.sdk.keywords.groupKey(keywords), body, surface, true);
+        _ = try f.drawSwappedIn(fizzy.sdk.keywords.groupKey(keywords), body, surface, .{ .left = true, .right = true, .bottom = true });
     }
 
     scroll.deinit();

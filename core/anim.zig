@@ -311,6 +311,33 @@ test "a held swap parks where the eased clock is at the hold" {
 /// The app's swap curve — every `transition` unless it asks for another.
 pub const swap_easing = dvui.easing.outCubic;
 
+/// Which edges of a place a swap's blur bleeds across (`TransitionOptions.bleed`).
+pub const Bleed = packed struct {
+    top: bool = false,
+    right: bool = false,
+    bottom: bool = false,
+    left: bool = false,
+
+    pub const none: Bleed = .{};
+    pub const all: Bleed = .{ .top = true, .right = true, .bottom = true, .left = true };
+
+    fn any(self: Bleed) bool {
+        return self.top or self.right or self.bottom or self.left;
+    }
+
+    /// `r` grown by `w` on each bleeding edge.
+    fn outset(self: Bleed, r: dvui.Rect.Physical, w: f32) dvui.Rect.Physical {
+        const t: f32 = if (self.top) w else 0;
+        const l: f32 = if (self.left) w else 0;
+        return .{
+            .x = r.x - l,
+            .y = r.y - t,
+            .w = r.w + l + (if (self.right) w else 0),
+            .h = r.h + t + (if (self.bottom) w else 0),
+        };
+    }
+};
+
 /// How far past its place a bleeding blur spreads (`TransitionOptions.bleed`), in physical
 /// pixels: about as far as the blur itself reaches.
 pub fn bleedWidth() f32 {
@@ -564,10 +591,12 @@ pub const TransitionOptions = struct {
     /// it, so a view that paints only part of its area (the region's fill is not its own)
     /// photographs as it looks on screen rather than with transparent holes.
     backdrop: ?Backdrop = null,
-    /// Let the blur spread past `rect`'s edge and feather into what is around it, rather than
-    /// stop at it. The snapshots take in a margin of the frame as it stands (`bleedWidth`), the
-    /// views still draw only within `rect`, and the overlay fades out across the margin.
-    bleed: bool = false,
+    /// The edges across which the blur spreads past `rect` and feathers into what is around it,
+    /// rather than stop at it. The snapshots take in a margin of the frame as it stands there
+    /// (`bleedWidth`), the views still draw only within `rect`, and the overlay fades out across
+    /// the margin. Leave out an edge whose neighbour is part of the place's own chrome (a title
+    /// drawn above it) — the margin would photograph that too, and blur it with the swap.
+    bleed: Bleed = .none,
     /// Called after a successful capture, before the incoming screen packs. Use it to clear the
     /// parent's pack state so the capture's expanded child does not make the incoming one trip
     /// `rectFor() got child after expanded child`.
@@ -676,8 +705,8 @@ pub fn transition(state: *Transition, opts: TransitionOptions) TransitionFrame {
     const key_changed = !had_prev or state.prev_key.? != opts.key;
     const pending = opts.pending or state.pending;
     // A fade has no blur to bleed.
-    const bleeding = opts.bleed and effectiveKind(opts.kind) != .fade;
-    const rect = if (bleeding) opts.rect.outsetAll(bleedWidth()).intersect(dvui.windowRectPixels()) else opts.rect;
+    const bleeding = opts.bleed.any() and effectiveKind(opts.kind) != .fade;
+    const rect = if (bleeding) opts.bleed.outset(opts.rect, bleedWidth()).intersect(dvui.windowRectPixels()) else opts.rect;
 
     if (had_prev and key_changed) {
         const kind = effectiveKind(opts.kind);

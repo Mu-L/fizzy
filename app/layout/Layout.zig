@@ -595,22 +595,22 @@ const offscreen_warmup_frames: u8 = 10;
 /// declared region's space.
 pub fn drawSelected(self: *Layout, keywords: []const []const u8) !dvui.App.Result {
     const s = self.selected(keywords) orelse return .ok;
-    return self.drawSwapped(sdk.keywords.groupKey(keywords), s, null, false);
+    return self.drawSwapped(sdk.keywords.groupKey(keywords), s, null, .none);
 }
 
 /// `drawSelected` for a specific region. A by-name region must not draw the first assignment
 /// that happens to share its keywords — that is how every edge tray showed the same surface.
 pub fn drawSelectedIn(self: *Layout, r: *const Region) !dvui.App.Result {
     const s = self.selectedIn(r) orelse return .ok;
-    return self.drawSwapped(r.selectionKey(), s, null, false);
+    return self.drawSwapped(r.selectionKey(), s, null, .none);
 }
 
 /// `s` into `box`, blurring from whatever `slot` showed before — the swap every region gets,
 /// for a place that draws its own chooser (the explorer's body, a bottom-panel pane). `slot`
 /// is any key stable for the place; `box` is the parent `s` draws into, whose packing is reset
-/// after the outgoing view is photographed into it. `bleed` lets the blur feather past the
-/// place's edge into what is around it (`core.anim.TransitionOptions.bleed`).
-pub fn drawSwappedIn(self: *Layout, slot: u64, box: *dvui.BoxWidget, s: *Surface, bleed: bool) !dvui.App.Result {
+/// after the outgoing view is photographed into it. `bleed` names the edges the blur feathers
+/// past into what is around the place (`core.anim.TransitionOptions.bleed`).
+pub fn drawSwappedIn(self: *Layout, slot: u64, box: *dvui.BoxWidget, s: *Surface, bleed: core.anim.Bleed) !dvui.App.Result {
     return self.drawSwapped(slot, s, box, bleed);
 }
 
@@ -618,7 +618,7 @@ pub fn drawSwappedIn(self: *Layout, slot: u64, box: *dvui.BoxWidget, s: *Surface
 /// surface, so two regions that share a selection still each keep their own
 /// overlay (by-name keys include the region name). `pack` is the box to reset after the capture;
 /// null is the innermost region's.
-fn drawSwapped(self: *Layout, slot: u64, s: *Surface, pack: ?*dvui.BoxWidget, bleed: bool) !dvui.App.Result {
+fn drawSwapped(self: *Layout, slot: u64, s: *Surface, pack: ?*dvui.BoxWidget, bleed: core.anim.Bleed) !dvui.App.Result {
     // The part on screen: a place inside a scroll area is as tall as its content.
     const rs = dvui.parentGet().data().contentRectScale().r.intersect(dvui.clipGet());
     const tr = self.state.swapFor(self.gpa, slot) orelse return self.draw(s);
@@ -854,7 +854,7 @@ pub fn drawPluginRegionContents(self: *Layout, token: sdk.RegionSpec.Token) !dvu
             dvui.refresh(null, @src(), null);
         };
     }
-    return self.drawSwapped(key, s, null, false);
+    return self.drawSwapped(key, s, null, .none);
 }
 
 /// A plugin region's contents and selection, by token — what a plugin's own chooser (a tab

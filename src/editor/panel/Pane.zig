@@ -136,7 +136,7 @@ fn drawContent(self: *Pane, panel: *Panel, host: *fizzy.Editor.Host, f: *Layout,
     // Through the layout's swap, so changing panes blurs from one view to the next as every
     // other region does. Keyed by this pane: two panes side by side each swap on their own.
     const slot = fizzy.sdk.keywords.groupKey(keywords) ^ std.hash.Wyhash.hash(0, std.mem.asBytes(&self.grouping));
-    _ = try f.drawSwappedIn(slot, content_vbox, view, false);
+    _ = try f.drawSwappedIn(slot, content_vbox, view, .none);
 }
 
 fn processTabsDrag(self: *Pane, panel: *Panel, host: *fizzy.Editor.Host, f: *Layout, keywords: []const []const u8) void {
