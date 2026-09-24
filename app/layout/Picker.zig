@@ -82,7 +82,6 @@ pub fn draw(self: *Picker, f: *Layout) void {
     flushPendingStore(f, &region);
 
     const contents = f.matchingIn(&region);
-    const theme = dvui.themeGet();
 
     // The one floating surface (`core.dialogs`): frosted, the dialogs' fill, corners and shadow
     // — what the command palette, the dialogs and every menu wear. It had its own card (an
@@ -117,31 +116,32 @@ pub fn draw(self: *Picker, f: *Layout) void {
             });
         }
 
-        {
-            var mode = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .expand = .horizontal,
-                .padding = .{ .y = 4 },
-            });
-            defer mode.deinit();
-            dvui.labelNoFmt(@src(), "Surfaces", .{}, .{
-                .font = actionFont(),
-                .gravity_y = 0.5,
-                .color_text = .{ .color = theme.color(.window, .text).opacity(0.6) },
-            });
-            if (modeButton(@src(), "Single", region.shows == .one, 1)) {
-                setShows(f, &region, .one);
-            }
-            if (modeButton(@src(), "Multiple", region.shows == .many, 2)) {
-                setShows(f, &region, .many);
-            }
+        const created = isCreated(state, region.name);
+        // On the tree, any leaf with a sibling can go — a declared place's pin moves to the
+        // sibling. Off it, only a minted leaf can.
+        const removable = created or state.canRemove(region.name);
+        const assigned = state.assignment(region.name);
+        const showing = if (assigned) |ids| ids.len > 0 else f.selectedIn(&region) != null;
+
+        // Every control on one row: how many surfaces it shows on the left; what to do with
+        // the place on the right. Clear and Defaults keep their places, dimmed when they do
+        // not apply — each turns the other on as often as not (clearing leaves an assignment
+        // to go back from), and coming and going they shoved the row around under the pointer.
+        var controls = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .padding = .{ .y = 4 },
+        });
+        defer controls.deinit();
+        if (modeButton(@src(), "Single", region.shows == .one, 1)) {
+            setShows(f, &region, .one);
+        }
+        if (modeButton(@src(), "Multiple", region.shows == .many, 2)) {
+            setShows(f, &region, .many);
         }
 
+        var actions = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1.0, .gravity_y = 0.5 });
+        defer actions.deinit();
         {
-            var splits = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .expand = .horizontal,
-                .padding = .{ .y = 4 },
-            });
-            defer splits.deinit();
             // Vertical / Horizontal name the divider: a vertical bar is side by
             // side (the layout axis is horizontal). The old "split horizontally"
             // label was that axis and read as the opposite split.
@@ -182,37 +182,22 @@ pub fn draw(self: *Picker, f: *Layout) void {
                 }
             }
         }
-
-        const created = isCreated(state, region.name);
-        // On the tree, any leaf with a sibling can go — a declared place's pin moves to the
-        // sibling. Off it, only a minted leaf can.
-        const removable = created or state.canRemove(region.name);
-        const assigned = state.assignment(region.name);
-        const showing = if (assigned) |ids| ids.len > 0 else f.selectedIn(&region) != null;
-        if (removable or showing or assigned != null) {
-            var actions = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .expand = .horizontal,
-            });
-            defer actions.deinit();
-            if (removable) {
-                if (actionButton(@src(), "Remove", 3)) {
-                    removeRegion(f, &region);
-                    self.close(gpa);
-                    state.discardSnapshots(gpa);
-                    return;
-                }
+        if (!created) {
+            if (actionButton(@src(), "Clear", showing, 2)) {
+                clearRegion(f, region.name);
             }
-            if (!created and showing) {
-                if (actionButton(@src(), "Clear", 2)) {
-                    clearRegion(f, region.name);
-                }
+            if (actionButton(@src(), "Defaults", assigned != null, 4)) {
+                state.unassign(gpa, region.name);
+                state.markDirty();
+                dvui.refresh(null, @src(), null);
             }
-            if (!created and assigned != null) {
-                if (actionButtonRight(@src(), "Back to defaults")) {
-                    state.unassign(gpa, region.name);
-                    state.markDirty();
-                    dvui.refresh(null, @src(), null);
-                }
+        }
+        if (removable) {
+            if (actionButton(@src(), "Remove", true, 3)) {
+                removeRegion(f, &region);
+                self.close(gpa);
+                state.discardSnapshots(gpa);
+                return;
             }
         }
     }
@@ -495,23 +480,21 @@ fn actionFont() dvui.Font {
     return dvui.Font.theme(.body).larger(-1);
 }
 
-fn actionButton(src: std.builtin.SourceLocation, label: []const u8, id_extra: usize) bool {
-    return dvui.button(src, label, .{}, .{
+/// One of the picker's actions. Disabled, it keeps its place (dimmed, no hover, never clicked)
+/// rather than leaving a gap the row closes up over.
+fn actionButton(src: std.builtin.SourceLocation, label: []const u8, enabled: bool, id_extra: usize) bool {
+    const theme = dvui.themeGet();
+    const clicked = dvui.button(src, label, .{}, .{
         .font = actionFont(),
         .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 },
         .margin = .{ .w = 4 },
         .gravity_y = 0.5,
         .id_extra = id_extra,
+        .color_text = if (enabled) null else .{ .color = theme.color(.control, .text).opacity(0.35) },
+        .color_fill_hover = if (enabled) null else .{ .color = theme.color(.control, .fill) },
+        .color_fill_press = if (enabled) null else .{ .color = theme.color(.control, .fill) },
     });
-}
-
-fn actionButtonRight(src: std.builtin.SourceLocation, label: []const u8) bool {
-    return dvui.button(src, label, .{}, .{
-        .font = actionFont(),
-        .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 },
-        .gravity_x = 1.0,
-        .gravity_y = 0.5,
-    });
+    return enabled and clicked;
 }
 
 fn contains(list: []const *sdk.Surface, id: []const u8) bool {
