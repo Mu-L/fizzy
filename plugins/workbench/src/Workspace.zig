@@ -868,29 +868,43 @@ pub fn drawBubble(rect: dvui.Rect, rs: dvui.RectScale, color: [4]u8, _: usize) !
         .h = bubble_h_phys,
     };
 
+    const fill: dvui.Color = .{ .r = color[0], .g = color[1], .b = color[2], .a = color[3] };
+
+    // The block, always square: the bubble pushes up out of its top rather than rounding it.
+    {
+        var path = dvui.Path.Builder.init(dvui.currentWindow().lifo());
+        defer path.deinit();
+        path.addRect(base_phys, dvui.CornerRect.Physical.square);
+        path.build().fillConvex(.{ .color = .{ .color = fill }, .fade = 1.0 });
+    }
+    if (bubble_phys.h <= 0) return;
+
+    // The bubble: the part of a pill (round top, radius half the width, rising `bubble_h`)
+    // above the block's top — a low arc out of the middle of a flat top that widens into the
+    // full round as it rises, the square pixel pushed up into a bubble. Its own convex shape,
+    // one outline through the peak once (two quarter-arcs meeting there made a notch), its
+    // flat foot a pixel inside the block so the two meet without a seam. The block and bubble
+    // together are not convex, so they are two fills rather than one outline.
+    const rad = bubble_phys.w / 2.0;
+    const center = dvui.Point.Physical{ .x = bubble_phys.x + rad, .y = bubble_phys.y + rad };
+    const foot = base_phys.y + 1;
+    const dy = center.y - foot;
+    if (dy >= rad) return;
     var path = dvui.Path.Builder.init(dvui.currentWindow().lifo());
     defer path.deinit();
-
-    if (bubble_phys.h > 0) {
-        // One outline around base and cap, wound as `addRect` winds (top, down the left, across
-        // the bottom, up the right), through the peak exactly once. It was the base's four
-        // corners and then the cap's two quarter-arcs, meeting at the peak from two centres
-        // 2px apart (the base is outset, the radii were not): the outline ran from the peak
-        // down to the base and back, which the convex fill turned into a notch at every
-        // bubble's top.
-        const rad = bubble_phys.w / 2.0;
-        // Never below the base's foot: a short bubble on a wide cell caps a lower arc.
-        const cy = @min(bubble_phys.y + rad, base_phys.y + base_phys.h);
-        const center = dvui.Point.Physical{ .x = bubble_phys.x + rad, .y = cy };
+    if (dy <= 0) {
+        // Risen past its full round: the arc, then straight sides down to the foot.
         path.addArc(center, rad, dvui.math.pi * 1.5, dvui.math.pi, false);
-        path.addPoint(base_phys.bottomLeft());
-        path.addPoint(base_phys.bottomRight());
+        path.addPoint(.{ .x = bubble_phys.x, .y = foot });
+        path.addPoint(.{ .x = bubble_phys.x + bubble_phys.w, .y = foot });
         path.addArc(center, rad, dvui.math.pi * 2.0, dvui.math.pi * 1.5, true);
     } else {
-        path.addRect(base_phys, dvui.CornerRect.Physical.square);
+        // Still rising: only the arc above the foot, ending where the circle crosses it.
+        const a = std.math.asin(dy / rad);
+        path.addArc(center, rad, dvui.math.pi * 1.5, dvui.math.pi + a, false);
+        path.addArc(center, rad, dvui.math.pi * 2.0 - a, dvui.math.pi * 1.5, true);
     }
-
-    path.build().fillConvex(.{ .color = .{ .color = .{ .r = color[0], .g = color[1], .b = color[2], .a = color[3] } }, .fade = 1.0 });
+    path.build().fillConvex(.{ .color = .{ .color = fill }, .fade = 1.0 });
 }
 
 // This should never be able to return more than one folder
