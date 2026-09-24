@@ -221,15 +221,10 @@ fn drawOption(
         defer tooltip.deinit();
 
         if (tooltip.shown()) {
-            // The floating surface every tooltip wears (`core.dialogs.tooltipSurface`).
-            fizzy.core.dialogs.tooltipSurface(tooltip.data());
-            var animator = dvui.animate(@src(), .{
-                .kind = .alpha,
-                .duration = 350_000,
-            }, .{
-                .expand = .both,
-            });
-            defer animator.deinit();
+            // The floating surface every tooltip wears, fading in with its contents
+            // (`core.dialogs.tooltipBegin`).
+            const prev_alpha = fizzy.core.dialogs.tooltipBegin(tooltip.data(), 350_000);
+            defer dvui.alphaSet(prev_alpha);
 
             var vbox2 = dvui.box(@src(), .{ .dir = .vertical }, dvui.FloatingTooltipWidget.defaults.override(.{
                 .background = false,

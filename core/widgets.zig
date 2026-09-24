@@ -85,7 +85,8 @@ pub fn tooltip(src: std.builtin.SourceLocation, init_opts: dvui.FloatingTooltipW
     tt.init(src, init_opts, defaults.override(dialogs.tooltipOptions(0)).override(opts));
     defer tt.deinit();
     if (!tt.shown()) return;
-    dialogs.tooltipSurface(tt.data());
+    const prev_alpha = dialogs.tooltipBegin(tt.data(), 250_000);
+    defer dvui.alphaSet(prev_alpha);
     var tl = dvui.textLayout(@src(), .{}, defaults.override(opts).override(.{ .background = false }).strip());
     tl.format(fmt, fmt_args, .{});
     tl.deinit();

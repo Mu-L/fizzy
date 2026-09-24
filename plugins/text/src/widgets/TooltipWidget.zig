@@ -292,9 +292,11 @@ pub fn install(self: *TooltipWidget) void {
         (dvui.animationGet(self.data().id, "_close") orelse dvui.Animation{ .start_val = 0, .end_val = 0, .end_time = 0 }).value()
     else
         (dvui.animationGet(self.data().id, "_open") orelse dvui.Animation{ .start_val = 1, .end_val = 1, .end_time = 0 }).value();
+    // The surface forms with the same fade (`tooltipSurfaceFaded`: the frost replaces what it
+    // covers, so it cannot simply ride the global alpha below), drawn before that alpha so the
+    // shadow is not faded twice.
+    core.dialogs.tooltipSurfaceFaded(self.data(), a);
     self.prev_alpha = dvui.alpha(a);
-
-    core.dialogs.tooltipSurface(self.data());
 }
 
 pub fn widget(self: *TooltipWidget) dvui.Widget {

@@ -165,19 +165,73 @@ pub fn tooltipOptions(id_extra: usize) dvui.Options {
 
 const tooltip_corners: dvui.CornerRect = .round(8);
 
-/// The surface under a shown tooltip, from its widget data: shadow, then the frost (its tint is
-/// the fill) — the order a frosted surface needs, since the frost replaces what it covers and a
-/// shadow drawn first survives only outside. With the blur off, the plain `dialogFill`. Call once
-/// the tooltip is shown, before its contents.
+/// The surface under a shown tooltip, from its widget data, at full strength — see
+/// `tooltipSurfaceFaded`. Call once the tooltip is shown, before its contents.
 pub fn tooltipSurface(wd: *dvui.WidgetData) void {
+    tooltipSurfaceFaded(wd, 1);
+}
+
+/// The surface under a shown tooltip at `fade` (0…1): shadow, then the frost (its tint is the
+/// fill) — the order a frosted surface needs, since the frost replaces what it covers and a
+/// shadow drawn first survives only outside. With the blur off, the plain `dialogFill`.
+///
+/// Fading a frost is not fading its alpha: the frost *replaces* what it covers, so at partial
+/// alpha it would punch a half-transparent hole. It forms instead — blur radius, tint and lift
+/// all rise with `fade` — and at no radius a frost is an exact copy of what is behind it, so a
+/// tooltip fading in goes from invisible to glass rather than appearing whole while its text
+/// fades in over it.
+pub fn tooltipSurfaceFaded(wd: *dvui.WidgetData, fade: f32) void {
+    const t = std.math.clamp(fade, 0, 1);
     const brs = wd.borderRectScale();
     const phys_corners = tooltip_corners.scale(brs.s, dvui.CornerRect.Physical);
     const bs = surfaceShadow();
     const prect = brs.r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
-    prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha) }, .fade = brs.s * bs.fade });
-    if (!frostPane(wd.id, brs.r, tooltip_corners, brs.s)) {
-        brs.r.fill(phys_corners, .{ .color = .{ .color = dialogFill() } });
+    prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha * t) }, .fade = brs.s * bs.fade });
+    const f = dialogFrost() orelse {
+        brs.r.fill(phys_corners, .{ .color = .{ .color = dialogFill().opacity(t) } });
+        return;
+    };
+    // Under a pixel of blur there is nothing to see yet — and a backdrop kept from an earlier
+    // showing would otherwise redraw its old capture here for a frame.
+    if (f.radius * t < 1) return;
+    widgets.BlurBackdrop.frostPane(wd.id, brs.r, tooltip_corners, brs.s, .{
+        .radius = f.radius * t,
+        .refresh_ms = f.refresh_ms,
+        .tint = f.tint,
+        .mix = f.mix * t,
+        .lift = f.lift * t,
+        .detail = f.detail,
+    });
+}
+
+/// How far a tooltip has faded in this showing, 0…1 over `duration_us` (eased). A showing starts
+/// when it is first drawn after a pause, so a tooltip that hides and comes back fades in again —
+/// a tooltip widget exists every frame whether shown or not, so its first frame will not do.
+pub fn tooltipFade(wd: *dvui.WidgetData, duration_us: i32) f32 {
+    const now = dvui.currentWindow().frame_time_ns;
+    const last = dvui.dataGet(null, wd.id, "_tooltip_shown_ns", i128);
+    dvui.dataSet(null, wd.id, "_tooltip_shown_ns", now);
+    // Not shown last frame (or ever): a new showing.
+    if (last == null or now - last.? > 100 * std.time.ns_per_ms) {
+        _ = dvui.currentWindow().animations.remove(wd.id.update("_tooltip_fade"));
+        dvui.animation(wd.id, "_tooltip_fade", .{ .start_val = 0, .end_val = 1, .end_time = duration_us, .easing = dvui.easing.outCubic });
     }
+    return if (dvui.animationGet(wd.id, "_tooltip_fade")) |a| std.math.clamp(a.value(), 0, 1) else 1;
+}
+
+/// A shown tooltip's surface and fade in one: the surface at this showing's fade
+/// (`tooltipFade`), and the same fade on everything drawn after — the tooltip's contents — so
+/// glass and text arrive together. Returns the alpha to restore once the contents are drawn:
+///
+///     if (tt.shown()) {
+///         const prev = core.dialogs.tooltipBegin(tt.data(), 350_000);
+///         defer dvui.alphaSet(prev);
+///         // contents
+///     }
+pub fn tooltipBegin(wd: *dvui.WidgetData, duration_us: i32) f32 {
+    const t = tooltipFade(wd, duration_us);
+    tooltipSurfaceFaded(wd, t);
+    return dvui.alpha(t);
 }
 
 /// The wash under the pointer, and under the palette's selected row — the same colour, so a
