@@ -121,6 +121,9 @@ panel_wrapper: ?*dvui.BoxWidget = null,
 leaf_cell: ?*dvui.BoxWidget = null,
 leaf_clip: ?Rect.Physical = null,
 current_leaf: ?Layout.NodeIndex = null,
+/// Set while the current leaf is only being measured (`measureOnly`): the rendering flag to
+/// put back when it closes.
+measure_rendering: ?bool = null,
 
 /// Drop target under the mouse during a "dvui_dock" drag, found while walking
 /// leaves. Root-edge zones are a fallback checked in `deinit` only if no leaf
@@ -533,8 +536,9 @@ fn enterNode(self: *Dockspace, node: Layout.NodeIndex, cell: ?Rect) ?Panel {
     const layout = self.init_opts.layout;
     // A cell squeezed to nothing draws nothing. Not an optimisation: dvui reads a zero-width
     // `rect` as "use the minimum size", so a pane at zero would come back at its content's
-    // width and paint over whatever is beside it.
-    if (cell) |c| if (c.w <= 0.5 or c.h <= 0.5) return null;
+    // width and paint over whatever is beside it. Unless its split fits to it: then it is
+    // still laid out, unseen, so the fit keeps learning its size (`measureOnly`).
+    if (cell) |c| if (c.w <= 0.5 or c.h <= 0.5) return self.measureOnly(node, c);
     switch (layout.nodes.items[node]) {
         .split => |sp| {
             const cr = cell orelse self.data().contentRect().justSize();
@@ -599,6 +603,38 @@ fn enterNode(self: *Dockspace, node: Layout.NodeIndex, cell: ?Rect) ?Panel {
         .leaf => return self.openLeaf(node, cell),
         .free => unreachable,
     }
+}
+
+/// A leaf squeezed to nothing whose parent split fits to it (`fit.child`) is laid out anyway —
+/// off to one side, clipped to nothing, not rendered, so it neither paints nor takes the
+/// pointer — at its content's size along the split. Otherwise the size the fit reads is the
+/// one it reported while it last had room, and a pane that shut while it had nothing in it
+/// (no document, no layers) measured nothing, fitted to nothing, and never opened again.
+/// Null (draw nothing) for any other squeezed cell.
+fn measureOnly(self: *Dockspace, node: Layout.NodeIndex, cell: Rect) ?Panel {
+    const layout = self.init_opts.layout;
+    if (layout.nodes.items[node] != .leaf) return null;
+    if (self.stack.items.len == 0) return null;
+    const parent = layout.nodes.items[self.stack.items[self.stack.items.len - 1].node].split;
+    const fit = parent.fit orelse return null;
+    if (Layout.childIndex(parent, fit.child) != node) return null;
+    // Zero along the split: dvui sizes it to its content there. Across it keeps the cell's
+    // extent, which is what the content wraps to.
+    var r = cell;
+    switch (parent.dir) {
+        .horizontal => {
+            r.w = 0;
+            r.y -= 100_000;
+        },
+        .vertical => {
+            r.h = 0;
+            r.x -= 100_000;
+        },
+    }
+    const p = self.openLeaf(node, r) orelse return null;
+    _ = dvui.clip(.{});
+    self.measure_rendering = dvui.renderingSet(false);
+    return p;
 }
 
 fn openLeaf(self: *Dockspace, node: Layout.NodeIndex, cell: ?Rect) ?Panel {
@@ -703,6 +739,8 @@ fn closeContent(self: *Dockspace) void {
         self.panel_wrapper = null;
     }
     if (self.leaf_cell) |c| {
+        if (self.measure_rendering) |r| _ = dvui.renderingSet(r);
+        self.measure_rendering = null;
         if (self.leaf_clip) |clip| dvui.clipSet(clip);
         self.leaf_clip = null;
         // What the cell's content asked for, for a parent split that fits to it. `min_size`
