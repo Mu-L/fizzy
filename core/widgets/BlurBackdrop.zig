@@ -64,6 +64,18 @@ prev_rendering: bool = undefined,
 /// front-to-back region, a plugin drawing through a bridge — where the replay repeats commands
 /// that were only meant to run once. Costs a GPU→CPU→GPU round trip of the rect on dirty frames.
 mode: Mode = .replay,
+/// Fizzy addition: blur without the pyramid (`runFine`), for a frost whose content moves under
+/// it — a canvas zooming — where the pyramid's coarse levels, on a grid fixed to the screen,
+/// shimmer. Any radius: a big one is box-averaged down first, which stays put as content slides
+/// under it. Off, the pyramid serves every radius (the cheap default — dialogs, menus, the
+/// palette).
+stable: bool = false,
+/// Fizzy addition: how much definition the frost keeps, 0…1. On the way back up the pyramid,
+/// each doubling mixes in the downsample level of its size by this much — a blur with a
+/// sharper core and the same soft reach, so shapes behind read through the frost instead of
+/// washing out. 0 is the plain dual-Kawase blur. Never the unblurred source: at most it
+/// softens toward the first halving, so there is no sharp double image.
+detail: f32 = 0,
 
 pub const Mode = enum { replay, readback };
 
@@ -246,9 +258,34 @@ fn deinitFromTarget(self: *BlurBackdrop) bool {
         const copy = tapsBlend(src, .copy);
         if (!copy) step.clear();
         defer if (copy) tapsEnd(src, true);
-        dvui.renderTexture(src, .{ .r = dest, .s = 1 }, .{
-            .uv = .{ .x = (r.x - off.x) / sw, .y = (r.y - off.y) / sh, .w = r.w / sw, .h = r.h / sh },
-        }) catch {};
+        const uv: dvui.Rect = .{ .x = (r.x - off.x) / sw, .y = (r.y - off.y) / sh, .w = r.w / sw, .h = r.h / sh };
+        if (shrink > 1 and copy) {
+            // The frame target samples `.nearest`, so a single tap at half size keeps one
+            // pixel of every 2×2 block and drops the rest: a 1px edge (pixel-art outlines,
+            // text) lands in or out of the copy as content moves under the frost by a pixel,
+            // and the blur, fed a different picture each frame, flickers. Four taps, one on
+            // each pixel's centre, summed at a quarter each — a true box average.
+            // Exactly 2:1, so each tap lands on a pixel centre (an odd rect drops its last
+            // row/column, as the integer halving of `w`/`h` already does).
+            var box = uv;
+            box.w = @as(f32, @floatFromInt(w * shrink)) / sw;
+            box.h = @as(f32, @floatFromInt(h * shrink)) / sh;
+            const du = 0.5 / sw;
+            const dv = 0.5 / sh;
+            const offsets = [4][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ -1, 1 }, .{ 1, 1 } };
+            for (offsets, 0..) |o, i| {
+                var tap = box;
+                tap.x += o[0] * du;
+                tap.y += o[1] * dv;
+                dvui.renderTexture(src, .{ .r = dest, .s = 1 }, .{
+                    .uv = tap,
+                    .colormod = tapWeight(@floatFromInt(i), 1, 4),
+                }) catch {};
+                if (i == 0) _ = tapsBlend(src, .add);
+            }
+        } else {
+            dvui.renderTexture(src, .{ .r = dest, .s = 1 }, .{ .uv = uv }) catch {};
+        }
     }
     _ = dvui.renderTarget(prev);
     const source = dvui.Texture.fromTargetTemp(step) catch return false;
@@ -256,11 +293,26 @@ fn deinitFromTarget(self: *BlurBackdrop) bool {
     return true;
 }
 
-/// How much smaller than the rect the pyramid's ends are: 2 at any radius that blurs, 1 for a
-/// radius too small to hide the decimation.
+/// How much smaller than the rect the copy the blur starts from is: for the pyramid, 2 at a
+/// radius it blurs; for a `stable` blur, 2 once `fineShrink` wants any shrinking (the copy's
+/// 2×2 box average is the first halving), else 1.
 fn coarse(self: *const BlurBackdrop) u32 {
+    if (self.stable) return if (self.fineShrink() >= 2) 2 else 1;
     return if (self.radius_px >= 4) 2 else 1;
 }
+
+/// How far a `stable` blur box-averages down before its passes: halvings until the radius in
+/// those texels is under `fine_texel_radius_max`, so the passes stay few (~7) at any radius.
+fn fineShrink(self: *const BlurBackdrop) u32 {
+    var k: u32 = 1;
+    while (self.radius_px / @as(f32, @floatFromInt(k)) >= fine_texel_radius_max and k < 32) k *= 2;
+    return k;
+}
+
+/// The most blur `runFine` does in passes at one resolution (texels). Past it, halving first is
+/// cheaper than the passes it saves — and past ~40 same-size taps start to read as shifted
+/// copies rather than a wider blur.
+const fine_texel_radius_max: f32 = 20;
 
 /// Fizzy addition: the pyramid target for slot `i` at `w`×`h`, kept from the last capture when
 /// it is that size already, made (and so cleared) otherwise. Null when the backend has none.
@@ -385,7 +437,11 @@ pub fn blurred(tex: Texture, radius_px: f32) ?Texture {
 /// `source_coarse` is how many rect pixels one source texel already stands for, so the
 /// radius means the same thing whether the copy was taken full size or not.
 fn runKawase(self: *BlurBackdrop, source: Texture, restore_target: bool, first: usize, source_coarse: u32) ?usize {
+    if (self.stable) return self.runFine(source, restore_target, first, source_coarse);
     var cur = source;
+    // The downsample levels as they are made, for `detail` to mix back in on the way up.
+    var downs: [max_levels]Texture = undefined;
+    var n_downs: usize = 0;
     var slot = first;
     var last: ?usize = null;
     // The taps are weights of their own; the ambient alpha (a region fading in around the
@@ -466,7 +522,13 @@ fn runKawase(self: *BlurBackdrop, source: Texture, restore_target: bool, first: 
         cur = dvui.Texture.fromTargetTemp(step_target) catch break;
         last = slot;
         slot += 1;
+        if (n_downs < downs.len) {
+            downs[n_downs] = cur;
+            n_downs += 1;
+        }
     }
+
+    const detail = std.math.clamp(self.detail, 0, 0.9);
 
     // Upsample back to full size with progressive doubling + a wide
     // multi-tap kernel each step (real "dual Kawase" blur), instead of one
@@ -509,12 +571,50 @@ fn runKawase(self: *BlurBackdrop, source: Texture, restore_target: bool, first: 
                 .{ .x = -2 * ou_x, .y = 0, .w = 1 },
                 .{ .x = -ou_x, .y = ou_y, .w = 2 },
             };
+            // `detail`: the two downsample levels either side of this doubling in scale — the
+            // finer (wider) one and the coarser — blended by where the doubling falls between
+            // them (in octaves), stretched to fit, and mixed in as extra taps weighted so they are
+            // `detail` of the result (against the kernel's 12). The way down halves from the
+            // source and the way up doubles from `size / radius`, so the doublings drift between
+            // the down levels as the radius moves; a single nearest level drifted up to half an
+            // octave finer then snapped coarser (38 blurrier than 42). Weighted by position, the
+            // mixed-in scale tracks the doubling's own and the blur changes smoothly with radius.
+            // The unblurred source is never a candidate, so near the top its share is dropped
+            // and detail fades out rather than sharpening into a double image.
+            var finer: ?Texture = null;
+            var coarser: ?Texture = null;
+            if (detail > 0.001) {
+                for (downs[0..n_downs]) |d| {
+                    if (d.width >= next_w) {
+                        if (finer == null or d.width < finer.?.width) finer = d;
+                    } else {
+                        if (coarser == null or d.width > coarser.?.width) coarser = d;
+                    }
+                }
+            }
+            const nw: f32 = @floatFromInt(next_w);
+            // Octaves from the finer level (or, with none, from the source a level above) down
+            // to this doubling, over the octaves to the coarser level.
+            const frac: f32 = blk: {
+                const hi_w: f32 = if (finer) |f| @floatFromInt(f.width) else @floatFromInt(source.width);
+                const lo_w: f32 = if (coarser) |c| @floatFromInt(c.width) else nw;
+                const span = @log2(hi_w / lo_w);
+                break :blk if (span > 0.001) std.math.clamp(@log2(hi_w / nw) / span, 0, 1) else 0;
+            };
+            const d_fine: f32 = if (finer != null) detail * (1 - frac) else 0;
+            const d_coarse: f32 = if (coarser != null) detail * frac else 0;
+            const d_tot = d_fine + d_coarse;
+            const skip_tot: f32 = if (d_tot > 0.001) 12 * d_tot / (1 - d_tot) else 0;
+            const w_fine: f32 = if (d_tot > 0.001) skip_tot * d_fine / d_tot else 0;
+            const w_coarse: f32 = if (d_tot > 0.001) skip_tot * d_coarse / d_tot else 0;
+            const total: f32 = 12 + skip_tot;
+
             const add = tapsBegin(cur, step_target);
             defer tapsEnd(cur, add);
             var cum_w: f32 = 0;
             for (taps, 0..) |tap, i| {
                 const mod = if (add)
-                    tapWeight(cum_w, tap.w, 12)
+                    tapWeight(cum_w, tap.w, total)
                 else
                     dvui.Color.white.opacity(tap.w / (cum_w + tap.w));
                 cum_w += tap.w;
@@ -524,11 +624,135 @@ fn runKawase(self: *BlurBackdrop, source: Texture, restore_target: bool, first: 
                 }) catch {};
                 if (add and i == 0) _ = tapsBlend(cur, .add);
             }
+            const extras = [2]struct { tex: ?Texture, w: f32 }{
+                .{ .tex = finer, .w = w_fine },
+                .{ .tex = coarser, .w = w_coarse },
+            };
+            for (extras) |e| {
+                const d = e.tex orelse continue;
+                if (e.w <= 0.001) continue;
+                const mod = if (add)
+                    tapWeight(cum_w, e.w, total)
+                else
+                    dvui.Color.white.opacity(e.w / (cum_w + e.w));
+                cum_w += e.w;
+                const d_add = add and tapsBlend(d, .add);
+                defer tapsEnd(d, d_add);
+                dvui.renderTexture(d, .{ .r = dest_r }, .{ .colormod = mod }) catch {};
+            }
         }
 
         cur = dvui.Texture.fromTargetTemp(step_target) catch break;
         last = slot;
         slot += 1;
+    }
+
+    const done = last orelse return null;
+    dither(cur);
+    self.small = cur;
+    return done;
+}
+
+/// Fizzy addition: a blur that holds still under moving content — classic (same-size) Kawase,
+/// after box-averaging down (`fineShrink`) when the radius is big. Each pass averages four
+/// diagonal bilinear taps `o` texels out, which adds `o² + ¼` to the variance per axis (each tap
+/// is itself a 2-texel average); passes run at o = ½, 1½, 2½ … until the variance reaches σ² for
+/// σ = radius/2 in the working texels, the last pass at whatever offset lands it exactly, so the
+/// blur grows continuously with the radius.
+///
+/// Why it is stable where the pyramid shimmers: the pyramid's levels are *decimated*, so what a
+/// coarse texel holds jumps as content slides a pixel; a box average changes by exactly the
+/// pixel that slid, and the blur above it is shift-invariant. Each halving here is one bilinear
+/// tap on the corner four texels share — their exact mean. `source` (already `source_coarse`
+/// down, by the copy's own 2×2 box) is never written; halvings take slots from `first`, and the
+/// passes ping-pong between the next two.
+fn runFine(self: *BlurBackdrop, source: Texture, restore_target: bool, first: usize, source_coarse: u32) ?usize {
+    const prev_alpha = dvui.alpha(1);
+    defer dvui.alphaSet(prev_alpha);
+
+    var prev1: dvui.RenderTarget = undefined;
+    var switched = false;
+    defer if (restore_target and switched) {
+        _ = dvui.renderTarget(prev1);
+    };
+
+    var cur = source;
+    var last: ?usize = null;
+    var slot = first;
+    var scale = source_coarse;
+    const want = @max(self.fineShrink(), source_coarse);
+    while (scale < want and cur.width >= 4 and cur.height >= 4) : (scale *= 2) {
+        const nw = cur.width / 2;
+        const nh = cur.height / 2;
+        const step_target = self.level(slot, nw, nh) orelse break;
+        const prev = dvui.renderTarget(.{ .texture = step_target, .offset = .{} });
+        if (!switched) {
+            prev1 = prev;
+            switched = true;
+        }
+        const prev_clip = dvui.clipGet();
+        defer dvui.clipSet(prev_clip);
+        dvui.clipSet(.{ .w = @floatFromInt(nw), .h = @floatFromInt(nh) });
+        // Exactly 2:1 (an odd edge drops its last texel), so each output centre lands on the
+        // corner four source texels share and linear filtering returns their mean.
+        dvui.renderTexture(cur, .{ .r = .{ .w = @floatFromInt(nw), .h = @floatFromInt(nh) } }, .{
+            .uv = .{
+                .w = @as(f32, @floatFromInt(nw * 2)) / @as(f32, @floatFromInt(cur.width)),
+                .h = @as(f32, @floatFromInt(nh * 2)) / @as(f32, @floatFromInt(cur.height)),
+            },
+        }) catch {};
+        cur = dvui.Texture.fromTargetTemp(step_target) catch break;
+        last = slot;
+        slot += 1;
+    }
+
+    const w = cur.width;
+    const h = cur.height;
+    const sigma = self.radius_px * 0.5 / @as(f32, @floatFromInt(scale));
+    var remaining = sigma * sigma;
+    var pass: usize = 0;
+    while (remaining > 0.01 and pass < 16) : (pass += 1) {
+        var o: f32 = @as(f32, @floatFromInt(pass)) + 0.5;
+        if (o * o + 0.25 > remaining) o = @sqrt(@max(remaining - 0.25, 0));
+        remaining -= o * o + 0.25;
+
+        const pslot = slot + pass % 2;
+        const step_target = self.level(pslot, w, h) orelse break;
+        const prev = dvui.renderTarget(.{ .texture = step_target, .offset = .{} });
+        if (!switched) {
+            prev1 = prev;
+            switched = true;
+        }
+        // See the matching comment in `runKawase`: the ambient clip means nothing here.
+        const prev_clip = dvui.clipGet();
+        dvui.clipSet(.{ .w = @floatFromInt(w), .h = @floatFromInt(h) });
+        defer dvui.clipSet(prev_clip);
+
+        const dest_r: dvui.Rect.Physical = .{ .w = @floatFromInt(w), .h = @floatFromInt(h) };
+        const du = o / @as(f32, @floatFromInt(w));
+        const dv = o / @as(f32, @floatFromInt(h));
+        const taps = [4]dvui.Point{
+            .{ .x = -du, .y = -dv },
+            .{ .x = du, .y = -dv },
+            .{ .x = -du, .y = dv },
+            .{ .x = du, .y = dv },
+        };
+        const add = tapsBegin(cur, step_target);
+        defer tapsEnd(cur, add);
+        for (taps, 0..) |tap, i| {
+            const mod = if (add)
+                tapWeight(@floatFromInt(i), 1, 4)
+            else
+                dvui.Color.white.opacity(1.0 / @as(f32, @floatFromInt(i + 1)));
+            dvui.renderTexture(cur, .{ .r = dest_r }, .{
+                .uv = .{ .x = tap.x, .y = tap.y, .w = 1, .h = 1 },
+                .colormod = mod,
+            }) catch {};
+            if (add and i == 0) _ = tapsBlend(cur, .add);
+        }
+
+        cur = dvui.Texture.fromTargetTemp(step_target) catch break;
+        last = pslot;
     }
 
     const done = last orelse return null;
@@ -629,6 +853,8 @@ pub const Pane = struct {
     mix: f32 = 0.5,
     /// White added over the whole pane after the mix, 0…1 — a glass material's lift.
     lift: f32 = 0,
+    /// How much definition the frost keeps, 0…1 (`BlurBackdrop.detail`).
+    detail: f32 = 0,
 };
 
 /// Fizzy addition: a frosted pane — what is under `rect`, blurred, composed with a tint and a
@@ -650,6 +876,7 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
     dvui.dataSetDeinitFunction(null, id, "_frost", &releaseTexture);
     backdrop.mode = .readback;
     backdrop.radius_px = pane.radius;
+    backdrop.detail = pane.detail;
 
     // `init` takes a rect in *window* coordinates.
     const nat = dvui.windowRectScale().rectFromPhysical(rect);
