@@ -618,7 +618,11 @@ pub const Backdrop = struct {
 /// can be read (exact whoever painted them — the region, or a card further out — and its
 /// corners match the frame, so `blit`'s lerp is exact over them), else the `Backdrop` rebuilt
 /// from colours, which only `blitOpaque` blends correctly, else nothing.
-fn beginBackdropCapture(cf: *CrossFade, rect: dvui.Rect.Physical, backdrop: ?Backdrop) ?dvui.Picture {
+fn beginBackdropCapture(cf: *CrossFade, place: dvui.Rect.Physical, backdrop: ?Backdrop) ?dvui.Picture {
+    // On the whole pixels `Picture.start` grows the snapshot to, not the place's fractional
+    // rect: the frame pasted at the fractional one left the snapshot's left/top edge a
+    // part-covered pixel — a 1px seam wherever the view drew nothing over it.
+    const rect = pixelBounds(place);
     const under = copyFrame(rect);
     var pic = CrossFade.beginCapture(rect) orelse {
         if (under) |u| dvui.textureDestroyLater(u);
@@ -643,6 +647,13 @@ fn beginBackdropCapture(cf: *CrossFade, rect: dvui.Rect.Physical, backdrop: ?Bac
     }
     _ = &pic;
     return pic;
+}
+
+/// `r` grown out to whole pixels — the rect `dvui.Picture.start` records.
+fn pixelBounds(r: dvui.Rect.Physical) dvui.Rect.Physical {
+    const x = @floor(r.x);
+    const y = @floor(r.y);
+    return .{ .x = x, .y = y, .w = @round(@ceil(r.x + r.w) - x), .h = @round(@ceil(r.y + r.h) - y) };
 }
 
 fn fillBackdrop(rect: dvui.Rect.Physical, backdrop: ?Backdrop) void {

@@ -231,6 +231,21 @@ pub fn drawTabActiveIndicator(tab: dvui.RectScale, color: dvui.Color) void {
 
 pub fn drawEdgeShadow(container: dvui.RectScale, shadow: Shadow, opts: ShadowOptions) void {
     var rs = container;
+    // Out to whole pixels. The fill has a hard edge, so on a fractional rect (a viewport beside
+    // a text-sized ruler) the pixel the content part-covers got no shadow — a 1px bright seam
+    // between the shadow and the viewport's edge.
+    const x = @floor(rs.r.x);
+    const y = @floor(rs.r.y);
+    rs.r = .{ .x = x, .y = y, .w = @ceil(rs.r.x + rs.r.w) - x, .h = @ceil(rs.r.y + rs.r.h) - y };
+    // And the clip out to whole pixels with it. The SDL backend truncates a clip's origin and
+    // size separately, so its right/bottom edge lands on `trunc(x) + trunc(w)` — short of the
+    // part-covered last pixel — and the bottom shadow's darkest row, the one on that pixel,
+    // was cut off: the seam, back on the bottom edge only.
+    const prev_clip = dvui.clipGet();
+    defer dvui.clipSet(prev_clip);
+    const cx = @floor(prev_clip.x);
+    const cy = @floor(prev_clip.y);
+    dvui.clipSet(.{ .x = cx, .y = cy, .w = @ceil(prev_clip.x + prev_clip.w) - cx, .h = @ceil(prev_clip.y + prev_clip.h) - cy });
     switch (shadow) {
         .top => {
             rs.r.h = opts.thickness;
