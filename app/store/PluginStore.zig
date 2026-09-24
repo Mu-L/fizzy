@@ -2670,13 +2670,12 @@ fn drawSelectionToggles(
     // fill, the corners, the shadow — rather than this one hand-rolling a translucent box that
     // only resembled them.
     //
-    // `Popover` anchors by its top-left, so the vertical centring comes from the height it had
-    // last frame; on the first frame there is none, which is also the frame it grows out of the
-    // anchor, so nothing jumps.
+    // Centred on the card's middle, and grown out of it.
     const natural = anchor.toNatural();
     var panel = core.widgets.Popover.init(@src(), .{
         .rect = &flyout_win_rect,
-        .anchor = .{ .x = natural.x, .y = natural.y - flyout_win_rect.h / 2 },
+        .anchor = .{ .x = natural.x, .y = natural.y },
+        .anchor_y = 0.5,
         .id_extra = hashId(entry.id),
         // The card is the control this hangs off: pressing it is the selection toggle, not a
         // dismissal.

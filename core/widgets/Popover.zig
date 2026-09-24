@@ -50,33 +50,54 @@ pub const InitOptions = struct {
     /// The width assumed before the popover has one (its first frame, growing from nothing),
     /// for deciding whether it fits right of `anchor`.
     expected_w: f32 = 240,
+    /// Which point of the popover's height sits at `anchor.y`: 0 hangs it from the anchor, 0.5
+    /// centres it there (a flyout beside the middle of a card).
+    anchor_y: f32 = 0,
 };
 
 /// Open (or continue) the popover. Rows go between this and `deinit`.
 pub fn init(src: std.builtin.SourceLocation, init_opts: InitOptions) Popover {
     // Only the position is ours each frame; the size is auto-size's, animated from whatever it
     // was — a fresh rect grows from the anchor with the overshoot.
+    //
+    // Where it goes is decided from the size it is growing *to* (last frame's rows, as the
+    // window's auto-size will read them), never the size it has mid-animation: judged from the
+    // half-grown size, a popover near an edge fits at first, runs off-screen as it grows, and
+    // only then flips or moves back — a frame late every frame, which reads as a pop.
     const window = dvui.windowRect();
     const r = init_opts.rect;
-    const w = if (r.w > 0) r.w else init_opts.expected_w;
-    // Flip when it would run off the right edge and the flipped side has more room. Decided
-    // from the width it will have (or is expected to), so a popover that will not fit opens
-    // leftward from its first frame rather than growing off-screen and then jumping.
+    const id = dvui.parentGet().extendId(src, init_opts.id_extra);
+    const target: dvui.Size = if (dvui.minSizeGet(id)) |ms|
+        dvui.Size.min(ms, .cast(window.size()))
+    else
+        .{ .w = if (r.w > 0) r.w else init_opts.expected_w, .h = r.h };
+    // Flip when it would run off the right edge and the flipped side has more room.
     const flipped = if (init_opts.flip_x) |fx|
-        init_opts.anchor.x + w > window.x + window.w and (fx - window.x) > (window.x + window.w - init_opts.anchor.x)
+        init_opts.anchor.x + target.w > window.x + window.w and (fx - window.x) > (window.x + window.w - init_opts.anchor.x)
     else
         false;
-    r.x = if (flipped) init_opts.flip_x.? - r.w else init_opts.anchor.x;
+    const left = if (flipped) init_opts.flip_x.? - target.w else init_opts.anchor.x;
     // And never off the top or bottom: a flyout beside a row near the window's foot moves up
     // to show whole, as a tooltip does.
-    r.y = if (r.h > 0) std.math.clamp(init_opts.anchor.y, window.y, @max(window.y, window.y + window.h - r.h)) else init_opts.anchor.y;
+    const want_top = init_opts.anchor.y - target.h * init_opts.anchor_y;
+    const top = std.math.clamp(want_top, window.y, @max(window.y, window.y + window.h - target.h));
+    // The edge held while the size animates (and overshoots): the side it opens from — the
+    // right edge when flipped, the bottom when pressed against the window's foot, the middle
+    // when centred on its anchor — so neither growth nor overshoot carries it past the edge it
+    // was placed against.
+    const size_anchor: dvui.Point = .{
+        .x = if (flipped) 1 else 0,
+        .y = if (top < want_top) 1 else if (top > want_top) 0 else init_opts.anchor_y,
+    };
+    // Placed so that at the target size it lands at (`left`, `top`); the window moves it by the
+    // held fraction of each step of the animation from here.
+    r.x = left + (target.w - r.w) * size_anchor.x;
+    r.y = top + (target.h - r.h) * size_anchor.y;
     const theme = dvui.themeGet();
     const win = widgets.floatingWindow(src, .{
         .rect = init_opts.rect,
         .resize = .none,
-        // Held edge while the size animates: the anchor's side — the right edge when flipped,
-        // so it grows leftward out of the flip edge instead of past it.
-        .size_anchor = if (flipped) .{ .x = 1, .y = 0 } else .top_left,
+        .size_anchor = .{ .x = size_anchor.x, .y = size_anchor.y },
         .auto_size_axes = .both,
         .window_avoid = .nudge,
         .process_events_in_deinit = true,
