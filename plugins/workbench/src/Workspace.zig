@@ -871,20 +871,23 @@ pub fn drawBubble(rect: dvui.Rect, rs: dvui.RectScale, color: [4]u8, _: usize) !
     var path = dvui.Path.Builder.init(dvui.currentWindow().lifo());
     defer path.deinit();
 
-    path.addRect(base_phys, dvui.CornerRect.Physical.square);
-
     if (bubble_phys.h > 0) {
-        const rad_x = rs.r.w / 2.0;
-        const rad_y = rs.r.h / 2.0;
-        const r = bubble_phys;
-        const tl = dvui.Point.Physical{ .x = r.x + rad_x, .y = r.y + rad_x };
-        const bl = dvui.Point.Physical{ .x = r.x, .y = r.y + r.h };
-        const br = dvui.Point.Physical{ .x = r.x + r.w, .y = r.y + r.h };
-        const tr = dvui.Point.Physical{ .x = r.x + r.w - rad_y, .y = r.y + rad_y };
-        path.addArc(tl, rad_x, dvui.math.pi * 1.5, dvui.math.pi, true);
-        path.addArc(bl, 0, dvui.math.pi, dvui.math.pi * 0.5, true);
-        path.addArc(br, 0, dvui.math.pi * 0.5, 0, true);
-        path.addArc(tr, rad_y, dvui.math.pi * 2.0, dvui.math.pi * 1.5, false);
+        // One outline around base and cap, wound as `addRect` winds (top, down the left, across
+        // the bottom, up the right), through the peak exactly once. It was the base's four
+        // corners and then the cap's two quarter-arcs, meeting at the peak from two centres
+        // 2px apart (the base is outset, the radii were not): the outline ran from the peak
+        // down to the base and back, which the convex fill turned into a notch at every
+        // bubble's top.
+        const rad = bubble_phys.w / 2.0;
+        // Never below the base's foot: a short bubble on a wide cell caps a lower arc.
+        const cy = @min(bubble_phys.y + rad, base_phys.y + base_phys.h);
+        const center = dvui.Point.Physical{ .x = bubble_phys.x + rad, .y = cy };
+        path.addArc(center, rad, dvui.math.pi * 1.5, dvui.math.pi, false);
+        path.addPoint(base_phys.bottomLeft());
+        path.addPoint(base_phys.bottomRight());
+        path.addArc(center, rad, dvui.math.pi * 2.0, dvui.math.pi * 1.5, true);
+    } else {
+        path.addRect(base_phys, dvui.CornerRect.Physical.square);
     }
 
     path.build().fillConvex(.{ .color = .{ .color = .{ .r = color[0], .g = color[1], .b = color[2], .a = color[3] } }, .fade = 1.0 });
