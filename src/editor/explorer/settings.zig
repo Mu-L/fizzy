@@ -151,6 +151,15 @@ pub const groups = [_]Group{
                 .draw = drawDialogBlur,
             },
             .{
+                .label = "Dialog blur detail",
+                .key = "dialog_detail",
+                .description = "How much of what is behind a dialog or the command palette " ++
+                    "stays readable through its blur. 0 is a plain frost; higher keeps shapes " ++
+                    "and edges visible under the same softness.",
+                .keywords = "dialog palette blur frost glass detail definition clarity",
+                .draw = drawDialogDetail,
+            },
+            .{
                 .label = "Dialog brightness",
                 .key = "dialog_lift",
                 .description = "How much lighter a dialog or the command palette is than what " ++
@@ -387,6 +396,18 @@ fn drawDialogBlur() void {
         .interval = 1,
         .max = 48,
         .min = 0,
+    }, .{ .expand = .horizontal })) {
+        fizzy.editor().markSettingsDirty();
+        dvui.refresh(null, @src(), null);
+    }
+}
+
+fn drawDialogDetail() void {
+    if (dvui.sliderEntry(@src(), "{d:0.01}", .{
+        .value = &fizzy.editor().app.settings.dialog_detail,
+        .interval = 0.01,
+        .max = 0.9,
+        .min = 0.0,
     }, .{ .expand = .horizontal })) {
         fizzy.editor().markSettingsDirty();
         dvui.refresh(null, @src(), null);

@@ -872,8 +872,21 @@ pub fn deinit(self: *Dockspace) void {
 
     self.checkRootZones();
     if (self.hover_target != null) {
-        // Drawn last (on top of everything else this widget drew this frame).
-        self.hover_rect.fill(dvui.CornerRect.Physical.all(0), .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.25) } });
+        // Drawn last (on top of everything else this widget drew this frame). Frosted glass
+        // tinted the highlight colour, like the workbench's tab drop zones and the dialogs'
+        // frost — what is under the drop reads through, softened. Flat with the blur off.
+        const s = self.data().rectScale().s;
+        const highlight = dvui.themeGet().color(.highlight, .fill);
+        if (@import("../dialogs.zig").dialogFrost()) |frost| {
+            @import("BlurBackdrop.zig").frostPane(self.data().id.update("drop_zone_frost"), self.hover_rect, .round(8), s, .{
+                .radius = frost.radius,
+                .tint = highlight.opacity(0.6),
+                .mix = 0.35,
+                .detail = frost.detail,
+            });
+        } else {
+            self.hover_rect.fill(.all(8 * s), .{ .color = .{ .color = highlight.opacity(0.5) } });
+        }
     }
 
     if (self.pending_drop) |pd| {

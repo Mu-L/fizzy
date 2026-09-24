@@ -89,6 +89,8 @@ pub const Frost = struct {
     /// White added over the whole pane after the mix, 0…1 — a glass material's lift above
     /// whatever is behind it. Only with `tint`.
     lift: f32 = 0,
+    /// How much of what is behind stays readable through the blur, 0…1 (`BlurBackdrop.detail`).
+    detail: f32 = 0,
 };
 
 pub const InitOptions = struct {
@@ -597,6 +599,7 @@ fn drawFrost(self: *FloatingWindowWidget, frost: Frost) void {
         .tint = frost.tint,
         .mix = frost.mix,
         .lift = frost.lift,
+        .detail = frost.detail,
     });
 }
 

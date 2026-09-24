@@ -41,19 +41,42 @@ pub const InitOptions = struct {
     /// that opens a panel is the caller's own toggle, and taking it as a dismissal too would
     /// close and reopen in one frame.
     keep: []const dvui.Rect.Physical = &.{},
+    /// Where the popover opens leftward from when there is no room right of `anchor` (natural
+    /// x): its right edge goes here instead, and it grows to the left — the way a tooltip
+    /// flips at the window's edge. Null keeps it right of `anchor` whatever the room. A
+    /// flyout beside a control passes that control's far edge (or, when the control itself
+    /// spans the window, its near one, so the popover opens over it rather than off-screen).
+    flip_x: ?f32 = null,
+    /// The width assumed before the popover has one (its first frame, growing from nothing),
+    /// for deciding whether it fits right of `anchor`.
+    expected_w: f32 = 240,
 };
 
 /// Open (or continue) the popover. Rows go between this and `deinit`.
 pub fn init(src: std.builtin.SourceLocation, init_opts: InitOptions) Popover {
     // Only the position is ours each frame; the size is auto-size's, animated from whatever it
     // was — a fresh rect grows from the anchor with the overshoot.
-    init_opts.rect.x = init_opts.anchor.x;
-    init_opts.rect.y = init_opts.anchor.y;
+    const window = dvui.windowRect();
+    const r = init_opts.rect;
+    const w = if (r.w > 0) r.w else init_opts.expected_w;
+    // Flip when it would run off the right edge and the flipped side has more room. Decided
+    // from the width it will have (or is expected to), so a popover that will not fit opens
+    // leftward from its first frame rather than growing off-screen and then jumping.
+    const flipped = if (init_opts.flip_x) |fx|
+        init_opts.anchor.x + w > window.x + window.w and (fx - window.x) > (window.x + window.w - init_opts.anchor.x)
+    else
+        false;
+    r.x = if (flipped) init_opts.flip_x.? - r.w else init_opts.anchor.x;
+    // And never off the top or bottom: a flyout beside a row near the window's foot moves up
+    // to show whole, as a tooltip does.
+    r.y = if (r.h > 0) std.math.clamp(init_opts.anchor.y, window.y, @max(window.y, window.y + window.h - r.h)) else init_opts.anchor.y;
     const theme = dvui.themeGet();
     const win = widgets.floatingWindow(src, .{
         .rect = init_opts.rect,
         .resize = .none,
-        .size_anchor = .top_left,
+        // Held edge while the size animates: the anchor's side — the right edge when flipped,
+        // so it grows leftward out of the flip edge instead of past it.
+        .size_anchor = if (flipped) .{ .x = 1, .y = 0 } else .top_left,
         .auto_size_axes = .both,
         .window_avoid = .nudge,
         .process_events_in_deinit = true,

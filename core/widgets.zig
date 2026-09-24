@@ -44,6 +44,7 @@ pub const ContextWidget = @import("widgets/ContextWidget.zig");
 pub const MenuWidget = @import("widgets/menu/Menu.zig");
 pub const MenuItemWidget = @import("widgets/menu/MenuItem.zig");
 pub const FloatingMenuWidget = @import("widgets/menu/FloatingMenu.zig");
+pub const PopupWidget = @import("widgets/menu/Popup.zig");
 
 /// `dvui.menu` / `dvui.menuItem` / `dvui.floatingMenu`, over the copies above.
 pub fn menu(src: std.builtin.SourceLocation, dir: dvui.enums.Direction, opts: dvui.Options) *MenuWidget {
@@ -73,6 +74,27 @@ pub fn floatingMenu(src: std.builtin.SourceLocation, init_opts: FloatingMenuWidg
     var ret = dvui.widgetAlloc(FloatingMenuWidget);
     ret.init(src, init_opts, opts);
     return ret;
+}
+
+/// `dvui.tooltip` drawn as fizzy's floating surface (`dialogs.tooltipSurface`): a line of text
+/// in a frosted, rounded, shadowed card like the dialogs and menus, rather than dvui's opaque box.
+/// Same arguments; `opts` styles the text.
+pub fn tooltip(src: std.builtin.SourceLocation, init_opts: dvui.FloatingTooltipWidget.InitOptions, comptime fmt: []const u8, fmt_args: anytype, opts: dvui.Options) void {
+    var tt: dvui.FloatingTooltipWidget = undefined;
+    const defaults: dvui.Options = .{ .role = .tooltip, .padding = dvui.Rect.all(6) };
+    tt.init(src, init_opts, defaults.override(dialogs.tooltipOptions(0)).override(opts));
+    defer tt.deinit();
+    if (!tt.shown()) return;
+    dialogs.tooltipSurface(tt.data());
+    var tl = dvui.textLayout(@src(), .{}, defaults.override(opts).override(.{ .background = false }).strip());
+    tl.format(fmt, fmt_args, .{});
+    tl.deinit();
+}
+
+/// `dvui.popup` on this module's menu chain, so it can be frosted — see `PopupWidget`.
+pub fn popup(src: std.builtin.SourceLocation, init_opts: PopupWidget.InitOptions, opts: dvui.Options) ?*PopupWidget {
+    var ret = dvui.widgetAlloc(PopupWidget);
+    return ret.active(src, init_opts, opts);
 }
 
 /// The fills a menu row wears: nothing at rest, `core.dialogs`' hover wash under the pointer, and
@@ -166,18 +188,18 @@ pub fn textEntryMenu(te: *dvui.TextEntryWidget) bool {
     defer right_click.deinit();
     const point = right_click.activePoint() orelse return false;
 
-    var popup = contextMenu(@src(), point, .{});
-    defer popup.deinit();
+    var menu_popup = contextMenu(@src(), point, .{});
+    defer menu_popup.deinit();
     // With the chords the field itself answers to: ⌘C in a focused field does exactly what this
     // row does, so showing it is the truth, not decoration.
     const keybinds = &dvui.currentWindow().keybinds;
     if (menuRow(@src(), "Copy", .{ .icon = icons.tvg.lucide.copy, .keybind = keybinds.get("copy") orelse .{} }) != null) {
         te.copy();
-        popup.close();
+        menu_popup.close();
     }
     if (menuRow(@src(), "Paste", .{ .icon = icons.tvg.lucide.@"clipboard-paste", .keybind = keybinds.get("paste") orelse .{} }) != null) {
         te.paste();
-        popup.close();
+        menu_popup.close();
         dvui.focusWidget(te.data().id, null, null);
         return true;
     }
@@ -189,7 +211,33 @@ pub fn contextMenu(src: std.builtin.SourceLocation, at: dvui.Point.Natural, opts
     // the difference that matters is that a popup closes when you click outside it. The default
     // left a context menu standing while the click that should have dismissed it went somewhere
     // else — which is not a decision any caller should be making separately.
-    return floatingMenu(src, .{ .from = dvui.Rect.Natural.fromPoint(at), .style = .popup }, opts);
+    // Frosted like the menu bar's dropdowns and every other floating surface: without the frost
+    // and the translucent fill a right-click menu drew as a bare opaque dvui panel.
+    return floatingMenu(src, .{
+        .from = dvui.Rect.Natural.fromPoint(at),
+        .style = .popup,
+        .frost = menuFrost(),
+    }, menuSurfaceOptions().override(opts));
+}
+
+/// The blur behind a menu popup — `core.dialogs`' frost for every floating surface, as a
+/// `BlurBackdrop.Pane`. Null when the style has the blur off; the panel's fill then stands alone.
+pub fn menuFrost() ?BlurBackdrop.Pane {
+    const f = dialogs.dialogFrost() orelse return null;
+    return .{ .radius = f.radius, .refresh_ms = f.refresh_ms, .tint = f.tint, .mix = f.mix, .lift = f.lift, .detail = f.detail };
+}
+
+/// A menu popup's surface: `core.dialogs`' fill, corners, padding and shadow, no border — the
+/// menu bar's dropdowns, context menus and the rest wear the same one.
+pub fn menuSurfaceOptions() dvui.Options {
+    return .{
+        .background = true,
+        .color_fill = .{ .color = dialogs.dialogFill() },
+        .border = .all(0),
+        .corners = dialogs.surface_corners,
+        .padding = dialogs.surface_padding,
+        .box_shadow = dialogs.surfaceShadow(),
+    };
 }
 /// Verb form of `DockingWidget`, same shape as `dvui.dockspace`.
 pub const dockspace = DockingWidget.dockspace;

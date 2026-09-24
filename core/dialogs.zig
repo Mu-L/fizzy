@@ -58,6 +58,9 @@ pub const Style = extern struct {
     /// glass material is brighter than what is behind it. Dark content blurs dark; this is
     /// what keeps a dialog over a dark pane from reading as a black slab. 1 adds ~15% white.
     lift: f32 = 0.3,
+    /// How much of what is behind the frost stays readable, 0…1 (`BlurBackdrop.detail`).
+    /// Last, so a plugin built against the layout before it still reads every field it knows.
+    detail: f32 = 0.3,
 
     pub fn chromeColor(self: Style) dvui.Color {
         if (!self.has_chrome) return dvui.themeGet().color(.content, .fill);
@@ -90,6 +93,7 @@ pub fn dialogFrost() ?widgets.FloatingWindowWidget.Frost {
         .tint = s.chromeColor(),
         .mix = std.math.clamp(s.opacity, 0, 1),
         .lift = std.math.clamp(s.lift, 0, 1) * lift_max,
+        .detail = std.math.clamp(s.detail, 0, 1),
     };
 }
 
@@ -109,6 +113,7 @@ pub fn frostPane(id: dvui.Id, rect: dvui.Rect.Physical, corners: dvui.CornerRect
         .tint = f.tint,
         .mix = f.mix,
         .lift = f.lift,
+        .detail = f.detail,
     });
     return true;
 }
@@ -136,6 +141,43 @@ pub const surface_padding: dvui.Rect = .all(6);
 /// The drop shadow under a floating surface.
 pub fn surfaceShadow() dvui.Options.BoxShadow {
     return .{ .color = .black, .fade = 8, .corners = surface_corners, .alpha = 0.25 };
+}
+
+// ---- tooltips: the same surface, small ------------------------------------------------------
+//
+// A tooltip is a floating surface like any other, so it wears the same frost, fill, corners and
+// shadow. dvui's tooltip widgets paint their own background inside `init`/`install`, before
+// anything can get beneath it, and the frost *replaces* what it covers — so a tooltip is told to
+// paint nothing (`tooltipOptions`) and `tooltipSurface` lays the surface down under its contents.
+
+/// A tooltip's own options: no background, border or shadow of its own — `tooltipSurface` draws
+/// them. Corners explicitly round: `surface_corners` is `.all`, which leaves the corner *kind*
+/// to the theme, and only a widget's options resolve that — handed straight to the frost it
+/// drew square.
+pub fn tooltipOptions(id_extra: usize) dvui.Options {
+    return .{
+        .id_extra = id_extra,
+        .background = false,
+        .border = .all(0),
+        .corners = tooltip_corners,
+    };
+}
+
+const tooltip_corners: dvui.CornerRect = .round(8);
+
+/// The surface under a shown tooltip, from its widget data: shadow, then the frost (its tint is
+/// the fill) — the order a frosted surface needs, since the frost replaces what it covers and a
+/// shadow drawn first survives only outside. With the blur off, the plain `dialogFill`. Call once
+/// the tooltip is shown, before its contents.
+pub fn tooltipSurface(wd: *dvui.WidgetData) void {
+    const brs = wd.borderRectScale();
+    const phys_corners = tooltip_corners.scale(brs.s, dvui.CornerRect.Physical);
+    const bs = surfaceShadow();
+    const prect = brs.r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
+    prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha) }, .fade = brs.s * bs.fade });
+    if (!frostPane(wd.id, brs.r, tooltip_corners, brs.s)) {
+        brs.r.fill(phys_corners, .{ .color = .{ .color = dialogFill() } });
+    }
 }
 
 /// The wash under the pointer, and under the palette's selected row — the same colour, so a

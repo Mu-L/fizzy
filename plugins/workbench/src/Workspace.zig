@@ -520,6 +520,27 @@ pub fn tabCount(self: *Workspace) usize {
     return existing.len;
 }
 
+/// The drop zone under a dragged tab: frosted glass tinted the highlight colour, like the
+/// dialogs' frost (`core.dialogs`, its blur and detail) — what is under the zone reads through,
+/// softened, rather than being hidden by a flat wash. With the dialogs' blur off, the flat wash.
+fn drawDropZone(data: *dvui.WidgetData, zone: dvui.Rect.Physical) void {
+    const s = data.rectScale().s;
+    const radius_phys = @min(zone.w, zone.h) / 8;
+    const highlight = dvui.themeGet().color(.highlight, .fill);
+    // `.round`, not `.all`: `.all` leaves the corner *kind* to the theme, which only a
+    // widget's options resolve — handed straight to the frost it drew square.
+    const frost = core.dialogs.dialogFrost() orelse {
+        zone.fill(dvui.CornerRect.Physical.round(radius_phys), .{ .color = .{ .color = highlight.opacity(0.5) } });
+        return;
+    };
+    core.widgets.BlurBackdrop.frostPane(data.id.update("drop_zone_frost"), zone, dvui.CornerRect.round(radius_phys / s), s, .{
+        .radius = frost.radius,
+        .tint = highlight.opacity(0.6),
+        .mix = 0.35,
+        .detail = frost.detail,
+    });
+}
+
 /// Where a lifted tab or a file-tree row can be dropped: the middle of this pane joins it; an
 /// edge opens a new pane on that side of it — the same reading the app's places use for a
 /// dragged view (`DockLayout.zoneAt`: edges split, the middle lands here).
@@ -542,11 +563,7 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
         if (e.evt != .mouse) continue;
         const hit = Zones.zoneAt(bounds, e.evt.mouse.p, band) orelse continue;
 
-        if (e.evt.mouse.action == .position) {
-            hit.rect.fill(dvui.CornerRect.Physical.round(@min(hit.rect.w, hit.rect.h) / 8), .{
-                .color = .{ .color = dvui.themeGet().color(.highlight, .fill).opacity(0.5) },
-            });
-        }
+        if (e.evt.mouse.action == .position) drawDropZone(data, hit.rect);
         if (e.evt.mouse.action != .release or !e.evt.mouse.button.pointer()) continue;
 
         e.handle(@src(), data);

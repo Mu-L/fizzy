@@ -30,6 +30,7 @@
 //! dwell before appearing: a quick pass-over shouldn't flash one open at all.
 const std = @import("std");
 const dvui = @import("dvui");
+const core = @import("core");
 
 const TooltipWidget = @This();
 
@@ -117,25 +118,14 @@ installed: bool = false,
 
 /// It's expected to call this when `self` is `undefined`.
 pub fn init(self: *TooltipWidget, src: std.builtin.SourceLocation, init_opts: InitOptions) void {
-    const options: dvui.Options = .{
+    // No surface of its own: `install` lays down fizzy's floating surface
+    // (`core.dialogs.tooltipSurface`) — frosted like the dialogs, menus and every other tooltip.
+    const options: dvui.Options = core.dialogs.tooltipOptions(@intCast(init_opts.id_extra)).override(.{
         .name = "FizzyTooltip",
-        .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).lighten(if (dvui.themeGet().dark) 5 else -5) },
-        .corners = dvui.CornerRect.all(8),
-        .border = dvui.Rect.all(0),
-        .background = true,
-        .box_shadow = .{
-            .color = .black,
-            .shrink = 0,
-            .corners = dvui.CornerRect.all(8),
-            .offset = .{ .x = 0, .y = 2 },
-            .fade = 4,
-            .alpha = 0.2,
-        },
         // Passing a non-null rect stops WidgetData.init from calling rectFor/
         // minSizeForChild, which matters because we're outside normal layout.
         .rect = .{},
-        .id_extra = @intCast(init_opts.id_extra),
-    };
+    });
     self.* = .{
         .wd = dvui.WidgetData.init(src, .{ .subwindow = true }, options),
         .init_options = init_opts,
@@ -304,7 +294,7 @@ pub fn install(self: *TooltipWidget) void {
         (dvui.animationGet(self.data().id, "_open") orelse dvui.Animation{ .start_val = 1, .end_val = 1, .end_time = 0 }).value();
     self.prev_alpha = dvui.alpha(a);
 
-    self.data().borderAndBackground(.{});
+    core.dialogs.tooltipSurface(self.data());
 }
 
 pub fn widget(self: *TooltipWidget) dvui.Widget {

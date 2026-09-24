@@ -2489,7 +2489,7 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
                 });
                 desc_label.draw();
                 if (desc_label.ellipsized) {
-                    dvui.tooltip(
+                    core.widgets.tooltip(
                         @src(),
                         .{
                             .active_rect = desc_label.data().borderRectScale().r,
@@ -2674,6 +2674,9 @@ fn drawSelectionToggles(
         // The card is the control this hangs off: pressing it is the selection toggle, not a
         // dismissal.
         .keep = &.{card_r},
+        // No room to the right (the list is as wide as the window): open over the card instead,
+        // right-aligned with its visible edge, rather than off-screen.
+        .flip_x = (dvui.Point.Physical{ .x = right, .y = 0 }).toNatural().x,
     });
     defer panel.deinit();
 
@@ -2934,7 +2937,7 @@ fn drawNoStoreBuild(entry: StoreEntry, opts: dvui.Options) void {
 
     if (needs_newer_fizzy) {
         const rel = entry.release orelse store.ShardRelease{};
-        dvui.tooltip(
+        core.widgets.tooltip(
             @src(),
             .{ .active_rect = no_build_box.data().borderRectScale().r },
             "The store build of this plugin (v{s}) needs Fizzy SDK {s} — this Fizzy is {d}.{d}.{d}. " ++
@@ -2949,7 +2952,7 @@ fn drawNoStoreBuild(entry: StoreEntry, opts: dvui.Options) void {
             .{},
         );
     } else if (!optimize_mismatch) {
-        dvui.tooltip(
+        core.widgets.tooltip(
             @src(),
             .{ .active_rect = no_build_box.data().borderRectScale().r },
             "No compatible build in store (SDK {d}.{d}.{d} · ABI 0x{x} · {s})",
@@ -2957,7 +2960,7 @@ fn drawNoStoreBuild(entry: StoreEntry, opts: dvui.Options) void {
             .{},
         );
     } else {
-        dvui.tooltip(
+        core.widgets.tooltip(
             @src(),
             .{ .active_rect = no_build_box.data().borderRectScale().r },
             "This Fizzy is a {s} build. Store plugins are published ReleaseFast only, so the " ++

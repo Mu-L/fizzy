@@ -217,22 +217,12 @@ fn drawOption(
         tooltip.init(@src(), .{
             .active_rect = bw.data().rectScale().r,
             .delay = 350_000,
-        }, .{
-            .id_extra = index,
-            .color_fill = .{ .color = dvui.themeGet().color(.window, .fill) },
-            .border = dvui.Rect.all(0),
-            .box_shadow = .{
-                .color = .black,
-                .shrink = 0,
-                .corners = dvui.CornerRect.all(8),
-                .offset = .{ .x = 0, .y = 2 },
-                .fade = 4,
-                .alpha = 0.2,
-            },
-        });
+        }, fizzy.core.dialogs.tooltipOptions(index));
         defer tooltip.deinit();
 
         if (tooltip.shown()) {
+            // The floating surface every tooltip wears (`core.dialogs.tooltipSurface`).
+            fizzy.core.dialogs.tooltipSurface(tooltip.data());
             var animator = dvui.animate(@src(), .{
                 .kind = .alpha,
                 .duration = 350_000,

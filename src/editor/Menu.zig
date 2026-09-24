@@ -72,22 +72,9 @@ const chrome = fizzy.core.dialogs;
 /// inside `init` where nothing outside can get in front of it. See
 /// `core/widgets/menu/FloatingMenu.zig`.
 fn menuPopup(src: std.builtin.SourceLocation, from: dvui.Rect.Natural, id_extra: usize) *widgets.FloatingMenuWidget {
-    return widgets.floatingMenu(src, .{ .from = from, .frost = frostPane() }, .{
+    return widgets.floatingMenu(src, .{ .from = from, .frost = widgets.menuFrost() }, widgets.menuSurfaceOptions().override(.{
         .id_extra = id_extra,
-        .background = true,
-        .color_fill = .{ .color = chrome.dialogFill() },
-        .border = .all(0),
-        .corners = chrome.surface_corners,
-        .padding = chrome.surface_padding,
-        .box_shadow = chrome.surfaceShadow(),
-    });
-}
-
-/// The blur behind a menu, as `core.dialogs` describes it for every floating surface. Null when
-/// the style has the blur off, which the panel then simply draws without.
-fn frostPane() ?fizzy.core.widgets.BlurBackdrop.Pane {
-    const f = chrome.dialogFrost() orelse return null;
-    return .{ .radius = f.radius, .refresh_ms = f.refresh_ms, .tint = f.tint, .mix = f.mix, .lift = f.lift };
+    }));
 }
 
 /// The menu bar's top-level titles wear the same fills as every row.

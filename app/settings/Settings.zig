@@ -68,6 +68,9 @@ dialog_blur: f32 = 20,
 /// How much lighter a dialog or the palette is than what is behind it, 0 to 1.
 dialog_lift: f32 = 0.3,
 
+/// How much of what is behind a dialog or the palette stays readable through its blur, 0 to 1.
+dialog_detail: f32 = 0.3,
+
 /// Canvas zoom/pan control scheme shared by the image viewer, pixi, and any other
 /// `CanvasWidget` consumer. `auto` picks mouse vs trackpad from `dvui.mouseType()`.
 input_scheme: InputScheme = .auto,

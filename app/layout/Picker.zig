@@ -84,20 +84,16 @@ pub fn draw(self: *Picker, f: *Layout) void {
     const contents = f.matchingIn(&region);
     const theme = dvui.themeGet();
 
-    // Same card as the command palette's panel: translucent content fill, rounded, no border,
-    // soft drop shadow. A floating chooser and a floating palette are the same kind of thing, so
-    // they read as one surface style rather than two.
-    var popup = dvui.popup(@src(), .{ .open_flag = &self.is_open, .from = self.anchor }, .{
+    // The one floating surface (`core.dialogs`): frosted, the dialogs' fill, corners and shadow
+    // — what the command palette, the dialogs and every menu wear. It had its own card (an
+    // opaque-ish content fill, no blur), so it read as a different kind of thing from them.
+    var popup = core.widgets.popup(@src(), .{
+        .open_flag = &self.is_open,
+        .from = self.anchor,
+        .frost = core.widgets.menuFrost(),
+    }, core.widgets.menuSurfaceOptions().override(.{
         .padding = dvui.Rect.all(8),
-        .color_fill = .{ .color = theme.color(.content, .fill).opacity(0.95) },
-        .corners = dvui.CornerRect.all(8),
-        .border = .all(0),
-        .box_shadow = .{
-            .fade = 8,
-            .corners = .all(8),
-            .alpha = 0.25,
-        },
-    }) orelse {
+    })) orelse {
         // Just closed.
         self.close(gpa);
         state.discardSnapshots(gpa);
