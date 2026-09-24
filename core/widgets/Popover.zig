@@ -92,6 +92,15 @@ pub fn init(src: std.builtin.SourceLocation, init_opts: InitOptions) Popover {
     });
     // Not a window anyone drags: no drag area, so the pointer over it is not the move cursor.
     win.dragAreaSet(.{});
+    // Always the size of its rows. The window's auto-size switches itself off once it settles
+    // (right for a window someone resizes, and nobody resizes a popover), so rows that change
+    // while it is open — an Uninstall appearing when an install lands — were cut off. Turned
+    // back on whenever last frame's rows no longer match the size; it grows (or shrinks) with
+    // the same animation it opened with.
+    if (dvui.minSizeGet(win.data().id)) |ms| {
+        const want = dvui.Size.min(ms, .cast(dvui.windowRect().size()));
+        if (@abs(want.w - r.w) > 0.5 or @abs(want.h - r.h) > 0.5) win.autoSize();
+    }
     return .{ .win = win, .rect = win.data().borderRectScale().r, .keep = init_opts.keep };
 }
 
