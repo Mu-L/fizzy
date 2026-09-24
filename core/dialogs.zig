@@ -200,9 +200,9 @@ fn tooltipSurfaceWith(wd: *dvui.WidgetData, frost_fade: f32, paint_fade: f32) vo
         brs.r.fill(phys_corners, .{ .color = .{ .color = dialogFill().opacity(p) } });
         return;
     };
-    // Under a pixel of blur there is nothing to see yet — and a backdrop kept from an earlier
-    // showing would otherwise redraw its old capture here for a frame.
-    if (f.radius * t < 1) return;
+    // Under a couple of pixels of blur there is nothing to see yet, and too little for the blur
+    // to make a pass at all.
+    if (f.radius * t < 2) return;
     widgets.BlurBackdrop.frostPane(wd.id, brs.r, tooltip_corners, brs.s, .{
         .radius = f.radius * t,
         .refresh_ms = f.refresh_ms,

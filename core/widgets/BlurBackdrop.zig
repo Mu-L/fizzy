@@ -647,7 +647,13 @@ fn runKawase(self: *BlurBackdrop, source: Texture, restore_target: bool, first: 
         slot += 1;
     }
 
-    const done = last orelse return null;
+    // Nothing blurred (a radius too small for a pass): no result — not the last capture's.
+    // Left in place, `small` was drawn at this capture's rect as if it were current, and a
+    // tooltip fading in from a sub-pixel blur flashed its previous showing's backdrop.
+    const done = last orelse {
+        self.small = null;
+        return null;
+    };
     dither(cur);
     self.small = cur;
     return done;
@@ -755,7 +761,13 @@ fn runFine(self: *BlurBackdrop, source: Texture, restore_target: bool, first: us
         last = pslot;
     }
 
-    const done = last orelse return null;
+    // Nothing blurred (a radius too small for a pass): no result — not the last capture's.
+    // Left in place, `small` was drawn at this capture's rect as if it were current, and a
+    // tooltip fading in from a sub-pixel blur flashed its previous showing's backdrop.
+    const done = last orelse {
+        self.small = null;
+        return null;
+    };
     dither(cur);
     self.small = cur;
     return done;
