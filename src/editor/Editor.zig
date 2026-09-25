@@ -971,7 +971,7 @@ pub fn rebuildExtensionOwnerCache(editor: *Editor) void {
 
     for (ids.items) |id| {
         const plugin = editor.app.host.pluginById(id) orelse continue;
-        const exts = App.readPluginExtensions(gpa, data, id);
+        const exts = editor.app.pluginExtensions(data, id);
         defer SettingsPluginsZon.freeExtensions(gpa, exts);
 
         for (exts) |ext| {
@@ -1023,11 +1023,20 @@ pub fn resolveExtensionConflict(editor: *Editor, ext: []const u8, chosen_id: []c
     const entries = try SettingsPluginsZon.listPluginBlocks(gpa, data);
     defer SettingsPluginsZon.freeEntries(gpa, entries);
 
+    // Plus every id with a decision not yet on disk: an earlier choice still waiting for its
+    // write is as real as one in the file, and has to be stripped just the same.
+    var ids: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer ids.deinit(gpa);
+    for (entries) |entry| try ids.put(gpa, entry.id, {});
+    for (editor.app.plugin_extensions_pending.keys()) |id| try ids.put(gpa, id, {});
+
     var seen_chosen = false;
-    for (entries) |entry| {
-        const is_chosen = std.mem.eql(u8, entry.id, chosen_id);
+    for (ids.keys()) |entry_id| {
+        const is_chosen = std.mem.eql(u8, entry_id, chosen_id);
         if (is_chosen) seen_chosen = true;
-        const current = App.readPluginExtensions(gpa, data, entry.id);
+        // Read before `setPluginExtensionsPersisted` below replaces (and frees) this id's pending
+        // list — `entry_id` may be that list's own key, which the replace leaves in place.
+        const current = editor.app.pluginExtensions(data, entry_id);
         defer SettingsPluginsZon.freeExtensions(gpa, current);
 
         var next: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -1057,7 +1066,7 @@ pub fn resolveExtensionConflict(editor: *Editor, ext: []const u8, chosen_id: []c
             next.deinit(gpa);
             continue;
         }
-        try editor.app.setPluginExtensionsPersisted(entry.id, try next.toOwnedSlice(gpa));
+        try editor.app.setPluginExtensionsPersisted(entry_id, try next.toOwnedSlice(gpa));
     }
 
     // The chosen plugin may have no block on disk yet (first ever decision about it).

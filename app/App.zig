@@ -934,6 +934,25 @@ pub fn recordPluginFailure(
     };
 }
 
+/// `id`'s `.extensions` as they stand: a decision still waiting in `plugin_extensions_pending`
+/// over what `settings_data` has on disk. The pending list is the newer answer, and it can wait a
+/// while — on the web a flush only marks settings dirty for the next autosave — so anything that
+/// reads ownership back must read it here, not from the file alone. Caller frees with
+/// `SettingsPluginsZon.freeExtensions`.
+pub fn pluginExtensions(app: *App, settings_data: ?[:0]const u8, id: []const u8) []const []const u8 {
+    const gpa = app.gpa;
+    const pending = app.plugin_extensions_pending.get(id) orelse return readPluginExtensions(gpa, settings_data, id);
+    const out = gpa.alloc([]const u8, pending.len) catch return &.{};
+    for (pending, 0..) |e, i| {
+        out[i] = gpa.dupe(u8, e) catch {
+            for (out[0..i]) |d| gpa.free(d);
+            gpa.free(out);
+            return &.{};
+        };
+    }
+    return out;
+}
+
 /// Buffer `id`'s complete new `.extensions` list. Takes ownership of `exts` and every string in
 /// it. Buffered rather than written per call so one Confirm covering several extensions produces
 /// a single `settings.zon` write; `resolveExtensionConflict` flushes at the end.
