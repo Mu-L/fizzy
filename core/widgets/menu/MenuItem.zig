@@ -86,6 +86,10 @@ pub fn drawBackground(self: *MenuItem) void {
 
     if (self.data().id == dvui.focusedWidgetIdInCurrentSubwindow()) {
         menu().?.focused_menuItem_this_frame = true;
+        // Which title's submenu is open, as of the frame before a press reads it.
+        if (self.init_opts.submenu and menu().?.submenus_activated) {
+            dvui.dataSet(null, menu().?.data().id, "_open_item", self.data().id);
+        }
     }
 
     if (focused and menu().?.mouse_over and !self.mouse_over and (menu().?.submenus_activated or menu().?.floating())) {
@@ -246,7 +250,14 @@ pub fn processEvent(self: *MenuItem, e: *Event) void {
                 e.handle(@src(), self.data());
                 if (self.init_opts.submenu) {
                     dvui.dataRemove(null, menu().?.data().id, "_submenus_activating");
-                    if (!menu().?.floating() and !menu().?.submenus_activated) {
+                    // A press that opens a submenu, or moves to another title's, is not a toggle:
+                    // mark it so the release does not close what the press opened. Only a press on
+                    // the title whose submenu is already open closes it. With a mouse the hover has
+                    // moved the open submenu here before any click, so this is the old behaviour;
+                    // a tap has no hover, and the release used to shut the menu it had just switched to.
+                    const open_here = menu().?.submenus_activated and
+                        dvui.dataGet(null, menu().?.data().id, "_open_item", dvui.Id) == self.data().id;
+                    if (!menu().?.floating() and !open_here) {
                         // If not floating, then we are toggling focus-on-hover, set a bit
                         dvui.dataSet(null, menu().?.data().id, "_submenus_activating", {});
                     }
