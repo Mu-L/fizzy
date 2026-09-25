@@ -51,16 +51,19 @@ pub fn showOpenFileDialog(
     dvui.dialogWasmFileOpenMultiple(open_picker_id.?, .{});
 }
 
-/// Opens the in-app save dialog; `Editor.processPendingSaveAs` consumes the chosen name.
+/// Opens the in-app save dialog and hands the chosen name to `cb`, as a native save panel
+/// would — `host.showSaveDialog` lands here for a plugin's export. The document's own Save As
+/// does not come through here (`Editor.requestSaveAs` asks `WebSaveAs` directly), so this never
+/// feeds `pending_save_filename`: a plugin's export must not download or rename the document.
 pub fn showSaveFileDialog(
-    _: *const fn (?[][:0]const u8) void,
-    _: []const fizzy.backend.DialogFileFilter,
+    cb: *const fn (?[][:0]const u8) void,
+    filters: []const fizzy.backend.DialogFileFilter,
     default_filename: []const u8,
     _: ?[]const u8,
 ) void {
     if (comptime builtin.target.cpu.arch != .wasm32) return;
     const WebSaveAs = @import("dialogs/WebSaveAs.zig");
-    WebSaveAs.request(default_filename, .save_as);
+    WebSaveAs.requestExport(cb, filters, default_filename);
 }
 
 /// Poll the wasm file picker once per frame. Loads picked files synchronously.

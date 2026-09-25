@@ -187,7 +187,7 @@ pub const modifier_shift: c_ulong = 0;
 pub const modifier_option: c_ulong = 0;
 pub const modifier_control: c_ulong = 0;
 
-/// Web's dialog callbacks run synchronously from `WebFileIo` within the frame already, so
+/// Web's dialog callbacks run synchronously within the frame already (`WebSaveAs.callAfter`), so
 /// there's nothing to drain here. Kept symmetric with the native backend's deferred-dispatch
 /// queue (see `backend_native.pollPendingDialogResult`) so `Editor.tick` can call it unconditionally.
 pub const PendingDialogResult = struct {

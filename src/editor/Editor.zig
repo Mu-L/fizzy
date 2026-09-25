@@ -5096,6 +5096,12 @@ pub fn requestSaveAs(editor: *Editor) void {
         return;
     };
     defer editor.app.gpa.free(def);
+    if (comptime builtin.target.cpu.arch == .wasm32) {
+        // The browser's save panel is ours, and `showSaveFileDialog` there belongs to plugin
+        // exports; the document's name goes through `pending_save_filename` instead.
+        Dialogs.WebSaveAs.request(def, .save_as);
+        return;
+    }
     const current_file_dir: ?[]const u8 = std.fs.path.dirname(doc.owner.documentPath(doc));
     fizzy.backend.showSaveFileDialog(saveAsDialogCallback, &save_as_dialog_filters, def, current_file_dir);
 }

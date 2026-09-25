@@ -24,7 +24,7 @@ pub const WebSaveAs = if (builtin.target.cpu.arch == .wasm32)
     @import("WebSaveAs.zig")
 else
     struct {
-        pub const Kind = enum { save, save_as };
+        pub const Kind = enum { save, save_as, export_to };
         pub fn request(_: []const u8, _: Kind) void {}
         pub fn active(_: *dvui.Window) bool {
             return false;
