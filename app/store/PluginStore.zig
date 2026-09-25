@@ -2903,6 +2903,27 @@ const no_build_msg_max_w: f32 = 110;
 /// width just by which list it's in. Out-of-class hosts (see `host_optimize_matches_store`) get
 /// the optimize-mode wording plus the same alert icon a failed local load carries; the tooltip
 /// holds the long-form explanation in both cases.
+/// Beside a running plugin the store has a newer version of that this Fizzy cannot install:
+/// built for a newer SDK than this Fizzy's, or this Fizzy is not a release build the store
+/// publishes for. Draws nothing when the store has nothing newer.
+fn drawUpdateBlocked(entry: StoreEntry) void {
+    const latest_s = latestRegistryVersion(entry) orelse return;
+    const latest = std.SemanticVersion.parse(latest_s) catch return;
+    const installed = installedVersion(entry.id) orelse return;
+    if (latest.order(installed) != .gt) return;
+    var buf: [96]u8 = undefined;
+    const why = if (!host_optimize_matches_store)
+        std.fmt.bufPrint(&buf, "v{s} needs a release build of Fizzy", .{latest_s}) catch return
+    else
+        std.fmt.bufPrint(&buf, "v{s} needs a newer Fizzy (SDK {d}.{d}.{d} here)", .{ latest_s, version.sdk_version.major, version.sdk_version.minor, version.sdk_version.patch }) catch return;
+    dvui.labelNoFmt(@src(), why, .{}, .{
+        .gravity_y = 0.5,
+        .margin = .{ .x = 4, .w = 4 },
+        .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.7) },
+        .font = dvui.Font.theme(.body).larger(-1.0),
+    });
+}
+
 fn drawNoStoreBuild(entry: StoreEntry, opts: dvui.Options) void {
     const theme = dvui.themeGet();
 
@@ -3134,6 +3155,9 @@ fn drawCardControls(entry: StoreEntry) void {
                 if (dvui.button(@src(), "Update", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
                     startDownload(entry.id, rel, .{ .is_update = true });
             }
+            // The store lists a newer version, but not one this Fizzy can take: say why, rather
+            // than show "store v0.1.32 · installed v0.1.31" and no Update button with no reason.
+            if (updateRelease(entry) == null) drawUpdateBlocked(entry);
         } else if (undecided) {
             if (dvui.button(@src(), "Load", .{}, .{ .gravity_y = 0.5, .margin = .{ .x = 4 } }))
                 queueSetEnabled(entry.id, true);
