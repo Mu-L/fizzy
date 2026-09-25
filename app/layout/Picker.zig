@@ -145,14 +145,22 @@ pub fn draw(self: *Picker, f: *Layout) void {
             // Vertical / Horizontal name the divider: a vertical bar is side by
             // side (the layout axis is horizontal). The old "split horizontally"
             // label was that axis and read as the opposite split.
-            var split: dvui.DropdownWidget = undefined;
-            split.init(@src(), .{}, .{
+            //
+            // On `core.widgets`' menu chain, not a `dvui.DropdownWidget`: this popup is a core
+            // floating menu, and dvui's dropdown opens its list on dvui's own chain, which this
+            // popup cannot see. The popup took the list taking focus for focus moving elsewhere,
+            // and closed — so Split shut the picker instead of offering the two choices.
+            const split = core.widgets.menuItem(@src(), .{ .submenu = true }, .{
                 .font = actionFont(),
                 .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 },
                 .margin = .{ .w = 4 },
                 .gravity_y = 0.5,
+                .background = true,
+                .border = dvui.ButtonWidget.defaults.border,
+                .corners = dvui.ButtonWidget.defaults.corners,
+                .style = .control,
             });
-            defer split.deinit();
+            const split_from = split.activeRect();
             {
                 var label = dvui.box(@src(), .{ .dir = .horizontal }, .{});
                 defer label.deinit();
@@ -167,14 +175,23 @@ pub fn draw(self: *Picker, f: *Layout) void {
                     .gravity_y = 0.5,
                 });
             }
-            if (split.dropped()) {
-                if (split.addChoiceLabel("Vertical")) {
+            split.deinit();
+            if (split_from) |r| {
+                const choices = core.widgets.floatingMenu(@src(), .{
+                    .from = r,
+                    .avoid = .vertical,
+                    .frost = core.widgets.menuFrost(),
+                }, core.widgets.menuSurfaceOptions());
+                defer choices.deinit();
+                if (core.widgets.menuRow(@src(), "Vertical", .{}) != null) {
+                    choices.close();
                     f.splitNamed(region.name, .horizontal);
                     self.close(gpa);
                     state.discardSnapshots(gpa);
                     return;
                 }
-                if (split.addChoiceLabel("Horizontal")) {
+                if (core.widgets.menuRow(@src(), "Horizontal", .{ .id_extra = 1 }) != null) {
+                    choices.close();
                     f.splitNamed(region.name, .vertical);
                     self.close(gpa);
                     state.discardSnapshots(gpa);

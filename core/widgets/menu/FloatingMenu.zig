@@ -93,6 +93,10 @@ prev_scroll: ?*dvui.ScrollContainerWidget = undefined,
 prev_last_focus: dvui.Id,
 parent_fmw: ?*FloatingMenu = null,
 have_popup_child: bool = false,
+/// A press this frame landed on a menu opened from this one (or from one of its own). A popup
+/// closes on a press outside its rect, and a submenu hanging past the popup's edge is outside it —
+/// without this, touching a row there closed the whole chain before the row could take the release.
+focus_in_child: bool = false,
 prevClip: Rect.Physical,
 scale_val: f32,
 menu: Menu,
@@ -192,6 +196,8 @@ pub fn init(self: *FloatingMenu, src: std.builtin.SourceLocation, init_opts: Ini
         if (e.evt == .mouse and e.evt.mouse.action == .focus) {
             // focus but let the focus event propagate to widgets
             dvui.focusSubwindow(self.data().id, e.num);
+            var ancestor = self.parent_fmw;
+            while (ancestor) |a| : (ancestor = a.parent_fmw) a.focus_in_child = true;
         }
     }
 
@@ -296,7 +302,7 @@ pub fn deinit(self: *FloatingMenu) void {
     const evts = dvui.events();
     const rs = self.data().rectScale();
     for (evts) |*e| {
-        if (self.style == .popup and e.evt == .mouse and e.evt.mouse.action == .focus and !rs.r.contains(e.evt.mouse.p)) {
+        if (self.style == .popup and !self.focus_in_child and e.evt == .mouse and e.evt.mouse.action == .focus and !rs.r.contains(e.evt.mouse.p)) {
             self.menu.close_chain(.unintentional);
             dvui.refresh(null, @src(), self.data().id);
         }
