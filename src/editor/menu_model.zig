@@ -154,11 +154,16 @@ fn dvuiMenuDebugTitle(_: *Editor) [:0]const u8 {
     return if (Editor.Menu.debug_force_on_macos) "Hide DVUI Menu (macOS)" else "Show DVUI Menu (macOS)";
 }
 
+/// A page cannot read a directory tree, so the web has no Open Folder (`Keybinds`).
+fn canOpenFolder(_: *Editor) bool {
+    return @import("builtin").target.cpu.arch != .wasm32;
+}
+
 // ---- the menu bar -----------------------------------------------------------------------------
 
 const file_items = [_]Item{
     .{ .command = .{ .id = "fizzy.newFile", .title = .{ .static = "New File…" }, .sf_symbol = "doc.badge.plus" } },
-    .{ .command = .{ .id = "fizzy.openFolder", .title = .{ .static = "Open Folder" }, .sf_symbol = "folder" } },
+    .{ .command = .{ .id = "fizzy.openFolder", .title = .{ .static = "Open Folder" }, .sf_symbol = "folder", .visible = canOpenFolder } },
     // Not "doc.on.doc": that is the system's Copy glyph, which the Edit menu below uses.
     .{ .command = .{ .id = "fizzy.openFiles", .title = .{ .static = "Open Files" }, .sf_symbol = "doc.text" } },
     .open_actions,

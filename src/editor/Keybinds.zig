@@ -141,7 +141,6 @@ const fizzy_commands = [_]FizzyCommand{
     // sign-in and its folder picker. No default key: nobody reaches for a shortcut to focus the
     // window they are already looking at, and the command exists so `Host.runCommand` can.
     .{ .id = "fizzy.focusWindow", .title = "Bring Fizzy to the Front", .bind = null, .run = cmdFocusWindow, .icon = icons.tvg.lucide.@"app-window" },
-    .{ .id = "fizzy.openFolder", .title = "Open Folder…", .bind = "open_folder", .run = cmdOpenFolder, .icon = icons.tvg.lucide.@"folder-open" },
     .{ .id = "fizzy.openFiles", .title = "Open Files…", .bind = "open_files", .run = cmdOpenFiles, .icon = icons.tvg.lucide.files },
     .{ .id = "fizzy.newFile", .title = "New File…", .bind = "new_file", .run = cmdNewFile, .icon = icons.tvg.lucide.@"file-plus" },
     .{ .id = "fizzy.save", .title = "Save", .bind = "save", .run = cmdSave, .icon = icons.tvg.lucide.save },
@@ -167,6 +166,13 @@ const fizzy_commands = [_]FizzyCommand{
     .{ .id = "fizzy.about", .title = "About Fizzy", .bind = null, .run = cmdAbout, .icon = icons.tvg.lucide.download },
     .{ .id = "fizzy.reportBug", .title = "Report a Bug", .bind = null, .run = cmdReportBug, .icon = icons.tvg.lucide.bug },
     .{ .id = "fizzy.toggleProfiler", .title = "Toggle Profiler", .bind = null, .run = cmdToggleProfiler, .icon = icons.tvg.lucide.gauge },
+} ++ open_folder_commands;
+
+const is_web = builtin.target.cpu.arch == .wasm32;
+
+/// Not on the web: see `open_folder_defaults`.
+const open_folder_commands = if (is_web) [_]FizzyCommand{} else [_]FizzyCommand{
+    .{ .id = "fizzy.openFolder", .title = "Open Folder…", .bind = "open_folder", .run = cmdOpenFolder, .icon = icons.tvg.lucide.@"folder-open" },
 };
 
 // Ids and bind names must both be unique: a duplicate id would make `Host.runCommand`
@@ -420,7 +426,6 @@ const vscode_defaults = [_]DefaultBind{
     .{ .command = "fizzy.saveAs", .keys = "mod+shift+s" },
     .{ .command = "fizzy.saveAll", .keys = "mod+alt+s" },
     .{ .command = "fizzy.newFile", .keys = "mod+n" },
-    .{ .command = "fizzy.openFolder", .keys = "mod+f" },
     .{ .command = "fizzy.openFiles", .keys = "mod+o" },
     .{ .command = "fizzy.toggleExplorer", .keys = "mod+e" },
     .{ .command = "fizzy.undo", .keys = "mod+z" },
@@ -430,6 +435,12 @@ const vscode_defaults = [_]DefaultBind{
     .{ .command = "fizzy.commandPalette", .keys = "mod+shift+p" },
     // The platform's own: F11 in VSCode and browsers, ⌃⌘F in every macOS app.
     .{ .command = "fizzy.toggleFullScreen", .keys = "f11", .keys_mac = "ctrl+cmd+f" },
+} ++ open_folder_defaults;
+
+/// The web has no folder to open — a page cannot read a directory tree — so Open Folder does not
+/// exist there at all, and neither does its key: ⌘F stays the browser's Find.
+const open_folder_defaults = if (is_web) [_]DefaultBind{} else [_]DefaultBind{
+    .{ .command = "fizzy.openFolder", .keys = "mod+f" },
 };
 
 /// C2-lite bridge: owner-scoped plugin defaults that still can't live on `Command.default_keys`

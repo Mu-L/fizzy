@@ -116,6 +116,19 @@ fn drawNativeEmpty() void {
         // and silently no-ops — same fix as the homepage button and File menu item.
         runtime.host().showOpenFolderDialog(Workspace.setProjectFolderCallback, null);
     }
+    drawOpenActions();
+}
+
+/// Plugins' own ways to open a folder — a cloud drive the user is signed in to — under fizzy's
+/// own button: the explorer is where a folder is chosen. Only those enabled now.
+fn drawOpenActions() void {
+    const host = runtime.host();
+    for (host.open_actions.items, 0..) |action, i| {
+        if (!host.openActionShown(action)) continue;
+        if (dvui.button(@src(), action.title, .{ .draw_focus = false }, .{ .expand = .horizontal, .id_extra = i })) {
+            host.runCommand(action.command) catch |err| dvui.log.warn("workbench: {s}: {t}", .{ action.id, err });
+        }
+    }
 }
 
 fn drawWebEmpty() !void {
@@ -155,6 +168,7 @@ fn drawWebEmpty() !void {
             null,
         );
     }
+    drawOpenActions();
 }
 
 /// The filter box above the roots. Returns the live filter text (arena-backed for the frame).
