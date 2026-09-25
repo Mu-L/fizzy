@@ -72,6 +72,10 @@ pub const Config = struct {
     app_version: []const u8,
     build_opts: *std.Build.Step.Options,
     app_name: []const u8,
+    app_display_name: []const u8,
+    app_bundle_id: []const u8,
+    app_config_dir: []const u8,
+    app_registry_url: []const u8,
     app_repo_url: []const u8,
     app_repo_url_fallback: []const u8,
     app_layout_path: ?std.Build.LazyPath,
@@ -278,6 +282,10 @@ pub fn readConfig(b: *std.Build, target: std.Build.ResolvedTarget, opts: Options
         .app_version = app_version,
         .build_opts = build_opts,
         .app_name = app_name,
+        .app_display_name = app_display_name,
+        .app_bundle_id = app_bundle_id,
+        .app_config_dir = app_config_dir,
+        .app_registry_url = app_registry_url,
         .app_repo_url = app_repo_url,
         .app_repo_url_fallback = app_repo_url_fallback,
         .app_layout_path = app_layout_path,
@@ -324,6 +332,10 @@ pub fn construct(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     const app_version = cfg.app_version;
     const build_opts = cfg.build_opts;
     const app_name = cfg.app_name;
+    const app_display_name = cfg.app_display_name;
+    const app_bundle_id = cfg.app_bundle_id;
+    const app_config_dir = cfg.app_config_dir;
+    const app_registry_url = cfg.app_registry_url;
     const app_repo_url = cfg.app_repo_url;
     const app_repo_url_fallback = cfg.app_repo_url_fallback;
     const app_layout_path = cfg.app_layout_path;
@@ -360,6 +372,13 @@ pub fn construct(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         if (!velopack_supported_for_target) break :package_blk main_fizzy;
         const pack_opts = b.addOptions();
         pack_opts.addOption([]const u8, "app_version", app_version);
+        // The same identity as `build_opts`: the packaged exe reads them through `AppInfo`
+        // like the plain one does, and a missing one only fails a packaging (release) build.
+        pack_opts.addOption([]const u8, "app_name", app_name);
+        pack_opts.addOption([]const u8, "app_display_name", app_display_name);
+        pack_opts.addOption([]const u8, "app_bundle_id", app_bundle_id);
+        pack_opts.addOption([]const u8, "app_config_dir", app_config_dir);
+        pack_opts.addOption([]const u8, "app_registry_url", app_registry_url);
         pack_opts.addOption([]const u8, "app_repo_url", app_repo_url);
         pack_opts.addOption([]const u8, "app_repo_url_fallback", app_repo_url_fallback);
         pack_opts.addOption(bool, "velopack_enabled", true);

@@ -41,6 +41,9 @@ fn trimVelopackLibTool(vz: Dep) *std.Build.Step.Compile {
 pub const LinkVelopackOptions = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    /// Other modules that `@cImport` `Velopack.h` — the `app` module's updater does, and an
+    /// include path on the exe's root module does not reach another module's C imports.
+    include_modules: []const *std.Build.Module = &.{},
 };
 
 /// Add include path + the correct prebuilt static lib + Windows ws2_32/bcrypt +
@@ -55,6 +58,7 @@ pub fn linkVelopack(
     const target = opts.target;
 
     compile.root_module.addIncludePath(velopack_dep.path("include"));
+    for (opts.include_modules) |m| m.addIncludePath(velopack_dep.path("include"));
 
     const lib_name = switch (target.result.os.tag) {
         .linux => switch (target.result.cpu.arch) {
