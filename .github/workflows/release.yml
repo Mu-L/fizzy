@@ -154,6 +154,24 @@ jobs:
       # used precisely for this Windows-on-Linux scenario. msvcup writes through
       # the mount, files land lowercase on the backing dir, all case-variant
       # lookups by Zig / clang / the linker resolve.
+      # The MSVC toolchain + Windows SDK msvcup installs never change unless velopack-zig's pinned
+      # package set (tools/msvcup.env) does, and that is fixed by the velopack_zig hash in
+      # build.zig.zon — so that hash is the key. Cached is the ciopfs *backing* dir: restored
+      # before the mount, it is what the mount shows, and setup-msvc.sh sees kernel32.Lib and
+      # the toolchain already there and skips the ~50-cab download (it still writes the
+      # zig-libc-*.ini files, which are cheap). A new velopack-zig pin misses and downloads once.
+      - name: MSVC SDK cache key (Windows targets)
+        if: endsWith(matrix.target, '-windows-msvc')
+        id: msvc-key
+        run: echo "pin=$(grep -o 'velopack_zig-[A-Za-z0-9._-]*' build.zig.zon | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache MSVC SDK (Windows targets)
+        if: endsWith(matrix.target, '-windows-msvc')
+        uses: actions/cache@v4
+        with:
+          path: .velopack-msvc-real
+          key: msvc-sdk-${{ steps.msvc-key.outputs.pin }}
+
       - name: Setup MSVC SDK (Windows targets)
         if: endsWith(matrix.target, '-windows-msvc')
         run: |
