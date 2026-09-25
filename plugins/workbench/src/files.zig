@@ -492,6 +492,8 @@ var row_pitch_px: f32 = 0;
 /// a row explains *why* it survived the filter (the same treatment the settings tree gives its
 /// rows). Null while no filter is active, which is the common case.
 pub fn editableLabel(id_extra: usize, label: []const u8, color: dvui.Color, kind: std.Io.File.Kind, full_path: []const u8, query: ?*const fuzzy.Query) !void {
+    const prof = core.profile.section("row label");
+    defer prof.end();
     const padding = dvui.Rect.all(3);
     const font = dvui.Font.theme(.body);
 
@@ -860,6 +862,7 @@ pub fn recurseFiles(root_directory: []const u8, root_label: []const u8, outer_tr
                     }
                 }
 
+                const prof_branch = core.profile.section("row branch");
                 const branch = tree.branch(@src(), .{
                     .expanded = expanded,
                     .animation_duration = 450_000,
@@ -881,6 +884,7 @@ pub fn recurseFiles(root_directory: []const u8, root_label: []const u8, outer_tr
                         core.widgets.hoverRestFill(dvui.themeGet().color(.control, .fill)) },
                     .padding = dvui.Rect.all(1),
                 });
+                prof_branch.end();
                 defer branch.deinit();
 
                 row_y = branch.data().borderRectScale().r.y;
@@ -960,6 +964,8 @@ pub fn recurseFiles(root_directory: []const u8, root_label: []const u8, outer_tr
                 }
 
                 { // Add right click context menu for item options
+                    const prof_ctx = core.profile.section("row context area");
+                    defer prof_ctx.end();
                     var context = core.widgets.context(@src(), .{ .rect = branch.button.data().borderRectScale().r }, .{ .id_extra = inner_id_extra.* });
                     defer context.deinit();
 
@@ -998,6 +1004,8 @@ pub fn recurseFiles(root_directory: []const u8, root_label: []const u8, outer_tr
                         // art at an arbitrary aspect ratio, so it is boxed to the shared row-glyph
                         // size like every other glyph rather than being trusted to behave.
                         {
+                            const prof_icon = core.profile.section("row icon");
+                            defer prof_icon.end();
                             var icon_slot = core.widgets.treeRowGlyph(@src(), .{ .margin = .{ .w = 2 } });
                             defer icon_slot.deinit();
 
