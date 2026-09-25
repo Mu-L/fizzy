@@ -9,6 +9,7 @@
 //! entry symbols need `callconv(.c)`.
 const std = @import("std");
 const dvui = @import("dvui");
+const core = @import("core");
 const DocHandle = @import("DocHandle.zig");
 const EditorAPI = @import("EditorAPI.zig");
 const infobar = @import("infobar.zig");
@@ -402,106 +403,158 @@ pub fn assertUtilityVTable(comptime vt: VTable) void {
 // Thin wrappers so callers don't repeat the optional-vtable dance.
 
 pub fn fileTypes(self: Plugin) []const []const u8 {
+    const prof = core.profile.begin(self.id, "fileTypes");
+    defer prof.end();
     return if (self.vtable.fileTypes) |f| f(self.state) else &.{};
 }
 
 pub fn contributeKeybinds(self: Plugin, win: *dvui.Window) !void {
+    const prof = core.profile.begin(self.id, "contributeKeybinds");
+    defer prof.end();
     if (self.vtable.contributeKeybinds) |f| try f(self.state, win);
 }
 
 pub fn tickKeybinds(self: Plugin) !void {
+    const prof = core.profile.begin(self.id, "tickKeybinds");
+    defer prof.end();
     if (self.vtable.tickKeybinds) |f| try f(self.state);
 }
 
 pub fn drawOverlay(self: Plugin) !void {
+    const prof = core.profile.begin(self.id, "drawOverlay");
+    defer prof.end();
     if (self.vtable.drawOverlay) |f| try f(self.state);
 }
 
 pub fn registerOpenDocument(self: Plugin, file: *anyopaque) !*anyopaque {
+    const prof = core.profile.begin(self.id, "registerOpenDocument");
+    defer prof.end();
     return if (self.vtable.registerOpenDocument) |f| try f(self.state, file) else error.Unsupported;
 }
 
 pub fn documentPtr(self: Plugin, id: u64) ?*anyopaque {
+    const prof = core.profile.begin(self.id, "documentPtr");
+    defer prof.end();
     return if (self.vtable.documentPtr) |f| f(self.state, id) else null;
 }
 
 pub fn documentByPath(self: Plugin, path: []const u8) ?*anyopaque {
+    const prof = core.profile.begin(self.id, "documentByPath");
+    defer prof.end();
     return if (self.vtable.documentByPath) |f| f(self.state, path) else null;
 }
 
 pub fn unregisterDocument(self: Plugin, id: u64) void {
+    const prof = core.profile.begin(self.id, "unregisterDocument");
+    defer prof.end();
     if (self.vtable.unregisterDocument) |f| f(self.state, id);
 }
 
 pub fn onFolderClose(self: Plugin) void {
+    const prof = core.profile.begin(self.id, "onFolderClose");
+    defer prof.end();
     if (self.vtable.onFolderClose) |f| f(self.state);
 }
 
 pub fn onFolderOpen(self: Plugin, allocator: std.mem.Allocator) void {
+    const prof = core.profile.begin(self.id, "onFolderOpen");
+    defer prof.end();
     if (self.vtable.onFolderOpen) |f| f(self.state, allocator);
 }
 
 pub fn documentContentChanged(self: Plugin, path: []const u8, bytes: []const u8) void {
+    const prof = core.profile.begin(self.id, "documentContentChanged");
+    defer prof.end();
     if (self.vtable.documentContentChanged) |f| f(self.state, path, bytes);
 }
 
 pub fn folderPathsChanged(self: Plugin, changes: PathChanges) void {
+    const prof = core.profile.begin(self.id, "folderPathsChanged");
+    defer prof.end();
     if (self.vtable.folderPathsChanged) |f| f(self.state, changes);
 }
 
 pub fn bindDocumentToPane(self: Plugin, doc: DocHandle, canvas_id: dvui.Id, workspace_handle: *anyopaque, center: bool) void {
+    const prof = core.profile.begin(self.id, "bindDocumentToPane");
+    defer prof.end();
     if (self.vtable.bindDocumentToPane) |f| f(self.state, doc, canvas_id, workspace_handle, center);
 }
 
 pub fn documentGrouping(self: Plugin, doc: DocHandle) u64 {
+    const prof = core.profile.begin(self.id, "documentGrouping");
+    defer prof.end();
     return if (self.vtable.documentGrouping) |f| f(self.state, doc) else 0;
 }
 
 pub fn setDocumentGrouping(self: Plugin, doc: DocHandle, grouping: u64) void {
+    const prof = core.profile.begin(self.id, "setDocumentGrouping");
+    defer prof.end();
     if (self.vtable.setDocumentGrouping) |f| f(self.state, doc, grouping);
 }
 
 pub fn removeCanvasPane(self: Plugin, grouping: u64, allocator: std.mem.Allocator) void {
+    const prof = core.profile.begin(self.id, "removeCanvasPane");
+    defer prof.end();
     if (self.vtable.removeCanvasPane) |f| f(self.state, grouping, allocator);
 }
 
 pub fn documentPath(self: Plugin, doc: DocHandle) []const u8 {
+    const prof = core.profile.begin(self.id, "documentPath");
+    defer prof.end();
     return if (self.vtable.documentPath) |f| f(self.state, doc) else "";
 }
 
 pub fn setDocumentPath(self: Plugin, doc: DocHandle, path: []const u8) !void {
+    const prof = core.profile.begin(self.id, "setDocumentPath");
+    defer prof.end();
     if (self.vtable.setDocumentPath) |f| try f(self.state, doc, path);
 }
 
 pub fn revealPosition(self: Plugin, doc: DocHandle, line: u32, character: u32) void {
+    const prof = core.profile.begin(self.id, "revealPosition");
+    defer prof.end();
     if (self.vtable.revealPosition) |f| f(self.state, doc, line, character);
 }
 
 pub fn documentHasNativeExtension(self: Plugin, doc: DocHandle) bool {
+    const prof = core.profile.begin(self.id, "documentHasNativeExtension");
+    defer prof.end();
     return if (self.vtable.documentHasNativeExtension) |f| f(self.state, doc) else false;
 }
 
 pub fn documentHasRecognizedSaveExtension(self: Plugin, doc: DocHandle) bool {
+    const prof = core.profile.begin(self.id, "documentHasRecognizedSaveExtension");
+    defer prof.end();
     return if (self.vtable.documentHasRecognizedSaveExtension) |f| f(self.state, doc) else false;
 }
 
 pub fn showsSaveStatusIndicator(self: Plugin, doc: DocHandle) bool {
+    const prof = core.profile.begin(self.id, "showsSaveStatusIndicator");
+    defer prof.end();
     return if (self.vtable.showsSaveStatusIndicator) |f| f(self.state, doc) else false;
 }
 
 pub fn isDocumentSaving(self: Plugin, doc: DocHandle) bool {
+    const prof = core.profile.begin(self.id, "isDocumentSaving");
+    defer prof.end();
     return if (self.vtable.isDocumentSaving) |f| f(self.state, doc) else false;
 }
 
 pub fn saveNeedsConfirmation(self: Plugin, doc: DocHandle) bool {
+    const prof = core.profile.begin(self.id, "saveNeedsConfirmation");
+    defer prof.end();
     return if (self.vtable.saveNeedsConfirmation) |f| f(self.state, doc) else false;
 }
 
 pub fn saveDocumentAsync(self: Plugin, doc: DocHandle) !void {
+    const prof = core.profile.begin(self.id, "saveDocumentAsync");
+    defer prof.end();
     if (self.vtable.saveDocumentAsync) |f| try f(self.state, doc);
 }
 
 pub fn timeSinceSaveCompleteNs(self: Plugin, doc: DocHandle) ?i128 {
+    const prof = core.profile.begin(self.id, "timeSinceSaveCompleteNs");
+    defer prof.end();
     return if (self.vtable.timeSinceSaveCompleteNs) |f| f(self.state, doc) else null;
 }
 
@@ -511,6 +564,8 @@ pub fn timeSinceSaveCompleteNs(self: Plugin, doc: DocHandle) ?i128 {
 /// handled it; `false` means this plugin exposes no loader (fizzy should treat the
 /// open as failed). See the `loadDocument` vtable field for the threading contract.
 pub fn loadDocument(self: Plugin, path: []const u8, out_doc: *anyopaque) !bool {
+    const prof = core.profile.begin(self.id, "loadDocument");
+    defer prof.end();
     if (self.vtable.loadDocument) |f| {
         try f(self.state, path, out_doc);
         return true;
@@ -520,6 +575,8 @@ pub fn loadDocument(self: Plugin, path: []const u8, out_doc: *anyopaque) !bool {
 
 /// `loadDocument`, but from in-memory `bytes` (browser file picker).
 pub fn loadDocumentFromBytes(self: Plugin, path: []const u8, bytes: []const u8, out_doc: *anyopaque) !bool {
+    const prof = core.profile.begin(self.id, "loadDocumentFromBytes");
+    defer prof.end();
     if (self.vtable.loadDocumentFromBytes) |f| {
         try f(self.state, path, bytes, out_doc);
         return true;
@@ -528,21 +585,29 @@ pub fn loadDocumentFromBytes(self: Plugin, path: []const u8, bytes: []const u8, 
 }
 
 pub fn isDirty(self: Plugin, doc: DocHandle) bool {
+    const prof = core.profile.begin(self.id, "isDirty");
+    defer prof.end();
     return if (self.vtable.isDirty) |f| f(self.state, doc) else false;
 }
 
 pub fn saveDocument(self: Plugin, doc: DocHandle) !void {
+    const prof = core.profile.begin(self.id, "saveDocument");
+    defer prof.end();
     if (self.vtable.saveDocument) |f| try f(self.state, doc);
 }
 
 /// Null when the owner has no storage-agnostic save (`documentBytes`), in which case the host
 /// cannot write it anywhere but the disk.
 pub fn documentBytes(self: Plugin, doc: DocHandle, allocator: std.mem.Allocator) !?[]u8 {
+    const prof = core.profile.begin(self.id, "documentBytes");
+    defer prof.end();
     const f = self.vtable.documentBytes orelse return null;
     return try f(self.state, doc, allocator);
 }
 
 pub fn documentWritten(self: Plugin, doc: DocHandle, path: []const u8) !void {
+    const prof = core.profile.begin(self.id, "documentWritten");
+    defer prof.end();
     if (self.vtable.documentWritten) |f| try f(self.state, doc, path);
 }
 
@@ -552,6 +617,8 @@ pub fn canSaveThroughHost(self: Plugin) bool {
 
 /// Reload from disk. Returns whether the plugin handled it (`false` = no hook).
 pub fn reloadDocument(self: Plugin, doc: DocHandle) bool {
+    const prof = core.profile.begin(self.id, "reloadDocument");
+    defer prof.end();
     if (self.vtable.reloadDocument) |f| {
         f(self.state, doc) catch |err| {
             std.log.err("reloadDocument failed: {s}", .{@errorName(err)});
@@ -565,6 +632,8 @@ pub fn reloadDocument(self: Plugin, doc: DocHandle) bool {
 /// Tear down an open document. Returns whether the plugin handled it, so fizzy
 /// can fall back to its own teardown when no plugin claims the document.
 pub fn closeDocument(self: Plugin, doc: DocHandle) bool {
+    const prof = core.profile.begin(self.id, "closeDocument");
+    defer prof.end();
     if (self.vtable.closeDocument) |f| {
         f(self.state, doc);
         return true;
@@ -573,18 +642,26 @@ pub fn closeDocument(self: Plugin, doc: DocHandle) bool {
 }
 
 pub fn undo(self: Plugin, doc: DocHandle) !void {
+    const prof = core.profile.begin(self.id, "undo");
+    defer prof.end();
     if (self.vtable.undo) |f| try f(self.state, doc);
 }
 
 pub fn redo(self: Plugin, doc: DocHandle) !void {
+    const prof = core.profile.begin(self.id, "redo");
+    defer prof.end();
     if (self.vtable.redo) |f| try f(self.state, doc);
 }
 
 pub fn canUndo(self: Plugin, doc: DocHandle) bool {
+    const prof = core.profile.begin(self.id, "canUndo");
+    defer prof.end();
     return if (self.vtable.canUndo) |f| f(self.state, doc) else false;
 }
 
 pub fn canRedo(self: Plugin, doc: DocHandle) bool {
+    const prof = core.profile.begin(self.id, "canRedo");
+    defer prof.end();
     return if (self.vtable.canRedo) |f| f(self.state, doc) else false;
 }
 
@@ -594,17 +671,23 @@ pub fn canRedo(self: Plugin, doc: DocHandle) bool {
 /// container, then routes here). Returns whether the plugin drew anything.
 /// What `doc`'s tab says, or null for the file name.
 pub fn documentTitle(self: Plugin, doc: DocHandle) ?[]const u8 {
+    const prof = core.profile.begin(self.id, "documentTitle");
+    defer prof.end();
     const f = self.vtable.documentTitle orelse return null;
     return f(self.state, doc);
 }
 
 /// The menu id for a right-click inside `doc`, or null when this plugin keeps its right-click.
 pub fn documentContextMenu(self: Plugin, doc: DocHandle) ?[]const u8 {
+    const prof = core.profile.begin(self.id, "documentContextMenu");
+    defer prof.end();
     const f = self.vtable.documentContextMenu orelse return null;
     return f(self.state, doc);
 }
 
 pub fn drawDocument(self: Plugin, doc: DocHandle) !bool {
+    const prof = core.profile.begin(self.id, "drawDocument");
+    defer prof.end();
     if (self.vtable.drawDocument) |f| {
         try f(self.state, doc);
         return true;
@@ -613,92 +696,136 @@ pub fn drawDocument(self: Plugin, doc: DocHandle) !bool {
 }
 
 pub fn infobarEntries(self: Plugin, active_doc: ?DocHandle) []const infobar.Entry {
+    const prof = core.profile.begin(self.id, "infobarEntries");
+    defer prof.end();
     return if (self.vtable.infobarEntries) |f| f(self.state, active_doc) else &.{};
 }
 
 pub fn deinit(self: Plugin) void {
+    const prof = core.profile.begin(self.id, "deinit");
+    defer prof.end();
     if (self.vtable.deinit) |f| f(self.state);
 }
 
 pub fn initPlugin(self: Plugin) !void {
+    const prof = core.profile.begin(self.id, "initPlugin");
+    defer prof.end();
     if (self.vtable.initPlugin) |f| try f(self.state);
 }
 
 pub fn documentStackSize(self: Plugin) usize {
+    const prof = core.profile.begin(self.id, "documentStackSize");
+    defer prof.end();
     return if (self.vtable.documentStackSize) |f| f(self.state) else 0;
 }
 
 pub fn documentStackAlign(self: Plugin) usize {
+    const prof = core.profile.begin(self.id, "documentStackAlign");
+    defer prof.end();
     return if (self.vtable.documentStackAlign) |f| f(self.state) else 1;
 }
 
 pub fn documentIdFromBuffer(self: Plugin, doc: *anyopaque) u64 {
+    const prof = core.profile.begin(self.id, "documentIdFromBuffer");
+    defer prof.end();
     return if (self.vtable.documentIdFromBuffer) |f| f(self.state, doc) else 0;
 }
 
 pub fn deinitDocumentBuffer(self: Plugin, doc: *anyopaque) void {
+    const prof = core.profile.begin(self.id, "deinitDocumentBuffer");
+    defer prof.end();
     if (self.vtable.deinitDocumentBuffer) |f| f(self.state, doc);
 }
 
 pub fn setDocumentGroupingOnBuffer(self: Plugin, doc: *anyopaque, grouping: u64) void {
+    const prof = core.profile.begin(self.id, "setDocumentGroupingOnBuffer");
+    defer prof.end();
     if (self.vtable.setDocumentGroupingOnBuffer) |f| f(self.state, doc, grouping);
 }
 
 pub fn createDocument(self: Plugin, path: []const u8, grid: EditorAPI.NewDocGrid, out_doc: *anyopaque) !void {
+    const prof = core.profile.begin(self.id, "createDocument");
+    defer prof.end();
     if (self.vtable.createDocument) |f| try f(self.state, path, grid, out_doc) else return error.Unsupported;
 }
 
 pub fn documentDefaultSaveAsFilename(self: Plugin, doc: DocHandle, allocator: std.mem.Allocator) ![]const u8 {
+    const prof = core.profile.begin(self.id, "documentDefaultSaveAsFilename");
+    defer prof.end();
     return if (self.vtable.documentDefaultSaveAsFilename) |f| try f(self.state, doc, allocator) else error.Unsupported;
 }
 
 pub fn saveDocumentAs(self: Plugin, doc: DocHandle, path: []const u8, window: *dvui.Window) !void {
+    const prof = core.profile.begin(self.id, "saveDocumentAs");
+    defer prof.end();
     if (self.vtable.saveDocumentAs) |f| try f(self.state, doc, path, window) else return error.Unsupported;
 }
 
 pub fn resetDocumentSaveUIState(self: Plugin, doc: DocHandle) void {
+    const prof = core.profile.begin(self.id, "resetDocumentSaveUIState");
+    defer prof.end();
     if (self.vtable.resetDocumentSaveUIState) |f| f(self.state, doc);
 }
 
 pub fn requestSaveConfirmation(self: Plugin, doc: DocHandle, mode: SaveConfirmMode, from_save_all_quit: bool) void {
+    const prof = core.profile.begin(self.id, "requestSaveConfirmation");
+    defer prof.end();
     if (self.vtable.requestSaveConfirmation) |f| f(self.state, doc, mode, from_save_all_quit);
 }
 
 pub fn settingsChanged(self: Plugin, blob: []const u8) void {
+    const prof = core.profile.begin(self.id, "settingsChanged");
+    defer prof.end();
     if (self.vtable.settingsChanged) |f| f(self.state, blob);
 }
 
 pub fn requestNewDocumentDialog(self: Plugin, kind: ?[]const u8, parent_path: ?[]const u8, id_extra: usize) void {
+    const prof = core.profile.begin(self.id, "requestNewDocumentDialog");
+    defer prof.end();
     if (self.vtable.requestNewDocumentDialog) |f| f(self.state, kind, parent_path, id_extra);
 }
 
 /// The kinds this plugin offers in the New File flow; empty when it declares none.
 pub fn newDocumentKinds(self: Plugin) []const NewDocumentKind {
+    const prof = core.profile.begin(self.id, "newDocumentKinds");
+    defer prof.end();
     const f = self.vtable.newDocumentKinds orelse return &.{};
     return f(self.state);
 }
 
 pub fn beginFrame(self: Plugin) void {
+    const prof = core.profile.begin(self.id, "beginFrame");
+    defer prof.end();
     if (self.vtable.beginFrame) |f| f(self.state);
 }
 
 pub fn prepareFrame(self: Plugin) void {
+    const prof = core.profile.begin(self.id, "prepareFrame");
+    defer prof.end();
     if (self.vtable.prepareFrame) |f| f(self.state);
 }
 
 pub fn endFrame(self: Plugin) void {
+    const prof = core.profile.begin(self.id, "endFrame");
+    defer prof.end();
     if (self.vtable.endFrame) |f| f(self.state);
 }
 
 pub fn tickOpenDocuments(self: Plugin) bool {
+    const prof = core.profile.begin(self.id, "tickOpenDocuments");
+    defer prof.end();
     return if (self.vtable.tickOpenDocuments) |f| f(self.state) else false;
 }
 
 pub fn tickActiveDocument(self: Plugin, timer_host_id: dvui.Id) void {
+    const prof = core.profile.begin(self.id, "tickActiveDocument");
+    defer prof.end();
     if (self.vtable.tickActiveDocument) |f| f(self.state, timer_host_id);
 }
 
 pub fn needsContinuousRepaint(self: Plugin) bool {
+    const prof = core.profile.begin(self.id, "needsContinuousRepaint");
+    defer prof.end();
     return if (self.vtable.needsContinuousRepaint) |f| f(self.state) else false;
 }
 

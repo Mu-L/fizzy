@@ -166,6 +166,7 @@ const fizzy_commands = [_]FizzyCommand{
     .{ .id = "fizzy.debugToggleDvuiMenuOnMacOS", .title = "Show DVUI Menu (macOS)", .bind = null, .run = cmdToggleDvuiMenuOnMacOS },
     .{ .id = "fizzy.about", .title = "About Fizzy", .bind = null, .run = cmdAbout, .icon = icons.tvg.lucide.download },
     .{ .id = "fizzy.reportBug", .title = "Report a Bug", .bind = null, .run = cmdReportBug, .icon = icons.tvg.lucide.bug },
+    .{ .id = "fizzy.toggleProfiler", .title = "Toggle Profiler", .bind = null, .run = cmdToggleProfiler, .icon = icons.tvg.lucide.gauge },
 };
 
 // Ids and bind names must both be unique: a duplicate id would make `Host.runCommand`
@@ -362,6 +363,10 @@ fn cmdToggleDvuiMenuOnMacOS(_: *anyopaque) anyerror!void {
 /// why Help → "Check for Updates…" is this same command.
 fn cmdAbout(_: *anyopaque) anyerror!void {
     Editor.Dialogs.AboutFizzy.request();
+}
+
+fn cmdToggleProfiler(_: *anyopaque) anyerror!void {
+    Editor.Profiler.toggle();
 }
 
 fn cmdReportBug(_: *anyopaque) anyerror!void {

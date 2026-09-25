@@ -515,7 +515,7 @@ fn drawSolid(self: *Layout, s: *Surface) !dvui.App.Result {
     if (self.state.snapshots_wanted and self.state.snapshot(s.id) == null) {
         if (try self.drawCaptured(s)) |r| return r;
     }
-    return s.draw(s.ctx);
+    return surfaceDraw(s);
 }
 
 /// `s.draw` into a texture the size of the current parent's content, then that texture onto the
@@ -534,7 +534,7 @@ fn drawCaptured(self: *Layout, s: *Surface) !?dvui.App.Result {
     pic.texture.clear();
     const old_clip = dvui.clipGet();
     dvui.clipSet(pic.r);
-    const result = s.draw(s.ctx);
+    const result = surfaceDraw(s);
     dvui.clipSet(old_clip);
     pic.stop();
     const texture = dvui.textureFromTarget(pic.texture) catch return try result;
@@ -574,7 +574,7 @@ pub fn captureUnplaced(self: *Layout) void {
         // settle-then-show the reveal does on screen, just without an audience.
         const warm = dvui.dataGet(null, box.data().id, "_warm", u8) orelse 0;
         if (warm < offscreen_warmup_frames) {
-            _ = s.draw(s.ctx) catch {};
+            _ = surfaceDraw(s) catch {};
             dvui.dataSet(null, box.data().id, "_warm", warm + 1);
             pending = true;
             continue;
@@ -643,7 +643,7 @@ fn drawSwapped(self: *Layout, slot: u64, s: *Surface, pack: ?*dvui.BoxWidget, bl
         fn drawPrev(ctx: *anyopaque) void {
             const c: *@This() = @ptrCast(@alignCast(ctx));
             if (c.layout.host.surfaceById(c.id)) |old| {
-                _ = old.draw(old.ctx) catch {};
+                _ = surfaceDraw(old) catch {};
             }
         }
 
@@ -847,7 +847,7 @@ pub fn drawPluginRegionContents(self: *Layout, token: sdk.RegionSpec.Token) !dvu
         if (self.host.surfaceById(id)) |w| if (w != s) {
             const prev_clip = dvui.clipGet();
             dvui.clipSet(.{});
-            _ = w.draw(w.ctx) catch {};
+            _ = surfaceDraw(w) catch {};
             dvui.clipSet(prev_clip);
             self.resetInnermostPack();
             // Another may be waiting; this one's work is done.
@@ -1066,3 +1066,12 @@ pub fn tabbed(_: ?*anyopaque, f: *Layout, keywords: []const []const u8) !dvui.Ap
 /// strips copies this recipe (see CLAUDE.md's shipped-shapes note) rather than fizzy growing a
 /// handle type for a case nothing has yet.
 var tab_info: core.widgets.Tabs.TabInfo = .{};
+
+
+/// A surface's draw, timed in the frame profiler under its owner (fizzy's own when it has none)
+/// and its id.
+fn surfaceDraw(s: *Surface) anyerror!dvui.App.Result {
+    const prof = core.profile.begin(if (s.owner) |o| o.id else "fizzy", s.id);
+    defer prof.end();
+    return s.draw(s.ctx);
+}

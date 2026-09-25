@@ -544,6 +544,8 @@ pub fn drawMenuSections(self: *Host, ctx: EditorAPI.MenuContext, after_rows: boo
             _ = dvui.separator(@src(), .{ .expand = .horizontal });
             drew_separator = true;
         }
+        const prof = core.profile.begin(if (section.owner) |o| o.id else "fizzy", section.id);
+        defer prof.end();
         section.draw(section.ctx) catch |err| {
             dvui.log.err("menu section '{s}' failed: {t}", .{ section.id, err });
         };
@@ -1043,6 +1045,8 @@ pub fn drawFileIcon(self: *Host, ext: []const u8, path: []const u8, color: dvui.
     // Painters first: they are the escape hatch for content-derived artwork (a sprite
     // thumbnail, an image preview), which should win over a generic per-kind glyph.
     for (self.painters.items) |drawer| {
+        const prof = core.profile.begin(if (drawer.owner) |o| o.id else "fizzy", "painter.file");
+        defer prof.end();
         if (drawer.draw(drawer.ctx, .{ .file = .{ .ext = ext, .path = path, .color = color } })) return true;
     }
 
@@ -1321,6 +1325,8 @@ pub fn commandEnabled(self: *Host, id: []const u8) bool {
 pub fn runCommand(self: *Host, id: []const u8) !void {
     const c = self.command(id) orelse return;
     const owner = c.owner orelse return;
+    const prof = core.profile.begin(owner.id, c.id);
+    defer prof.end();
     try c.run(owner.state);
 }
 

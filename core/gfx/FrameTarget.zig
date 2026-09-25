@@ -21,6 +21,7 @@
 //! backend without render targets neither does anything and the frame draws as before.
 const std = @import("std");
 const dvui = @import("dvui");
+const profile = @import("../profile.zig");
 
 const FrameTarget = @This();
 
@@ -50,7 +51,13 @@ pub fn begin(self: *FrameTarget) void {
     }
     const t = self.target.?;
     // `create` clears once; every frame after starts from what the last one left.
-    t.clear();
+    {
+        const prof = profile.begin("fizzy", "clear");
+        defer prof.end();
+        t.clear();
+    }
+    const prof_bind = profile.begin("fizzy", "bind");
+    defer prof_bind.end();
     var rt = dvui.currentWindow().render_target;
     rt.texture = t;
     rt.offset = .{};
@@ -65,12 +72,24 @@ pub fn end(self: *FrameTarget) void {
     const cw = dvui.currentWindow();
     // Deferred subwindows and toasts render here, still into the target. `Window.end` sees
     // this was done and does not do it again.
-    cw.endRendering(.{});
+    {
+        const prof = profile.begin("fizzy", "deferred subwindows (floating windows, dialogs)");
+        defer prof.end();
+        cw.endRendering(.{});
+    }
 
-    var rt = cw.render_target;
-    rt.texture = null;
-    rt.offset = .{};
-    _ = dvui.renderTarget(rt);
+    {
+        // On Metal the window's first draw of the frame acquires its drawable: this waits here
+        // when the GPU is still behind on earlier frames.
+        const prof = profile.begin("fizzy", "bind the window");
+        defer prof.end();
+        var rt = cw.render_target;
+        rt.texture = null;
+        rt.offset = .{};
+        _ = dvui.renderTarget(rt);
+    }
+    const prof_blit = profile.begin("fizzy", "blit");
+    defer prof_blit.end();
 
     const tex = dvui.Texture.fromTargetTemp(self.target.?) catch return;
     const prev_rendering = dvui.renderingSet(true);

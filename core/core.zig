@@ -26,6 +26,9 @@ pub const perf = @import("gfx/perf.zig");
 pub const FrameTarget = @import("gfx/FrameTarget.zig");
 /// TEMPORARY frame-hitch profiler (`FIZZY_HITCH_MS`).
 pub const hitch = @import("hitch.zig");
+/// The frame profiler behind the profiler window: fizzy's phases, plugin hooks and surfaces,
+/// and the sections plugins mark in their own code.
+pub const profile = @import("profile.zig");
 pub const water_surface = @import("gfx/water_surface.zig");
 pub const math = @import("math/math.zig");
 pub const fs = @import("fs.zig");

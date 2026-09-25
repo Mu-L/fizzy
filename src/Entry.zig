@@ -372,10 +372,22 @@ pub fn AppDeinit(_: *dvui.Window) void {
 pub fn AppFrame() !dvui.App.Result {
     fizzy.core.hitch.frameBegin();
     defer fizzy.core.hitch.frameEnd();
+    fizzy.core.profile.hostFrameBegin();
+    defer fizzy.core.profile.hostFrameEnd();
     singleton.drainPending();
     // The whole frame draws into a texture — see `core.FrameTarget` for why.
-    frame_target.begin();
-    defer frame_target.end();
+    {
+        const prof = fizzy.core.profile.begin("fizzy", "frame target: begin");
+        defer prof.end();
+        frame_target.begin();
+    }
+    defer {
+        const prof = fizzy.core.profile.begin("fizzy", "frame target: onto the window");
+        defer prof.end();
+        frame_target.end();
+    }
+    const prof_tick = fizzy.core.profile.begin("fizzy", "tick");
+    defer prof_tick.end();
     return try fizzy.editor().tick();
 }
 

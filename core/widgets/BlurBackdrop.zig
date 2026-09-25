@@ -904,6 +904,8 @@ const FrostJob = struct {
 
     fn draw(ctx: ?*anyopaque) void {
         const self: *FrostJob = @ptrCast(@alignCast(ctx orelse return));
+        const prof = @import("../profile.zig").begin("fizzy", "frost pane");
+        defer prof.end();
         // The capture, now that everything below this pane is on the target.
         self.backdrop.deinit();
         const tint = self.tint orelse {

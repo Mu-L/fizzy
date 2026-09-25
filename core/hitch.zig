@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const perf = @import("gfx/perf.zig");
+const profile = @import("profile.zig");
 
 pub const Phase = enum {
     watchers,
@@ -40,15 +41,18 @@ fn now() i128 {
 pub const Timer = struct {
     phase: Phase,
     start: i128,
+    /// The same phase in the frame profiler (`profile`), under "fizzy".
+    prof: profile.Scope = .{},
 
     pub fn end(self: Timer) void {
+        self.prof.end();
         if (!enabled) return;
         phase_ns[@intFromEnum(self.phase)] +%= @intCast(now() - self.start);
     }
 };
 
 pub fn begin(phase: Phase) Timer {
-    return .{ .phase = phase, .start = if (enabled) now() else 0 };
+    return .{ .phase = phase, .start = if (enabled) now() else 0, .prof = profile.begin("fizzy", @tagName(phase)) };
 }
 
 pub fn frameBegin() void {

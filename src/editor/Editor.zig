@@ -85,6 +85,7 @@ const AppInfo = @import("app").AppInfo;
 pub const FileLoadJob = workbench_mod.FileLoadJob;
 
 pub const sdk = fizzy.sdk;
+pub const Profiler = @import("Profiler.zig");
 pub const Host = sdk.Host;
 
 /// Workbench: the file-management home — file tree, open/load flow, and the
@@ -2677,7 +2678,7 @@ pub fn drawActiveCenter(editor: *Editor) !dvui.App.Result {
             // frames, and its `draw` pointer would be dangling. Errors are ignored — a provider
             // failing here must not take down the swap, it just means no fade.
             if (self.editor.app.host.surfaceById(self.prev_id)) |outgoing| {
-                _ = outgoing.draw(outgoing.ctx) catch {};
+                _ = profiledSurfaceDraw(outgoing) catch {};
             }
         }
 
@@ -2711,7 +2712,7 @@ pub fn drawActiveCenter(editor: *Editor) !dvui.App.Result {
     defer frame.deinit();
 
     editor.app.layout.center_prev_id = center.id;
-    return try center.draw(center.ctx);
+    return try profiledSurfaceDraw(center);
 }
 
 /// Looks up an open document by path. Exact match first (the hot path — file-tree paint hits
@@ -3879,6 +3880,9 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
 
     // look at demo() for examples of dvui widgets, shows in a floating window
     dvui.Examples.demo(.full);
+
+    // The profiler window, when open ("Toggle Profiler").
+    Profiler.draw();
 
     // Render any save-complete toasts in the same centered, content-fill-styled card system.
     // The dvui toast queue holds them with a 2.5s timeout; each toast's display function fades
@@ -5655,4 +5659,12 @@ pub fn pluginManager(editor: *Editor) PluginManager {
         .registry_url = AppInfo.current.registry_url,
         .vtable = &plugin_manager_vtable,
     };
+}
+
+
+/// A surface's draw, timed in the frame profiler under its owner and id (`core.profile`).
+fn profiledSurfaceDraw(s: *sdk.Surface) anyerror!dvui.App.Result {
+    const prof = fizzy.core.profile.begin(if (s.owner) |o| o.id else "fizzy", s.id);
+    defer prof.end();
+    return s.draw(s.ctx);
 }
