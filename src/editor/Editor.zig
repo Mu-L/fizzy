@@ -4793,9 +4793,11 @@ pub fn processLoadingJobs(editor: *Editor) void {
                     ) catch "Could not open file." });
                 }
             },
-            .cancelled => {
-                job.owner.deinitDocumentBuffer(job.doc_buf.ptr);
-            },
+            // Nothing to free: the worker marks a job cancelled either before it loaded
+            // anything (the staging buffer is still unwritten) or after it deinited the
+            // document itself (`FileLoadJob.workerMain`). Deiniting here again ran a
+            // plugin's `deinit` over garbage or over a freed document — a crash.
+            .cancelled => {},
             else => {
                 dvui.log.err("Load job finished in unexpected phase {s}: {s}", .{ @tagName(phase), job.path });
             },
