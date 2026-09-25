@@ -24,10 +24,16 @@ pub fn rebuildWorkspaces(wb: *Workbench) !void {
         loadPanes(wb);
         for (host.assignedRegionNames()) |region_name| {
             const grouping = Workspace.groupingOfName(region_name) orelse continue;
-            _ = try wb.pane(grouping);
             // A copy: the assignment is borrowed until the next `assignSurfaces`, and each open
             // below seats a loading placeholder in this pane, which reassigns it.
             const borrowed = host.assignedSurfaces(region_name) orelse continue;
+            // A pane that was empty when last session ended has nothing to bring back. Seating
+            // it would leave an empty pane beside the others with nothing ever coming to it.
+            if (borrowed.len == 0) {
+                host.assignSurfaces(try arena.dupe(u8, region_name), null) catch {};
+                continue;
+            }
+            _ = try wb.pane(grouping);
             const ids = try arena.alloc([]const u8, borrowed.len);
             for (borrowed, ids) |b, *c| c.* = try arena.dupe(u8, b);
             for (ids) |id| {
@@ -35,6 +41,11 @@ pub fn rebuildWorkspaces(wb: *Workbench) !void {
                 if (host.docFromPath(path) != null) continue;
                 _ = host.openFile(.{ .path = path, .grouping = grouping }) catch continue;
             }
+            // Whatever can come back is on its way: an open that started has put its
+            // placeholder in this pane, and one that could not start (the mount holding it not
+            // up yet, its plugin not loaded) never arrives. Left expecting, a pane whose every
+            // open failed stood empty beside the others for the whole session.
+            if (wb.workspaces.getPtr(grouping)) |ws| ws.expecting = false;
         }
     }
 
@@ -70,7 +81,15 @@ pub fn rebuildWorkspaces(wb: *Workbench) !void {
     while (k < wb.workspaces.count()) {
         if (wb.workspaces.count() == 1) break;
         const ws = &wb.workspaces.values()[k];
-        if (ws.tabCount() > 0 or ws.expecting) {
+        // Tabs that can draw, not assignment entries: a pane whose only tabs name documents
+        // that never reopened draws nothing, and kept for them it stood empty for good.
+        const live = ws.liveTabCount();
+        // Holding a tab, by whatever route it came — an open, a restored slot swapped for a
+        // placeholder, a drop — the pane is no longer waiting for one: from here, empty means
+        // emptied. A pane left expecting after its first tab arrived by a swap rather than
+        // `addTab` was never let go when that tab closed, and sat open over its close snapshot.
+        if (live > 0) ws.expecting = false;
+        if (live > 0 or ws.expecting) {
             // Filled (or about to be) — including one that was on its way out when its
             // document landed, which is a pane to keep, not a hole to finish closing.
             if (wb.paneLeaf(ws.grouping)) |leaf| wb.panes.reopenLeaf(leaf);

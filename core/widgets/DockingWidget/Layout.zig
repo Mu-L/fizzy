@@ -450,6 +450,13 @@ pub fn closeLeaf(self: *DockLayout, leaf_idx: NodeIndex) void {
     self.nodes.items[parent.idx].split.closing = side;
 }
 
+/// Whether `leaf_idx` has been sent closing (`closeLeaf`) and is sliding shut.
+pub fn leafClosing(self: *const DockLayout, leaf_idx: NodeIndex) bool {
+    const parent = self.findParent(leaf_idx) orelse return false;
+    const mine: Node.Child = if (parent.side == .first) .first else .second;
+    return self.nodes.items[parent.idx].split.closing == mine;
+}
+
 /// Keep `leaf_idx` after all: a parent split closing over it stops closing. The widget then eases
 /// it back open to its settled ratio. The counterpart of `closeLeaf`.
 pub fn reopenLeaf(self: *DockLayout, leaf_idx: NodeIndex) void {

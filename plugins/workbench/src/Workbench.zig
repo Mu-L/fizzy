@@ -183,6 +183,12 @@ pub fn closePane(self: *Workbench, grouping: u64) void {
     self.panes.closeLeaf(leaf);
 }
 
+/// Whether `grouping`'s pane is sliding shut (`closePane`).
+pub fn paneClosing(self: *Workbench, grouping: u64) bool {
+    const leaf = self.paneLeaf(grouping) orelse return false;
+    return self.panes.leafClosing(leaf);
+}
+
 pub fn deinitWorkspaces(self: *Workbench) void {
     for (self.workspaces.values()) |*workspace| workspace.deinit();
     self.workspaces.deinit(self.allocator);

@@ -25,7 +25,8 @@ pub const Workspace = @This();
 /// document vtable.
 grouping: u64 = 0,
 /// A pane opened by a drop whose document is still loading. Empty for now, but not *emptied*:
-/// `rebuildWorkspaces` must not close it before the load lands. Cleared by `addTab`.
+/// `rebuildWorkspaces` must not close it before the load lands. Cleared by `addTab`, and by
+/// `rebuildWorkspaces` once the pane holds any tab.
 expecting: bool = false,
 
 /// What this pane showed last frame, for the commands that act on "the active document" between
@@ -47,6 +48,10 @@ pane_rect_physical: ?dvui.Rect.Physical = null,
 /// `FrameTarget.snapshot`), drawn while the emptied pane slides shut so it reads as the file
 /// closing rather than as a blank pane. Freed when the pane goes, or refills.
 closing_snapshot: ?dvui.Texture = null,
+/// Frames `closing_snapshot` has been held by a pane not (yet) sliding shut. The close that took
+/// it reaches the tree on the next rebuild, so this is a frame or so at most; past that the pane
+/// is staying, and a picture of a closed document must not stand in for it.
+snapshot_idle_frames: u8 = 0,
 
 pub fn init(grouping: u64) Workspace {
     return .{ .grouping = grouping };
@@ -127,14 +132,18 @@ pub fn draw(self: *Workspace) !dvui.App.Result {
 
     if (tabs.len > 0) {
         self.dropSnapshot();
-    } else if (self.closing_snapshot) |snap| {
+    } else if (self.closing_snapshot != null and !runtime.workbench().paneClosing(self.grouping)) {
+        self.snapshot_idle_frames +|= 1;
+        if (self.snapshot_idle_frames > 2) self.dropSnapshot();
+    }
+    if (tabs.len == 0) if (self.closing_snapshot) |snap| {
         // Sliding shut after its last document closed: the picture of it, from the pane's
         // top left, cut off by the pane as it narrows — the document leaving, not a blank.
         const prev_clip = dvui.clip(pane_r);
         defer dvui.clipSet(prev_clip);
         dvui.renderTexture(snap, .{ .r = .{ .x = pane_r.x, .y = pane_r.y, .w = @floatFromInt(snap.width), .h = @floatFromInt(snap.height) }, .s = 1 }, .{}) catch {};
         return .ok;
-    }
+    };
 
     if (tabs.len > 0) {
         self.drawTabs(region, tabs, selected);
@@ -555,6 +564,20 @@ pub fn tabCount(self: *Workspace) usize {
     return existing.len;
 }
 
+/// How many of this pane's tabs can draw: a document that is open, or one loading behind its
+/// placeholder. The rest name documents that never came back — a restore that ran before the
+/// mount holding them was up — and a pane holding only those shows nothing at all.
+pub fn liveTabCount(self: *Workspace) usize {
+    var buf: [32]u8 = undefined;
+    const host = runtime.host();
+    const existing = host.assignedSurfaces(name(&buf, self.grouping)) orelse return 0;
+    var n: usize = 0;
+    for (existing) |id| {
+        if (host.surfaceById(id) != null) n += 1;
+    }
+    return n;
+}
+
 /// The drop zone under a dragged tab: frosted glass tinted the highlight colour, like the
 /// dialogs' frost (`core.dialogs`, its blur and detail) — what is under the zone reads through,
 /// softened, rather than being hidden by a flat wash. With the dialogs' blur off, the flat wash.
@@ -628,7 +651,12 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
                 const pane = wb.pane(grouping) catch continue;
                 pane.addTab(id, true);
             } else {
-                _ = runtime.host().openFile(.{ .path = path, .grouping = grouping }) catch {};
+                const started = runtime.host().openFile(.{ .path = path, .grouping = grouping }) catch false;
+                // Nothing is coming (it was already loading elsewhere, or could not start): a
+                // pane opened for it has nothing to wait for.
+                if (!started) if (wb.workspaces.getPtr(grouping)) |p| {
+                    p.expecting = false;
+                };
             }
         }
     }
@@ -678,6 +706,7 @@ fn drawCanvas(self: *Workspace, region: sdk.Host.Region, has_tabs: bool) !void {
 fn dropSnapshot(self: *Workspace) void {
     if (self.closing_snapshot) |t| dvui.textureDestroyLater(t);
     self.closing_snapshot = null;
+    self.snapshot_idle_frames = 0;
 }
 
 /// Whether this is the workbench's only pane — the one that shows the home page when empty.
