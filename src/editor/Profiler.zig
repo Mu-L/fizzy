@@ -143,23 +143,31 @@ fn drawGraph(p: *profile.Profiler, font: dvui.Font, dim: dvui.Color) ?usize {
         if (h < n) hovered = h;
     }
 
-    const bar_color = dvui.themeGet().color(.highlight, .fill);
-    ago = 0;
-    while (ago < n) : (ago += 1) {
-        const f = p.historyFrame(ago) orelse break;
-        const hgt = @min(r.h, @as(f32, @floatFromInt(f.work_ns)) * scale);
-        const x = r.x + r.w - @as(f32, @floatFromInt(ago + 1)) * bar_w;
-        const bar: dvui.Rect.Physical = .{ .x = x, .y = r.y + r.h - hgt, .w = @max(1, bar_w - rs.s), .h = hgt };
-        const is_hovered = hovered != null and hovered.? == ago;
-        bar.fill(.{}, .{ .color = .{ .color = if (is_hovered) dvui.themeGet().color(.window, .text) else bar_color.opacity(0.8) }, .fade = 0 });
-    }
-    // Frame-rate lines.
-    inline for (.{ 120.0, 60.0 }) |fps| {
-        const y = r.y + r.h - @as(f32, @floatCast(1000.0 / fps * std.time.ns_per_ms)) * scale;
-        if (y > r.y) {
-            (dvui.Rect.Physical{ .x = r.x, .y = y, .w = r.w, .h = rs.s }).fill(.{}, .{ .color = .{ .color = dim.opacity(0.5) }, .fade = 0 });
+    // Every bar and both frame-rate lines as one batch of quads: one draw rather than 240 fills
+    // (each its own path, triangulation and draw call), so the graph stays out of the numbers
+    // it shows.
+    const lifo = dvui.currentWindow().lifo();
+    const quads = n + 2;
+    if (dvui.Triangles.Builder.init(lifo, quads * 4, quads * 6)) |builder| {
+        var b = builder;
+        defer b.deinit(lifo);
+        const bar_col = dvui.Color.PMA.fromColor(dvui.themeGet().color(.highlight, .fill).opacity(0.8));
+        const hover_col = dvui.Color.PMA.fromColor(dvui.themeGet().color(.window, .text));
+        const line_col = dvui.Color.PMA.fromColor(dim.opacity(0.5));
+        ago = 0;
+        while (ago < n) : (ago += 1) {
+            const f = p.historyFrame(ago) orelse break;
+            const hgt = @min(r.h, @as(f32, @floatFromInt(f.work_ns)) * scale);
+            const x = r.x + r.w - @as(f32, @floatFromInt(ago + 1)) * bar_w;
+            const is_hovered = hovered != null and hovered.? == ago;
+            addQuad(&b, .{ .x = x, .y = r.y + r.h - hgt, .w = @max(1, bar_w - rs.s), .h = hgt }, if (is_hovered) hover_col else bar_col);
         }
-    }
+        inline for (.{ 120.0, 60.0 }) |fps| {
+            const y = r.y + r.h - @as(f32, @floatCast(1000.0 / fps * std.time.ns_per_ms)) * scale;
+            if (y > r.y) addQuad(&b, .{ .x = r.x, .y = y, .w = r.w, .h = rs.s }, line_col);
+        }
+        if (b.indices.items.len > 0) dvui.renderTriangles(b.build_unowned(), null) catch {};
+    } else |_| {}
     {
         var label_buf: [96]u8 = undefined;
         const text = if (hovered) |h| blk: {
@@ -169,6 +177,14 @@ fn drawGraph(p: *profile.Profiler, font: dvui.Font, dim: dvui.Color) ?usize {
         dvui.labelNoFmt(@src(), text, .{}, .{ .font = font, .color_text = .{ .color = dim }, .gravity_x = 0, .gravity_y = 0 });
     }
     return hovered;
+}
+
+fn addQuad(b: *dvui.Triangles.Builder, q: dvui.Rect.Physical, col: dvui.Color.PMA) void {
+    const base: dvui.Vertex.Index = @intCast(b.vertexes.items.len);
+    for ([4]dvui.Point.Physical{ q.topLeft(), q.topRight(), q.bottomRight(), q.bottomLeft() }) |pt| {
+        b.appendVertex(.{ .pos = pt, .col = col, .uv = .{ 0, 0 } });
+    }
+    b.appendTriangles(&.{ base, base + 1, base + 2, base, base + 2, base + 3 });
 }
 
 fn ms(ns: f64) f64 {
@@ -204,7 +220,12 @@ fn drawGrid(rows: []const Row, work: f64, font: dvui.Font, dim: dvui.Color) void
         dvui.labelNoFmt(@src(), title, .{}, .{ .font = body, .color_text = .{ .color = dim }, .gravity_x = if (col == 0 or col == 5) 0 else 1, .padding = .{} });
     }
     const text = dvui.themeGet().color(.control, .text);
-    for (rows, 0..) |r, ri| {
+    // Only the rows in view are built: a scrolled-away row is widgets, labels and number
+    // formatting every frame for nothing.
+    const first, const last = grid.rowsVisible();
+    const lo = @min(first, rows.len);
+    const hi = @min(last, rows.len); // `last` is exclusive
+    for (rows[lo..hi], lo..) |r, ri| {
         {
             const c = grid.cell(.{ .col = 0, .row = ri }, .{ .expand = .horizontal, .padding = .{ .x = 8 + @as(f32, @floatFromInt(r.indent)) * 16, .w = 8 } });
             defer c.deinit();
