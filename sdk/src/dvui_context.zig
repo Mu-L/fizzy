@@ -31,6 +31,45 @@ pub fn inject(
         }
     }
     if (debug) |d| dvui.debug = d.*;
+    if (window != null) applyDragThreshold();
+}
+
+/// How far a finger may drift and still tap (natural px). dvui's 3 is a mouse's slop: a
+/// fingertip wanders further than that between down and up, and past it a button cancels its
+/// click (it reads as the start of a scroll or drag) and a held context menu gives up its
+/// hold. Taps on small targets — a tab's close button, a swatch — failed about as often as
+/// they landed.
+pub const touch_drag_threshold: f32 = 10;
+/// dvui's own default, for the mouse.
+pub const mouse_drag_threshold: f32 = 3;
+
+/// Where the host records whether input is touch, in the shared window's data — every dylib's
+/// copy of dvui has its own `Dragging.threshold`, and this is how they agree on it.
+const input_id: dvui.Id = @enumFromInt(0x6669_7a7a_795f_7463); // "fizzy_tc"
+const input_key = "_touch_input";
+
+/// Host only, once a frame before anything handles input: note whether the pointer is a finger
+/// (the latest pointer press or motion was touch) and set this image's drag threshold to match.
+/// Plugin images pick it up in `inject`, which the host calls before they draw.
+pub fn syncTouchInput() void {
+    var touch = dvui.dataGet(null, input_id, input_key, bool) orelse false;
+    for (dvui.events()) |e| {
+        if (e.evt != .mouse) continue;
+        const me = e.evt.mouse;
+        switch (me.action) {
+            .press, .motion => {
+                if (me.button.touch()) touch = true else if (me.button.pointer() or me.action == .motion) touch = false;
+            },
+            else => {},
+        }
+    }
+    dvui.dataSet(null, input_id, input_key, touch);
+    applyDragThreshold();
+}
+
+fn applyDragThreshold() void {
+    const touch = dvui.dataGet(null, input_id, input_key, bool) orelse false;
+    dvui.Dragging.threshold = if (touch) touch_drag_threshold else mouse_drag_threshold;
 }
 
 /// Push the host exe's current dvui state into a loaded plugin image.

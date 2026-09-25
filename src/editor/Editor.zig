@@ -3399,6 +3399,9 @@ const handle_size = 10;
 const handle_dist = 60;
 
 pub fn tick(editor: *Editor) !dvui.App.Result {
+    // Finger or mouse: how far a tap may drift, here and (through the context sync) in every
+    // plugin — see `sdk.dvui_context.syncTouchInput`.
+    sdk.dvui_context.syncTouchInput();
     // How dialogs look this frame — the settings, plus what a bare stretch of chrome is on
     // screen (the window base: content fill at window opacity over the OS material; opaque
     // when maximized). Published into the shared dvui window so plugin dylibs' dialogs read
