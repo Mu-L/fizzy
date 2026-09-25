@@ -25,6 +25,12 @@ const max_list_h: f32 = 260;
 /// itself when the last row lands, which is per-frame unless it latches.
 var closing = false;
 
+/// The content's size last frame it had rows. Once the last row lands the list is empty, and a
+/// window drawn with nothing in it shrank onto itself — a collapse of its own — before the close
+/// animation then played on what was left. It keeps this size instead, so the close is the only
+/// thing that moves.
+var last_content: dvui.Size = .{};
+
 pub fn active(win: *dvui.Window) bool {
     var it = win.dialogs.iterator(null);
     while (it.next()) |d| {
@@ -86,11 +92,18 @@ pub fn dialog(_: dvui.Id) anyerror!bool {
             closing = true;
             fizzy.core.dialogs.closeFloatingDialogAnchored();
         }
+        var hold = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .min_size_content = last_content });
+        hold.deinit();
         return true;
     }
 
     var outer = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .all(8) });
-    defer outer.deinit();
+    defer {
+        const id = outer.data().id;
+        outer.deinit();
+        // After `deinit`: a box totals its children only as it closes.
+        if (dvui.minSizeGet(id)) |ms| last_content = ms;
+    }
 
     const intro = if (count == 1)
         "1 plugin has an update."
