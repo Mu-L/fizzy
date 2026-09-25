@@ -45,6 +45,10 @@ grouping_id_counter: u64 = 0,
 dragging_surface: ?[]const u8 = null,
 tab_drag_from_tree_path: ?[]u8 = null,
 file_tree_data_id: ?dvui.Id = null,
+/// Branch id of the last root the file tree opened by default. A new root starts expanded once;
+/// after that its open state is the user's (`files.drawRoot`). Instance state for the same
+/// two-copies reason as `pending_new_file_path` below.
+file_tree_root_opened: ?usize = null,
 /// Last session's panes are re-seated on the first rebuild, not at init: the load path is not
 /// up yet when the workbench is constructed.
 restored: bool = false,

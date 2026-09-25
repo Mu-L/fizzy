@@ -342,6 +342,10 @@ pub const Branch = struct {
         /// When true, dragging over this row can show "drop into" (as child) instead of only "insert before"
         can_accept_children: bool = false,
 
+        /// False for a row that must stay where it is (a file tree's root): it still clicks,
+        /// expands and takes drops, it just never lifts into a drag.
+        draggable: bool = true,
+
         // If animation duration is greater than 0, the expander will animate accordingly
         animation_duration: i32 = 100_000,
 
@@ -581,6 +585,7 @@ pub const Branch = struct {
                     if (me.action == .motion) {
                         if (dvui.captured(self.button.data().id)) {
                             e.handle(@src(), self.button.data());
+                            if (!self.init_options.draggable) continue;
                             if (dvui.dragging(me.p, null)) |_| {
                                 const bid = self.init_options.branch_id orelse self.data().id.asUsize();
                                 const row_size = self.button.data().rect.size();

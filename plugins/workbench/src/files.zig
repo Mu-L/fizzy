@@ -93,13 +93,13 @@ pub fn draw() !void {
     const folder: ?[]const u8 = runtime.host().folder();
     const path = folder orelse {
         runtime.workbench().file_tree_data_id = null;
+        runtime.workbench().file_tree_root_opened = null;
         if (comptime builtin.target.cpu.arch == .wasm32) try drawWebEmpty() else drawNativeEmpty();
         return;
     };
 
     const filter_text = try drawFilter(tree);
-    const kind: RootKind = if (core.paths.isMountPath(path)) .{ .mount = {} } else .{ .disk = {} };
-    try drawRoot(path, kind, tree, filter_text, 0);
+    try drawRoot(path, tree, filter_text);
 }
 
 fn drawNativeEmpty() void {
@@ -191,147 +191,154 @@ fn drawFilter(tree: *core.widgets.TreeWidget) ![]const u8 {
     return filter_text;
 }
 
-/// What backs the root, which decides its row's menu: a disk folder can be revealed in the
-/// file browser; a mount cannot. Both close.
-const RootKind = union(enum) { disk, mount };
-
-/// One root of the explorer: a project folder or a mount, expanded, with its own row menu.
-/// `index` keeps several roots' widget ids apart.
-fn drawRoot(path: []const u8, kind: RootKind, tree: *core.widgets.TreeWidget, filter_text: []const u8, index: usize) !void {
+/// The explorer's one root: the open folder, drawn as an ordinary folder row (see `drawRow`'s
+/// `root`), then the blank space below the tree.
+fn drawRoot(path: []const u8, tree: *core.widgets.TreeWidget, filter_text: []const u8) !void {
     const unique_id = runtime.workbench().file_tree_data_id orelse return;
+    const root_branch_id = tree.data().id.update(path);
 
-    const folder = switch (kind) {
-        // A mount's name is what follows `scheme://` — the archive, the account.
-        .mount => path[(std.mem.indexOf(u8, path, "://") orelse 0) + 3 ..],
-        // Resolve before taking the basename. Launching as `fizzy .` (or any relative path)
-        // makes `basename` return the literal "." and the project row's title becomes a single
-        // unreadable period instead of the folder's name.
-        .disk => blk: {
-            const base = std.fs.path.basename(path);
-            if (base.len > 0 and !std.mem.eql(u8, base, ".") and !std.mem.eql(u8, base, "..")) break :blk base;
-            const resolved = std.fs.path.resolve(dvui.currentWindow().arena(), &.{path}) catch break :blk base;
-            const resolved_base = std.fs.path.basename(resolved);
-            break :blk if (resolved_base.len > 0) resolved_base else base;
-        },
-    };
+    // A folder the tree hasn't shown yet opens expanded, once. After that its open state is the
+    // user's, stored like any folder's — which is what lets the root be collapsed at all.
+    const wb = runtime.workbench();
+    if (wb.file_tree_root_opened != root_branch_id.asUsize()) {
+        wb.file_tree_root_opened = root_branch_id.asUsize();
+        runtime.host().setExplorerBranchOpen(root_branch_id, true);
+    }
 
-    const branch = tree.branch(@src(), .{
-        .expanded = true,
-        .animation_duration = 450_000,
-        .animation_easing = dvui.easing.outBack,
-    }, .{
-        .id_extra = index,
+    try recurseFiles(path, rootLabel(path), tree, unique_id, filter_text);
+
+    // Fill the rest of the explorer so an empty project (or a short or collapsed tree) still has
+    // somewhere to right-click. Outside the root's branch on purpose: inside it, collapsing the
+    // root would take the root menu's only large target with it. Registered after the rows, so
+    // theirs keep priority.
+    var filler = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .both,
-        .color_fill = .transparent,
-        .margin = dvui.Rect.all(0),
-        .padding = dvui.Rect.all(1),
-    });
-    defer branch.deinit();
-
-    { // Project root row: close / reveal / new items (same actions as folder rows, plus Close)
-        var context = core.widgets.context(@src(), .{ .rect = branch.button.data().borderRectScale().r }, .{});
-        defer context.deinit();
-
-        if (context.activePoint()) |point| {
-            try showRootProjectContextMenu(point, path, kind, tree);
-        }
-    }
-
-    if (branch.button.clicked()) {
-        selected_id = null;
-        selectionFreeAll();
-        selection_anchor = null;
-    }
-
-    const color = dvui.themeGet().color(.control, .fill_hover);
-    // Folder rows tint their caret from the per-row palette colour (optionally overridden
-    // by `fileRowFillColor`); the project row has no per-row tint, so it takes the theme base.
-    const caret_color = dvui.themeGet().color(.control, .fill);
-
-    // Same tint the folder rows below use, so the project row's caret doesn't read as a
-    // different kind of control from every other caret in the tree.
-    core.widgets.treeCaret(@src(), branch.expanded, caret_color);
-
-    var fmt_string = std.fmt.allocPrint(dvui.currentWindow().lifo(), comptime "{s}", .{folder}) catch unreachable;
-    defer dvui.currentWindow().lifo().free(fmt_string);
-
-    for (fmt_string, 0..) |c, i| {
-        fmt_string[i] = std.ascii.toUpper(c);
-    }
-
-    dvui.labelNoFmt(@src(), fmt_string, .{}, .{
-        .color_fill = .{ .color = color },
-        .font = dvui.Font.theme(.heading),
-        .gravity_y = 0.5,
-    });
-
-    if (branch.expander(@src(), .{ .indent = 24 }, .{
-        .color_fill = .{ .color = dvui.themeGet().color(.control, .fill) },
-        .corners = .all(8),
-        .expand = .both,
-        .margin = .{ .x = 10, .w = 5 },
         .background = false,
-    })) {
-        var box = dvui.box(@src(), .{
-            .dir = .vertical,
-        }, .{
-            .expand = .both,
-            .background = false,
-            .gravity_y = 0,
-        });
-        defer box.deinit();
+    });
+    defer filler.deinit();
 
-        try recurseFiles(path, tree, unique_id, filter_text);
+    var blank_ctx = core.widgets.context(@src(), .{ .rect = filler.data().borderRectScale().r }, .{});
+    defer blank_ctx.deinit();
 
-        // Fill remaining explorer height so empty projects (or short trees) still receive clicks;
-        // context is registered after file rows so row menus keep priority.
-        var filler = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .both,
-            .background = false,
-        });
-        defer filler.deinit();
-
-        {
-            var blank_ctx = core.widgets.context(@src(), .{ .rect = filler.data().borderRectScale().r }, .{});
-            defer blank_ctx.deinit();
-
-            if (blank_ctx.activePoint()) |point| {
-                try showRootProjectContextMenu(point, path, kind, tree);
-            }
-        }
+    if (blank_ctx.activePoint()) |point| {
+        try rowMenu(point, .directory, path, path, root_branch_id, true);
     }
 }
 
-/// The row an expanded folder shows while its listing is on the way (a mount: see
-/// `FileTable.listingPending`). Dim, where the first child will be.
-fn drawLoadingRow(id_extra: usize) void {
-    dvui.labelNoFmt(@src(), "Loading\u{2026}", .{}, .{
-        .id_extra = id_extra,
-        .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
-        .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.45) },
-    });
+/// The root row's name. A mount's is what follows `scheme://` — the archive, the account.
+fn rootLabel(path: []const u8) []const u8 {
+    if (core.paths.isMountPath(path)) return path[(std.mem.indexOf(u8, path, "://") orelse 0) + 3 ..];
+
+    // Resolve before taking the basename. Launching as `fizzy .` (or any relative path) makes
+    // `basename` return the literal "." and the root row's title becomes a single unreadable
+    // period instead of the folder's name.
+    const base = std.fs.path.basename(path);
+    if (base.len > 0 and !std.mem.eql(u8, base, ".") and !std.mem.eql(u8, base, "..")) return base;
+    const resolved = std.fs.path.resolve(dvui.currentWindow().arena(), &.{path}) catch return base;
+    const resolved_base = std.fs.path.basename(resolved);
+    return if (resolved_base.len > 0) resolved_base else base;
 }
 
-/// Context menu for the project root directory: close project, reveal on disk, new file / folder.
-fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u8, kind: RootKind, tree: *core.widgets.TreeWidget) !void {
+/// Select the root row. It is never put in `selected_paths`: every other row is inside it, so
+/// in a multi-selection it would swallow the rest (`selectionPathExcludedByAncestor`) and turn
+/// a Delete or a drag of "these files" into one of the whole project. `selected_id` alone
+/// highlights it, and the next click on any other row replaces it — so modifiers on the root
+/// row don't extend anything, they just select it.
+fn selectRootRow(id: usize) void {
+    selectionFreeAll();
+    selected_id = id;
+    selection_anchor = null;
+}
+
+/// A row's right-click menu: a file's, a folder's, or — `is_root`, also what the blank space
+/// below the tree opens — the root's. The root's is a folder's with Close on top and nothing
+/// that would move or remove the folder the whole tree is.
+fn rowMenu(
+    point: dvui.Point.Natural,
+    kind: std.Io.File.Kind,
+    abs_path: []const u8,
+    entry_dir: []const u8,
+    branch_id: dvui.Id,
+    is_root: bool,
+) !void {
     // `core.widgets.contextMenu`, not `dvui.floatingMenu`: the same frosted, rounded surface
     // the menu bar drops down and the command palette lists rows in.
     var fw2 = core.widgets.contextMenu(@src(), point, .{});
     defer fw2.deinit();
 
-    const root_branch_id = dvui.Id.update(tree.data().id, project_path);
+    if (is_root) {
+        if ((core.widgets.menuRow(@src(), "Close", .{ .icon = icons.tvg.lucide.@"x" })) != null) {
+            runtime.host().closeProjectFolder();
 
-    if ((core.widgets.menuRow(@src(), "Close", .{ .icon = icons.tvg.lucide.@"x" })) != null) {
-        runtime.host().closeProjectFolder();
+            fw2.close();
+        }
 
-        fw2.close();
+        _ = dvui.separator(@src(), .{ .expand = .horizontal });
     }
 
-    _ = dvui.separator(@src(), .{ .expand = .horizontal });
+    if (kind == .file) {
+        if ((core.widgets.menuRow(@src(), "Open", .{ .icon = icons.tvg.lucide.@"file" })) != null) {
+            const arena = dvui.currentWindow().arena();
+            const to_open = selectionTopMostOpenableFilesForOpenActions(arena) catch |err| blk: {
+                dvui.log.err("Failed to collect files to open: {any}", .{err});
+                break :blk &[_][]const u8{};
+            };
+            for (to_open) |p| {
+                _ = runtime.host().openFile(.{ .path = p, .grouping = runtime.workbench().currentGroupingID() }) catch |e| {
+                    dvui.log.err("Failed to open file: {any} ({s})", .{ e, p });
+                };
+            }
 
-    if (kind == .disk) {
+            fw2.close();
+        }
+
+        if ((core.widgets.menuRow(@src(), "Open to the side", .{ .icon = icons.tvg.lucide.@"panel-right" })) != null) {
+            const arena = dvui.currentWindow().arena();
+            const to_open = selectionTopMostOpenableFilesForOpenActions(arena) catch |err| blk: {
+                dvui.log.err("Failed to collect files to open: {any}", .{err});
+                break :blk &[_][]const u8{};
+            };
+            var side_grouping: u64 = undefined;
+            var have_grouping = false;
+            for (to_open) |p| {
+                if (!have_grouping) {
+                    side_grouping = if (runtime.host().openDocCount() == 0)
+                        runtime.workbench().currentGroupingID()
+                    else
+                        runtime.workbench().newGroupingID();
+                    have_grouping = true;
+                }
+                _ = runtime.host().openFile(.{ .path = p, .grouping = side_grouping }) catch {
+                    dvui.log.err("Failed to open file: {s}", .{p});
+                };
+            }
+
+            fw2.close();
+        }
+
+        _ = dvui.separator(@src(), .{ .expand = .horizontal });
+    }
+
+    // Re-root at a folder, which is the one thing only the tree can offer: fizzy's "Open Folder"
+    // is the OS dialog, and that cannot reach inside a mount — a cloud drive's folders are not on
+    // disk for it to browse. Here the path is a path either way, so the same row works for
+    // `gdrive://…` and for a directory on disk. Pointless on the root, which already is one.
+    if (kind == .directory and !is_root) {
+        if ((core.widgets.menuRow(@src(), "Set Root Here", .{ .icon = icons.tvg.lucide.@"folder-root" })) != null) {
+            runtime.host().setProjectFolder(abs_path) catch |err| {
+                dvui.log.err("Failed to set root to {s}: {t}", .{ abs_path, err });
+            };
+
+            fw2.close();
+        }
+
+        _ = dvui.separator(@src(), .{ .expand = .horizontal });
+    }
+
+    // A mount's folders are not on the disk, so there is nothing for the file browser to show.
+    if (!core.paths.isMountPath(abs_path)) {
         if ((core.widgets.menuRow(@src(), open_message, .{ .icon = icons.tvg.lucide.@"folder-open" })) != null) {
-            runtime.host().openInFileBrowser(project_path) catch {
+            runtime.host().openInFileBrowser(if (kind == .file) std.fs.path.dirname(abs_path) orelse abs_path else abs_path) catch {
                 dvui.log.err("Failed to open file browser", .{});
             };
 
@@ -342,20 +349,62 @@ fn showRootProjectContextMenu(point: dvui.Point.Natural, project_path: []const u
     if ((core.widgets.menuRow(@src(), "New File...", .{ .icon = icons.tvg.lucide.@"file-plus", .keybind = dvui.currentWindow().keybinds.get("new_file") orelse .{} })) != null) {
         defer fw2.close();
 
-        runtime.host().requestNewDocument(project_path, root_branch_id.asUsize());
+        const parent_dir: []const u8 = if (kind == .directory) abs_path else entry_dir;
+        runtime.host().requestNewDocument(parent_dir, branch_id.asUsize());
     }
 
     if ((core.widgets.menuRow(@src(), "New Folder...", .{ .icon = icons.tvg.lucide.@"folder-plus" })) != null) {
-        createFolderInteractive(project_path);
+        switch (kind) {
+            .directory => createFolderInteractive(abs_path),
+            .file => createFolderInteractive(entry_dir),
+            else => {},
+        }
 
         fw2.close();
     }
 
-    // What plugins add to the project's own menu — the root row, and blank space below it.
+    if (!is_root) {
+        if ((core.widgets.menuRow(@src(), "Rename", .{ .icon = icons.tvg.lucide.@"pencil" })) != null) {
+            edit_id = branch_id.asUsize();
+            fw2.close();
+        }
+
+        if ((core.widgets.menuRow(@src(), "Delete", .{ .icon = icons.tvg.lucide.@"trash-2" })) != null) {
+            defer fw2.close();
+
+            const arena = dvui.currentWindow().arena();
+            const top = selectionPathsSorted(arena) catch |err| blk: {
+                dvui.log.err("Failed to collect selection paths: {any}", .{err});
+                break :blk &[_][]const u8{};
+            };
+            if (runtime.files()) |fs| {
+                for (top) |del_path| fs.delete(del_path);
+            }
+        }
+    }
+
+    // What plugins add to this row's menu, about this row. The root keeps its own extension
+    // point — the project's menu, on its row and the blank space below it — rather than the
+    // folder one, so plugins that add root items keep landing there.
     runtime.host().drawMenuSections(.{
-        .menu_id = "fizzy.menu.filetree.root",
-        .subject = .{ .path = project_path },
+        .menu_id = if (is_root)
+            "fizzy.menu.filetree.root"
+        else if (kind == .directory)
+            "fizzy.menu.filetree.folder"
+        else
+            "fizzy.menu.filetree.file",
+        .subject = .{ .path = abs_path },
     }, true);
+}
+
+/// The row an expanded folder shows while its listing is on the way (a mount: see
+/// `FileTable.listingPending`). Dim, where the first child will be.
+fn drawLoadingRow(id_extra: usize) void {
+    dvui.labelNoFmt(@src(), "Loading\u{2026}", .{}, .{
+        .id_extra = id_extra,
+        .padding = .{ .x = 6, .y = 2, .w = 4, .h = 2 },
+        .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.45) },
+    });
 }
 
 fn pointerReleaseInRectWithoutSelectionModifier(r: dvui.Rect.Physical) bool {
@@ -584,7 +633,13 @@ fn filterLabel(
     }
 }
 
-pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWidget, unique_id: dvui.Id, outer_filter_text: []const u8) !void {
+/// What makes `drawRow`'s root row the root. The open folder isn't in any listing, so it has no
+/// parent to be joined to, and while a filter is active what it shows beneath it is the ranked
+/// flat list (`FileTable.search`) rather than its own listing.
+const RowRoot = struct { ranked: ?[]const FileTable.Entry };
+
+/// Draw the root row and, beneath it, the tree. `root_label` is the root row's name.
+pub fn recurseFiles(root_directory: []const u8, root_label: []const u8, outer_tree: *core.widgets.TreeWidget, unique_id: dvui.Id, outer_filter_text: []const u8) !void {
     var color_i: usize = 0;
     var id_extra: usize = 0;
 
@@ -628,7 +683,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
 
             // Directory rows: variable height, always drawn (see the virtualization notes above).
             for (0..file_run_start) |i| {
-                _ = try drawRow(entryAt(rows, listing, i), directory, tree, inner_unique_id, inner_id_extra, color_id, filter_text, active_query, parent_branch);
+                _ = try drawRow(entryAt(rows, listing, i), directory, tree, inner_unique_id, inner_id_extra, color_id, filter_text, active_query, parent_branch, null);
             }
 
             const file_count = total - file_run_start;
@@ -716,7 +771,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
             var prev_y: f32 = 0;
             var drawn: usize = 0;
             for (file_run_start + lo..file_run_start + hi) |i| {
-                const y = try drawRow(entryAt(rows, listing, i), directory, tree, inner_unique_id, inner_id_extra, color_id, filter_text, active_query, parent_branch);
+                const y = try drawRow(entryAt(rows, listing, i), directory, tree, inner_unique_id, inner_id_extra, color_id, filter_text, active_query, parent_branch, null);
                 if (drawn > 0) widest_gap = @max(widest_gap, y - prev_y);
                 prev_y = y;
                 drawn += 1;
@@ -743,6 +798,10 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
 
         /// Draw one file or folder row, returning its top edge in physical screen coordinates
         /// (which is what `search` measures the run's row pitch from).
+        ///
+        /// `root` non-null draws the open folder itself: `directory` is then its own path and
+        /// `entry.name` only its label. It is a folder row in every other respect — opens and
+        /// closes, takes drops, selects — except that it can't be dragged, renamed or deleted.
         fn drawRow(
             entry: FileTable.Entry,
             directory: []const u8,
@@ -753,13 +812,17 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
             filter_text: []const u8,
             active_query: ?*const fuzzy.Query,
             parent_branch: ?*core.widgets.TreeWidget.Branch,
+            root: ?RowRoot,
             // `anyerror` breaks the inferred-error-set cycle with `search`, which this calls back
             // into for an expanded folder.
         ) anyerror!f32 {
             var row_y: f32 = 0;
             {
                 const entry_dir = entry.dir orelse directory;
-                const abs_path = try core.paths.join(dvui.currentWindow().arena(), entry_dir, entry.name);
+                const abs_path = if (root != null)
+                    directory
+                else
+                    try core.paths.join(dvui.currentWindow().arena(), entry_dir, entry.name);
 
                 inner_id_extra.* = dvui.Id.update(tree.data().id, abs_path).asUsize();
 
@@ -784,6 +847,11 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                     expanded = true;
                 }
 
+                // Filter results all hang off the root, so while there are any it stays open.
+                if (root != null and filter_text.len > 0) {
+                    expanded = true;
+                }
+
                 if (newFilePath()) |path| {
                     if (std.fs.path.dirname(path)) |d| {
                         if (std.mem.containsAtLeast(u8, d, 1, abs_path)) {
@@ -798,6 +866,8 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                     .animation_easing = dvui.easing.outBack,
                     .process_events = !editing,
                     .can_accept_children = entry.kind == .directory,
+                    // Everything else in the tree can move; the folder they all live in can't.
+                    .draggable = root == null,
                     .branch_id = inner_id_extra.*,
                 }, .{
                     .id_extra = inner_id_extra.*,
@@ -894,128 +964,18 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                     defer context.deinit();
 
                     if (context.activePoint()) |point| {
-                        var fw2 = core.widgets.contextMenu(@src(), point, .{});
-                        defer fw2.deinit();
-
                         // Right-clicking a row that isn't already part of the selection takes over
                         // as a single-row selection; right-clicking a selected row preserves the
                         // multi-selection so context-menu actions apply to the group.
-                        if (!isFileSelected(inner_id_extra.*)) {
+                        if (root != null) {
+                            selectRootRow(inner_id_extra.*);
+                        } else if (!isFileSelected(inner_id_extra.*)) {
                             applyFileClick(inner_id_extra.*, abs_path, .replace);
                         } else {
                             selected_id = inner_id_extra.*;
                         }
 
-                        if (entry.kind == .file) {
-                            if ((core.widgets.menuRow(@src(), "Open", .{ .icon = icons.tvg.lucide.@"file" })) != null) {
-                                const arena = dvui.currentWindow().arena();
-                                const to_open = selectionTopMostOpenableFilesForOpenActions(arena) catch |err| blk: {
-                                    dvui.log.err("Failed to collect files to open: {any}", .{err});
-                                    break :blk &[_][]const u8{};
-                                };
-                                for (to_open) |p| {
-                                    _ = runtime.host().openFile(.{ .path = p, .grouping = runtime.workbench().currentGroupingID() }) catch |e| {
-                                        dvui.log.err("Failed to open file: {any} ({s})", .{ e, p });
-                                    };
-                                }
-
-                                fw2.close();
-                            }
-
-                            if ((core.widgets.menuRow(@src(), "Open to the side", .{ .icon = icons.tvg.lucide.@"panel-right" })) != null) {
-                                const arena = dvui.currentWindow().arena();
-                                const to_open = selectionTopMostOpenableFilesForOpenActions(arena) catch |err| blk: {
-                                    dvui.log.err("Failed to collect files to open: {any}", .{err});
-                                    break :blk &[_][]const u8{};
-                                };
-                                var side_grouping: u64 = undefined;
-                                var have_grouping = false;
-                                for (to_open) |p| {
-                                    if (!have_grouping) {
-                                        side_grouping = if (runtime.host().openDocCount() == 0)
-                                            runtime.workbench().currentGroupingID()
-                                        else
-                                            runtime.workbench().newGroupingID();
-                                        have_grouping = true;
-                                    }
-                                    _ = runtime.host().openFile(.{ .path = p, .grouping = side_grouping }) catch {
-                                        dvui.log.err("Failed to open file: {s}", .{p});
-                                    };
-                                }
-
-                                fw2.close();
-                            }
-
-                            _ = dvui.separator(@src(), .{ .expand = .horizontal });
-                        }
-
-                        // Re-root at a folder, which is the one thing only the tree can offer:
-                        // fizzy's "Open Folder" is the OS dialog, and that cannot reach inside a
-                        // mount — a cloud drive's folders are not on disk for it to browse. Here
-                        // the path is a path either way, so the same row works for `gdrive://…`
-                        // and for a directory on disk.
-                        if (entry.kind == .directory) {
-                            if ((core.widgets.menuRow(@src(), "Set Root Here", .{ .icon = icons.tvg.lucide.@"folder-root" })) != null) {
-                                runtime.host().setProjectFolder(abs_path) catch |err| {
-                                    dvui.log.err("Failed to set root to {s}: {t}", .{ abs_path, err });
-                                };
-
-                                fw2.close();
-                            }
-
-                            _ = dvui.separator(@src(), .{ .expand = .horizontal });
-                        }
-
-                        if ((core.widgets.menuRow(@src(), open_message, .{ .icon = icons.tvg.lucide.@"folder-open" })) != null) {
-                            runtime.host().openInFileBrowser(if (entry.kind == .file) std.fs.path.dirname(abs_path) orelse abs_path else abs_path) catch {
-                                dvui.log.err("Failed to open file browser", .{});
-                            };
-
-                            fw2.close();
-                        }
-
-                        if ((core.widgets.menuRow(@src(), "New File...", .{ .icon = icons.tvg.lucide.@"file-plus", .keybind = dvui.currentWindow().keybinds.get("new_file") orelse .{} })) != null) {
-                            defer fw2.close();
-
-                            const parent_dir: []const u8 = if (entry.kind == .directory) abs_path else entry_dir;
-                            runtime.host().requestNewDocument(parent_dir, branch_id.asUsize());
-                        }
-
-                        if ((core.widgets.menuRow(@src(), "New Folder...", .{ .icon = icons.tvg.lucide.@"folder-plus" })) != null) {
-                            switch (entry.kind) {
-                                .directory => createFolderInteractive(abs_path),
-                                .file => createFolderInteractive(entry_dir),
-                                else => {},
-                            }
-
-                            fw2.close();
-                        }
-
-                        if ((core.widgets.menuRow(@src(), "Rename", .{ .icon = icons.tvg.lucide.@"pencil" })) != null) {
-                            edit_id = inner_id_extra.*;
-                            fw2.close();
-                        }
-
-                        {
-                            if ((core.widgets.menuRow(@src(), "Delete", .{ .icon = icons.tvg.lucide.@"trash-2" })) != null) {
-                                defer fw2.close();
-
-                                const arena = dvui.currentWindow().arena();
-                                const top = selectionPathsSorted(arena) catch |err| blk: {
-                                    dvui.log.err("Failed to collect selection paths: {any}", .{err});
-                                    break :blk &[_][]const u8{};
-                                };
-                                if (runtime.files()) |fs| {
-                                    for (top) |del_path| fs.delete(del_path);
-                                }
-                            }
-                        }
-
-                        // What plugins add to a file's or a folder's menu, about this row.
-                        runtime.host().drawMenuSections(.{
-                            .menu_id = if (entry.kind == .directory) "fizzy.menu.filetree.folder" else "fizzy.menu.filetree.file",
-                            .subject = .{ .path = abs_path },
-                        }, true);
+                        try rowMenu(point, entry.kind, abs_path, entry_dir, branch_id, root != null);
                     }
                 }
 
@@ -1123,7 +1083,12 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                             }
                         }
 
-                        editableLabel(
+                        if (root != null) {
+                            // The root's name keeps the heading weight it had back when it was a
+                            // section header above the tree, so it still reads as the project
+                            // rather than as its first folder. Never renamed, so never editable.
+                            filterLabel(inner_id_extra.*, entry.name, dvui.themeGet().color(.control, .text), dvui.Font.theme(.heading), dvui.Rect.all(3), null);
+                        } else editableLabel(
                             inner_id_extra.*,
                             folder_name,
                             dvui.themeGet().color(.control, .text),
@@ -1137,8 +1102,12 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                         };
 
                         if (branch.button.clicked()) {
-                            const mode = detectClickMode(branch.button.data().borderRectScale().r);
-                            applyFileClick(inner_id_extra.*, abs_path, mode);
+                            if (root != null) {
+                                selectRootRow(inner_id_extra.*);
+                            } else {
+                                const mode = detectClickMode(branch.button.data().borderRectScale().r);
+                                applyFileClick(inner_id_extra.*, abs_path, mode);
+                            }
                         }
 
                         if (branch.expander(@src(), .{ .indent = expanded_indent }, .{
@@ -1162,7 +1131,7 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
                                 color_id,
                                 filter_text,
                                 branch,
-                                null,
+                                if (root) |r| r.ranked else null,
                             );
                         } else {
                             if (runtime.host().explorerBranchIsOpen(branch_id)) {
@@ -1182,15 +1151,13 @@ pub fn recurseFiles(root_directory: []const u8, outer_tree: *core.widgets.TreeWi
         }
     };
 
-    if (outer_filter_text.len > 0) {
-        const files = table() orelse return;
-        const ranked = files.search(root_directory, outer_filter_text, dvui.currentWindow().arena());
-        try recursor.search(root_directory, outer_tree, unique_id, &id_extra, &color_i, outer_filter_text, null, ranked);
-        flushPendingFileShiftRange(root_directory, outer_tree, ranked);
-    } else {
-        try recursor.search(root_directory, outer_tree, unique_id, &id_extra, &color_i, outer_filter_text, null, null);
-        flushPendingFileShiftRange(root_directory, outer_tree, null);
-    }
+    const ranked: ?[]const FileTable.Entry = if (outer_filter_text.len > 0)
+        (table() orelse return).search(root_directory, outer_filter_text, dvui.currentWindow().arena())
+    else
+        null;
+    const root_entry: FileTable.Entry = .{ .name = root_label, .kind = .directory };
+    _ = try recursor.drawRow(root_entry, root_directory, outer_tree, unique_id, &id_extra, &color_i, outer_filter_text, null, null, .{ .ranked = ranked });
+    flushPendingFileShiftRange(root_directory, outer_tree, ranked);
 }
 
 pub fn isFileSelected(id: usize) bool {
