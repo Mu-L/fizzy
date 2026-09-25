@@ -348,6 +348,8 @@ pub fn addFizzyExecutableForTarget(
     } else if (resolved_target.result.os.tag == .windows) {
         if (b.lazyDependency("zigwin32", .{})) |dep| {
             exe.root_module.addImport("win32", dep.module("win32"));
+            // The updater (`app/update`) calls into Windows too, from the `app` module.
+            app_module.addImport("win32", dep.module("win32"));
         }
         exe.root_module.linkSystemLibrary("comctl32", .{});
 
