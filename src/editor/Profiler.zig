@@ -16,6 +16,12 @@ const profile = core.profile;
 pub var open: bool = false;
 var rect: dvui.Rect = .{ .x = 80, .y = 80, .w = 720, .h = 560 };
 var view: enum { by_plugin, tree } = .by_plugin;
+/// The window is too narrow for the table's full share bars (a phone).
+var narrow = false;
+/// Touch: a finger on the graph holds the frame under it only while it is down. The pointer
+/// stays where the finger lifted, and read as a hover it froze the profiler for good.
+var touch_pointer = false;
+var touch_down = false;
 
 /// The palette's "Toggle Profiler".
 pub fn toggle() void {
@@ -36,6 +42,18 @@ pub fn draw() void {
     const self_prof = profile.begin("fizzy", "profiler window");
     defer self_prof.end();
 
+    // On the screen whatever its size: a phone is narrower than the window's natural size,
+    // and its left half was off the edge with nothing to drag it back by.
+    const screen = dvui.windowRect();
+    const margin: f32 = 8;
+    const min_w = @min(520, @max(200, screen.w - 2 * margin));
+    const min_h = @min(320, @max(160, screen.h - 2 * margin));
+    rect.w = @min(rect.w, @max(min_w, screen.w - 2 * margin));
+    rect.h = @min(rect.h, @max(min_h, screen.h - 2 * margin));
+    rect.x = std.math.clamp(rect.x, margin, @max(margin, screen.w - rect.w - margin));
+    rect.y = std.math.clamp(rect.y, margin, @max(margin, screen.h - rect.h - margin));
+    narrow = rect.w < 600;
+
     // Frosted like every floating surface — and its blur shows up in its own numbers, under
     // "frost pane", with every other surface's.
     var win = core.widgets.floatingWindow(@src(), .{
@@ -43,7 +61,7 @@ pub fn draw() void {
         .rect = &rect,
         .frost = core.dialogs.dialogFrost(),
     }, .{
-        .min_size_content = .{ .w = 520, .h = 320 },
+        .min_size_content = .{ .w = min_w, .h = min_h },
         .color_fill = .{ .color = core.dialogs.dialogFill() },
         .corners = core.dialogs.surface_corners,
         .box_shadow = core.dialogs.surfaceShadow(),
@@ -78,7 +96,8 @@ pub fn draw() void {
         if (dvui.button(@src(), if (view == .by_plugin) "Call tree" else "By plugin", .{}, .{})) {
             view = if (view == .by_plugin) .tree else .by_plugin;
         }
-        dvui.labelNoFmt(@src(), "per frame, over the last 0.5 s — self is a scope's time less the scopes inside it", .{}, .{
+        // The explanation is the widest thing in the window; a phone has no room for it.
+        if (!narrow) dvui.labelNoFmt(@src(), "per frame, over the last 0.5 s — self is a scope's time less the scopes inside it", .{}, .{
             .gravity_y = 0.5,
             .color_text = .{ .color = dim },
         });
@@ -134,10 +153,28 @@ fn drawGraph(p: *profile.Profiler, font: dvui.Font, dim: dvui.Color) ?usize {
     const bar_w = r.w / @as(f32, @floatFromInt(profile.history_len));
     const scale: f32 = @floatCast(r.h / top_ns);
 
+    for (dvui.events()) |*e| {
+        if (e.evt != .mouse) continue;
+        const me = e.evt.mouse;
+        switch (me.action) {
+            .press => {
+                touch_pointer = me.button.touch();
+                if (touch_pointer) touch_down = true;
+            },
+            .release => if (me.button.touch()) {
+                touch_down = false;
+            },
+            .motion => if (!me.button.touch() and !touch_down) {
+                touch_pointer = false;
+            },
+            else => {},
+        }
+    }
+
     // Which frame the pointer is over.
     const mouse = dvui.currentWindow().mouse_pt;
     var hovered: ?usize = null;
-    if (r.contains(mouse) and dvui.clipGet().contains(mouse) and n > 0) {
+    if ((!touch_pointer or touch_down) and r.contains(mouse) and dvui.clipGet().contains(mouse) and n > 0) {
         const from_right = (r.x + r.w - mouse.x) / bar_w;
         const h: usize = @intFromFloat(@max(0, @floor(from_right)));
         if (h < n) hovered = h;
@@ -250,7 +287,7 @@ fn drawGrid(rows: []const Row, work: f64, font: dvui.Font, dim: dvui.Color) void
             const c = grid.cell(.{ .col = 5, .row = ri }, .{ .padding = .{ .x = 8, .w = 8 } });
             defer c.deinit();
             // From the left edge of the column, so bars compare by their length.
-            var bb = dvui.box(@src(), .{}, .{ .expand = .horizontal, .min_size_content = .{ .w = 140, .h = 10 }, .gravity_y = 0.5 });
+            var bb = dvui.box(@src(), .{}, .{ .expand = .horizontal, .min_size_content = .{ .w = if (narrow) 48 else 140, .h = 10 }, .gravity_y = 0.5 });
             defer bb.deinit();
             const rs = bb.data().contentRectScale();
             var bar = rs.r;
