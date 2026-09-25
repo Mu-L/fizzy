@@ -224,7 +224,9 @@ fn remove(self: *Openings, editor: *Editor, i: usize) void {
 fn draw(ctx: ?*anyopaque) anyerror!dvui.App.Result {
     const o: *Opening = @ptrCast(@alignCast(ctx orelse return .ok));
     const theme = dvui.themeGet();
-    const dim = theme.color(.window, .text).opacity(0.6);
+    // Blended toward the pane's fill rather than made translucent: a see-through glyph shows its
+    // own overlapping strokes darker where they cross, and whatever is behind the pane through it.
+    const dim = theme.color(.window, .text).lerp(theme.color(.window, .fill), 0.4);
 
     // Keyed by path: a swap photographs one placeholder in the same pane another is shown in.
     var fill = dvui.box(@src(), .{ .dir = .vertical }, .{
