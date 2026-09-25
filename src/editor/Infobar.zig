@@ -148,7 +148,9 @@ fn drawPluginEntries(bar_h: f32) void {
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = infobar.item_spacing } });
 
-    var scrollarea = dvui.scrollArea(@src(), .{ .vertical = .none, .horizontal = .auto }, .{
+    // No bar: in a strip one line tall it took its height from the chips and squashed them
+    // to nothing. Overflow still scrolls (drag, wheel), and the edge shadows show there is more.
+    var scrollarea = dvui.scrollArea(@src(), .{ .vertical = .none, .horizontal = .auto, .horizontal_bar = .hide }, .{
         .expand = .horizontal,
         .background = false,
         .padding = .all(0),
