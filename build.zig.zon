@@ -13,7 +13,7 @@
     },
     .fingerprint = 0x3311781b569a8e73,
     .name = .fizzy,
-    .version = "0.1.7",
+    .version = "0.2.0",
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zig_objc = .{
