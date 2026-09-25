@@ -424,6 +424,15 @@ fn drawLeaves(branch: *const Branch, query: *const fuzzy.Query) !void {
     }
 
     for (branch.leaves.items) |leaf| {
+        // A row out of view keeps the height it had when last drawn and draws nothing: every
+        // setting's name, description and control laid out (and its text wrapped) every frame was
+        // the pane's whole cost, most of it for rows nobody could see. Drawn in full again when it
+        // scrolls into view, and whenever the pane's width has changed since (the wrap with it).
+        // The width it was last drawn at in full; its height is the min size dvui recorded for it
+        // at the end of that frame (a box works its size out in its own `deinit`, after its
+        // children — read before that, it was short, and the rows below jumped as they scrolled).
+        const row_id = dvui.parentGet().extendId(@src(), leaf.index);
+        const drawn_w = dvui.dataGet(null, row_id, "_drawn_w", f32);
         var row = dvui.box(@src(), .{ .dir = .vertical }, .{
             .id_extra = leaf.index,
             .expand = .horizontal,
@@ -436,6 +445,17 @@ fn drawLeaves(branch: *const Branch, query: *const fuzzy.Query) !void {
             .margin = .{ .y = 6, .h = 6 },
         });
         defer row.deinit();
+        {
+            const rs = row.data().rectScale().r;
+            const out_of_view = rs.intersect(dvui.clipGet()).empty();
+            if (drawn_w) |w| if (out_of_view and @abs(w - row.data().rect.w) < 0.5) {
+                if (dvui.minSizeGet(row.data().id)) |ms| {
+                    row.data().minSizeMax(ms);
+                    continue;
+                }
+            };
+        }
+        dvui.dataSet(null, row_id, "_drawn_w", row.data().rect.w);
 
         // A `settings.Search` item draws its own rows (each with its own name), so the leaf's own
         // name/key header above them would just be a second, redundant heading — but its
