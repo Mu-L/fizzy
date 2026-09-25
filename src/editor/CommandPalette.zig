@@ -737,17 +737,26 @@ fn drawRow(
     // Click to activate. Handled before the highlight is painted so the pressed fill lands on
     // this very frame, and the row keeps drawing afterwards rather than returning early — it has
     // to survive the outro to be seen at all.
+    //
+    // A mouse activates on press. A finger cannot: touching the list is also how it is scrolled,
+    // so a touch runs through dvui's click — it activates on release, and is cancelled (capture
+    // handed to the scroll area) once the finger drags past the threshold.
     if (!self.closing) {
+        var activate_row = false;
         for (dvui.events()) |*e| {
             if (!dvui.eventMatchSimple(e, rb.data())) continue;
             if (e.evt != .mouse) continue;
             const me = e.evt.mouse;
-            if (me.action == .press and me.button.pointer()) {
+            if (me.action == .press and me.button.pointer() and !me.button.touch()) {
                 e.handle(@src(), rb.data());
-                self.selected = i;
-                self.activate(editor, rows);
+                activate_row = true;
                 break;
             }
+        }
+        if (!activate_row) activate_row = dvui.clicked(rb.data(), .{ .hover_cursor = null });
+        if (activate_row) {
+            self.selected = i;
+            self.activate(editor, rows);
         }
     }
 
