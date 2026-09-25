@@ -38,6 +38,10 @@ workspaces: std.AutoArrayHashMapUnmanaged(u64, Workspace) = .empty,
 /// plugin's own directory whenever it changes (`workbench_layout.savePanes`).
 panes: Panes,
 panes_dirty: bool = false,
+/// How tall a pane's tab strip was, the last time a pane had one. An empty pane beside others
+/// holds the same room open, so its card lines up with its neighbours' instead of starting
+/// higher.
+tab_strip_h: f32 = 0,
 open_workspace_grouping: u64 = 0,
 grouping_id_counter: u64 = 0,
 /// The tab being dragged this frame, by surface id, for the pane it lands in. Borrowed from the
