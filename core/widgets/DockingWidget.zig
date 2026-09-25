@@ -743,10 +743,16 @@ fn closeContent(self: *Dockspace) void {
         self.measure_rendering = null;
         if (self.leaf_clip) |clip| dvui.clipSet(clip);
         self.leaf_clip = null;
-        // What the cell's content asked for, for a parent split that fits to it. `min_size`
-        // has accumulated every child's report by now; dvui only stores it at `deinit`.
-        if (self.current_leaf) |leaf| dvui.dataSet(null, self.data().id, self.minKey(leaf), c.data().options.padSize(c.data().min_size));
+        // What the cell's content asked for, for a parent split that fits to it. Read after
+        // `deinit`, not before: a box totals its children's sizes into `min_size` only as it
+        // closes, so read earlier it held nothing but its own options' minimum — zero — and a
+        // split fitted to it shut (pixi's layers pane, however many layers it had).
+        const cell_id = c.data().id;
+        const pad_opts = c.data().options;
         c.deinit();
+        if (self.current_leaf) |leaf| if (dvui.minSizeGet(cell_id)) |ms| {
+            dvui.dataSet(null, self.data().id, self.minKey(leaf), pad_opts.padSize(ms));
+        };
         self.leaf_cell = null;
     }
     if (self.current_float) |f| {
