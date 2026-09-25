@@ -25,8 +25,18 @@ const profile = @import("../profile.zig");
 
 const FrameTarget = @This();
 
+/// Two window-sized targets, drawn into in turn: the one not being drawn this frame still holds
+/// the last frame, whole, for `snapshot`. Costs a second texture and no drawing.
+targets: [2]?dvui.Texture.Target = .{ null, null },
+/// Which of `targets` this frame draws into.
+index: u1 = 0,
+/// This frame's target (`targets[index]`), bound between `begin` and `end`.
 target: ?dvui.Texture.Target = null,
 bound: bool = false,
+
+/// The frame target in use, for `snapshot`. One per image: set by the host's `begin`, so a
+/// plugin image's copy stays null and asks the host (`Host`/`Editor`) instead.
+var current: ?*FrameTarget = null;
 
 /// Once, after the backend exists: stop it clearing the window each frame (see above). The
 /// SDL backend is the only one that does; others have nothing to turn off.
@@ -40,15 +50,19 @@ pub fn begin(self: *FrameTarget) void {
     const win = dvui.windowRectPixels();
     const w: u32 = @intFromFloat(@max(1, @round(win.w)));
     const h: u32 = @intFromFloat(@max(1, @round(win.h)));
-    if (self.target) |t| {
+    // A resize makes both stale: last frame's is the wrong size to be read as this one's.
+    for (&self.targets) |*slot| if (slot.*) |t| {
         if (t.width != w or t.height != h) {
             t.destroyLater();
-            self.target = null;
+            slot.* = null;
         }
+    };
+    self.index +%= 1;
+    if (self.targets[self.index] == null) {
+        self.targets[self.index] = dvui.textureCreateTarget(.{ .width = w, .height = h, .interpolation = .nearest }) catch return;
     }
-    if (self.target == null) {
-        self.target = dvui.textureCreateTarget(.{ .width = w, .height = h, .interpolation = .nearest }) catch return;
-    }
+    self.target = self.targets[self.index];
+    current = self;
     const t = self.target.?;
     // `create` clears once; every frame after starts from what the last one left.
     {
@@ -110,8 +124,50 @@ pub fn end(self: *FrameTarget) void {
     dvui.renderTexture(tex, .{ .r = dvui.windowRectPixels(), .s = 1 }, .{}) catch {};
 }
 
-/// Drop the target. Only valid between `Window.begin` and `Window.end`.
+/// Drop the targets. Only valid between `Window.begin` and `Window.end`.
 pub fn deinit(self: *FrameTarget) void {
-    if (self.target) |t| t.destroyLater();
+    for (self.targets) |slot| if (slot) |t| t.destroyLater();
+    if (current == self) current = null;
     self.* = .{};
+}
+
+/// `rect` (window pixels) as the last frame drew it, copied into a texture the caller owns
+/// (`dvui.textureDestroyLater` it). What a pane showed a moment ago, after what it showed has
+/// gone: a document closing can unload at once and its pane still slide shut over the picture
+/// of it. Null before a frame has been drawn, off the window, or on a backend without targets.
+pub fn snapshot(rect: dvui.Rect.Physical) ?dvui.Texture {
+    const self = current orelse return null;
+    if (!self.bound) return null;
+    const prev = self.targets[self.index +% 1] orelse return null;
+    const r = rect.intersect(dvui.windowRectPixels());
+    if (r.w < 1 or r.h < 1) return null;
+    const w: u32 = @intFromFloat(@round(r.w));
+    const h: u32 = @intFromFloat(@round(r.h));
+    const src = dvui.Texture.fromTargetTemp(prev) catch return null;
+    const out = dvui.textureCreateTarget(.{ .width = w, .height = h, .interpolation = .linear }) catch return null;
+
+    const prev_rendering = dvui.renderingSet(true);
+    defer _ = dvui.renderingSet(prev_rendering);
+    const prev_alpha = dvui.alpha(1);
+    defer dvui.alphaSet(prev_alpha);
+    var rt = dvui.currentWindow().render_target;
+    rt.texture = out;
+    rt.offset = .{};
+    const was = dvui.renderTarget(rt);
+    {
+        const prev_clip = dvui.clipGet();
+        defer dvui.clipSet(prev_clip);
+        const dest: dvui.Rect.Physical = .{ .w = @floatFromInt(w), .h = @floatFromInt(h) };
+        dvui.clipSet(dest);
+        const sw: f32 = @floatFromInt(src.width);
+        const sh: f32 = @floatFromInt(src.height);
+        const copy = if (dvui.Backend.support_texture_blend) blk: {
+            dvui.currentWindow().backend.textureBlend(src, .copy) catch break :blk false;
+            break :blk true;
+        } else false;
+        defer if (copy) dvui.currentWindow().backend.textureBlend(src, .over) catch {};
+        dvui.renderTexture(src, .{ .r = dest, .s = 1 }, .{ .uv = .{ .x = r.x / sw, .y = r.y / sh, .w = r.w / sw, .h = r.h / sh } }) catch {};
+    }
+    _ = dvui.renderTarget(was);
+    return dvui.textureFromTarget(out) catch null;
 }

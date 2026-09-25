@@ -5310,8 +5310,26 @@ pub fn closeFile(editor: *Editor, index: usize) !void {
     try editor.closeFileID(doc.id);
 }
 
+/// If closing `doc` empties a pane that will then slide shut (one of several), hand that pane a
+/// picture of itself from the last frame to slide shut with. The document still unloads now;
+/// only its image stays for the slide.
+fn snapshotClosingPane(editor: *Editor, doc: sdk.DocHandle) void {
+    const wb = editor.workbench;
+    if (wb.panes.nodes.items[wb.panes.root] == .leaf) return;
+    const id = sdk.document.surfaceId(editor.app.host.arena(), doc.owner.id, doc.owner.documentPath(doc)) catch return;
+    for (wb.workspaces.values()) |*ws| {
+        if (!ws.hasTab(id) or ws.tabCount() != 1) continue;
+        const r = ws.pane_rect_physical orelse return;
+        const snap = fizzy.core.FrameTarget.snapshot(r) orelse return;
+        if (ws.closing_snapshot) |old| dvui.textureDestroyLater(old);
+        ws.closing_snapshot = snap;
+        return;
+    }
+}
+
 pub fn rawCloseFile(editor: *Editor, index: usize) !void {
     const doc = editor.app.docAt(index) orelse return;
+    editor.snapshotClosingPane(doc);
     editor.workbench.documentClosed(doc);
 
     if (editor.document_watcher) |*w| w.untrack(doc.id);
@@ -5323,6 +5341,7 @@ pub fn rawCloseFile(editor: *Editor, index: usize) !void {
 
 pub fn rawCloseFileID(editor: *Editor, id: u64) !void {
     const doc = editor.app.open_files.get(id) orelse return;
+    editor.snapshotClosingPane(doc);
     editor.workbench.documentClosed(doc);
 
     if (editor.document_watcher) |*w| w.untrack(doc.id);

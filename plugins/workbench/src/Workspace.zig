@@ -40,6 +40,13 @@ tabs_insert_before_index: ?usize = null,
 /// Physical-pixel content rect of this pane's canvas, captured each frame. `null` until the pane
 /// has rendered once. The editor-level load/save toasts centre over it.
 canvas_rect_physical: ?dvui.Rect.Physical = null,
+/// The whole pane, tab strip included, as last drawn — what the host snapshots when this
+/// pane's last document closes.
+pane_rect_physical: ?dvui.Rect.Physical = null,
+/// The pane as it looked just before its last document closed (the host's
+/// `FrameTarget.snapshot`), drawn while the emptied pane slides shut so it reads as the file
+/// closing rather than as a blank pane. Freed when the pane goes, or refills.
+closing_snapshot: ?dvui.Texture = null,
 
 pub fn init(grouping: u64) Workspace {
     return .{ .grouping = grouping };
@@ -48,6 +55,7 @@ pub fn init(grouping: u64) Workspace {
 /// Release any plugin-owned per-pane canvas chrome. Called when a pane is removed and for each
 /// pane at shutdown.
 pub fn deinit(self: *Workspace) void {
+    self.dropSnapshot();
     for (runtime.host().plugins.items) |plugin| {
         plugin.removeCanvasPane(self.grouping, runtime.allocator());
     }
@@ -114,8 +122,28 @@ pub fn draw(self: *Workspace) !dvui.App.Result {
     const tabs = region.matching();
     const selected = region.selected();
     self.active = if (selected) |s| documentOf(s) else null;
+    const pane_r = pane_box.rectScale().r;
+    self.pane_rect_physical = pane_r;
 
-    if (tabs.len > 0) self.drawTabs(region, tabs, selected);
+    if (tabs.len > 0) {
+        self.dropSnapshot();
+    } else if (self.closing_snapshot) |snap| {
+        // Sliding shut after its last document closed: the picture of it, from the pane's
+        // top left, cut off by the pane as it narrows — the document leaving, not a blank.
+        const prev_clip = dvui.clip(pane_r);
+        defer dvui.clipSet(prev_clip);
+        dvui.renderTexture(snap, .{ .r = .{ .x = pane_r.x, .y = pane_r.y, .w = @floatFromInt(snap.width), .h = @floatFromInt(snap.height) }, .s = 1 }, .{}) catch {};
+        return .ok;
+    }
+
+    if (tabs.len > 0) {
+        self.drawTabs(region, tabs, selected);
+    } else if (!solePane()) {
+        // An empty pane in a split looks like its neighbours with nothing open: the tab strip's
+        // room, then the same card, empty — not a bare pane that starts higher than they do.
+        const h = runtime.workbench().tab_strip_h;
+        if (h > 0) _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = h }, .id_extra = @intCast(self.grouping) });
+    }
     try self.drawCanvas(region, tabs.len > 0);
     return .ok;
 }
@@ -132,7 +160,14 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
         .padding = dvui.Rect.all(0),
         .id_extra = @intCast(self.grouping),
     });
-    defer tabs_box.deinit();
+    defer {
+        const id = tabs_box.data().id;
+        tabs_box.deinit();
+        // Read after `deinit`: a box totals its children only as it closes.
+        if (dvui.minSizeGet(id)) |ms| if (ms.h > 0) {
+            runtime.workbench().tab_strip_h = ms.h;
+        };
+    }
 
     var scroll_area = dvui.scrollArea(@src(), .{ .horizontal = .auto, .horizontal_bar = .hide, .vertical_bar = .hide }, .{
         .expand = .none,
@@ -630,8 +665,7 @@ fn drawCanvas(self: *Workspace, region: sdk.Host.Region, has_tabs: bool) !void {
         // it. An empty pane beside others — above all one sliding shut after its last tab
         // closed — is just an empty document pane: the logo and buttons flashing up in it as it
         // went read as a page opening, not a file closing.
-        const wb = runtime.workbench();
-        if (wb.panes.nodes.items[wb.panes.root] != .leaf) return;
+        if (!solePane()) return;
 
         const alpha = dvui.alpha(1.0);
         dvui.alphaSet(1.0);
@@ -639,6 +673,17 @@ fn drawCanvas(self: *Workspace, region: sdk.Host.Region, has_tabs: bool) !void {
 
         try self.drawHomePage();
     }
+}
+
+fn dropSnapshot(self: *Workspace) void {
+    if (self.closing_snapshot) |t| dvui.textureDestroyLater(t);
+    self.closing_snapshot = null;
+}
+
+/// Whether this is the workbench's only pane — the one that shows the home page when empty.
+fn solePane() bool {
+    const wb = runtime.workbench();
+    return wb.panes.nodes.items[wb.panes.root] == .leaf;
 }
 
 pub fn drawHomePage(_: *Workspace) !void {
