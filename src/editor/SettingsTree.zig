@@ -313,7 +313,8 @@ pub fn draw() !void {
     // browsing tree's animation state. Separate `id_extra` keeps them cleanly apart.
     // No focus group of its own: the Keybinds and File Types sections are grids, whose column
     // headers open one, and a subwindow holds one group.
-    var tree = core.widgets.TreeWidget.tree(@src(), .{ .focus_group = false }, .{
+    // Settings keep their declared order: a row dragged elsewhere had nowhere to go.
+    var tree = core.widgets.TreeWidget.tree(@src(), .{ .focus_group = false, .enable_reordering = false }, .{
         .id_extra = @intFromBool(searching),
         .expand = .horizontal,
         .background = false,
