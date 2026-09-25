@@ -626,6 +626,13 @@ fn drawCanvas(self: *Workspace, region: sdk.Host.Region, has_tabs: bool) !void {
         var box = sdk.pane_layout.emptyStateCard(content_color, self.grouping);
         defer box.deinit();
 
+        // The home page belongs to the editor as a whole, so only the one pane there is shows
+        // it. An empty pane beside others — above all one sliding shut after its last tab
+        // closed — is just an empty document pane: the logo and buttons flashing up in it as it
+        // went read as a page opening, not a file closing.
+        const wb = runtime.workbench();
+        if (wb.panes.nodes.items[wb.panes.root] != .leaf) return;
+
         const alpha = dvui.alpha(1.0);
         dvui.alphaSet(1.0);
         defer dvui.alphaSet(alpha);
