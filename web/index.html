@@ -407,16 +407,75 @@
       function rememberPlugin(id, url) {
         try {
           const all = rememberedPlugins();
+          // An update names a new build: the old one's bytes are no longer anybody's.
+          if (all[id] && all[id] !== url) dropPluginBytes(all[id]);
           all[id] = url;
           localStorage.setItem(rememberedKey, JSON.stringify(all));
         } catch (_) {}
+        keepPluginBytes(url);
       }
       function forgetPlugin(id) {
         try {
           const all = rememberedPlugins();
+          if (all[id]) dropPluginBytes(all[id]);
           delete all[id];
           localStorage.setItem(rememberedKey, JSON.stringify(all));
         } catch (_) {}
+      }
+
+      // ---- installed plugins' bytes, kept between visits --------------------------------------
+      //
+      // Every visit used to download every installed plugin again — `no-store`, and for a release
+      // asset (no CORS header) a failed direct fetch and then the proxy — before it could compile
+      // one. The bytes of a build the host has accepted now live in Cache Storage (localStorage
+      // holds ~5 MB of strings; a plugin is megabytes of binary), keyed by its URL. A store URL
+      // names one release and never changes under it, so a hit is simply the bytes: no network,
+      // and an update is a new URL — `rememberPlugin` drops the old entry, `forgetPlugin` the
+      // uninstalled one. A dev build served beside the app (`?plugin=`) is rebuilt at the same
+      // URL, so it is never kept.
+      const pluginCacheName = "fizzy-plugins-v1";
+      const pluginCacheAvailable = typeof caches !== "undefined";
+      // Verified bytes of builds that have linked but not yet registered, by URL: the host
+      // remembers a build only once it has registered (see the end of `loadPlugin`), and only
+      // then are they kept.
+      const unkeptPluginBytes = new Map();
+      function keepablePluginUrl(url) {
+        if (!pluginCacheAvailable || !url) return false;
+        try {
+          const u = new URL(url, document.baseURI);
+          return (u.protocol === "https:" || u.protocol === "http:") && u.origin !== location.origin;
+        } catch (_) {
+          return false;
+        }
+      }
+      async function cachedPluginBytes(url) {
+        if (!keepablePluginUrl(url)) return null;
+        try {
+          const hit = await (await caches.open(pluginCacheName)).match(url);
+          return hit ? await hit.arrayBuffer() : null;
+        } catch (_) {
+          return null;
+        }
+      }
+      function keepPluginBytes(url) {
+        const bytes = unkeptPluginBytes.get(url);
+        unkeptPluginBytes.delete(url);
+        if (!bytes || !keepablePluginUrl(url)) return;
+        caches.open(pluginCacheName)
+          .then((c) => c.put(url, new Response(bytes, { headers: { "content-type": "application/wasm" } })))
+          .catch((err) => console.warn("fizzy: could not keep plugin", url, err));
+        // Ask once for storage the browser will not clear under pressure; refused is fine.
+        if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+      }
+      function dropPluginBytes(url) {
+        if (!keepablePluginUrl(url)) return;
+        caches.open(pluginCacheName).then((c) => c.delete(url)).catch(() => {});
+      }
+      // Start reading the remembered builds out of the cache now, while the editor itself is
+      // still downloading and starting — by the time it asks for them they are in hand.
+      const warmPluginBytes = new Map();
+      for (const url of Object.values(rememberedPlugins())) {
+        if (keepablePluginUrl(url)) warmPluginBytes.set(url, cachedPluginBytes(url));
       }
       function requestPlugin(id, url) {
         const inst = wasmInstance;
@@ -548,14 +607,27 @@
 
       async function loadPlugin(req, url, id, sha256) {
         const host = wasmInstance;
-        const bytes = await fetchPluginBytes(url);
+        // A build kept from an earlier visit, if there is one (see "installed plugins' bytes").
+        const warm = warmPluginBytes.get(url);
+        warmPluginBytes.delete(url);
+        let bytes = await (warm || cachedPluginBytes(url));
         // The check the desktop downloader has always done. Before `compile`, so a tampered or
-        // truncated module is never handed to the engine, let alone registered.
-        if (sha256) {
-          const got = await sha256Hex(bytes);
-          if (got !== sha256.toLowerCase()) {
-            throw new Error("sha256 mismatch for " + id + ": expected " + sha256 + ", got " + got);
+        // truncated module is never handed to the engine, let alone registered. A kept build is
+        // held to it too when the registry's hash is at hand; one that fails it is dropped and
+        // downloaded again rather than refused.
+        if (bytes && sha256 && (await sha256Hex(bytes)) !== sha256.toLowerCase()) {
+          dropPluginBytes(url);
+          bytes = null;
+        }
+        if (!bytes) {
+          bytes = await fetchPluginBytes(url);
+          if (sha256) {
+            const got = await sha256Hex(bytes);
+            if (got !== sha256.toLowerCase()) {
+              throw new Error("sha256 mismatch for " + id + ": expected " + sha256 + ", got " + got);
+            }
           }
+          if (keepablePluginUrl(url)) unkeptPluginBytes.set(url, bytes);
         }
         const module = await WebAssembly.compile(bytes);
         const needs = readDylinkNeeds(module);
