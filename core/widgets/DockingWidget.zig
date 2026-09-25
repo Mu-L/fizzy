@@ -503,9 +503,18 @@ fn leaveSplit(self: *Dockspace, frame: *StackFrame) void {
         self.animating = true;
         if (@abs(a.end_val - target) > 0.0005) {
             // Retargeted mid-slide (a leaf emptied while opening): continue from where it is.
-            dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = ease_us, .easing = dvui.easing.outCubic });
+            dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = ease_us, .easing = slideEasing(sp, frame.shown.*, target) });
         } else {
-            frame.shown.* = a.value();
+            // Clamped: a spring's overshoot must not carry a pane past the split's ends, nor a
+            // fitted child past the most it may take (`fit.max`) — the bounce happens inside
+            // its limits or not at all.
+            var lo: f32 = 0;
+            var hi: f32 = 1;
+            if (sp.fit) |fit| switch (fit.child) {
+                .first => hi = @max(target, fit.max),
+                .second => lo = @min(target, 1 - fit.max),
+            };
+            frame.shown.* = std.math.clamp(a.value(), lo, hi);
             if (a.done()) {
                 frame.shown.* = target;
                 if (sp.closing != null) self.finishClose(frame.node);
@@ -513,11 +522,26 @@ fn leaveSplit(self: *Dockspace, frame: *StackFrame) void {
         }
         dvui.refresh(null, @src(), self.data().id);
     } else if (@abs(frame.shown.* - target) > 0.0005) {
-        dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = ease_us, .easing = dvui.easing.outCubic });
+        dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = ease_us, .easing = slideEasing(sp, frame.shown.*, target) });
         dvui.refresh(null, @src(), self.data().id);
     } else if (sp.closing != null) {
         self.finishClose(frame.node);
     }
+}
+
+/// How a split slides from `from` to `to`. A fitted child growing to fit its content (pixi's
+/// layers opening onto its list) springs a little past and settles back — it reads as the pane
+/// arriving. Everything else — a fitted child shrinking, a pane closing, any split with no fit —
+/// eases out with no overshoot: a shrink that went past its mark would briefly hide what it is
+/// shrinking to show.
+fn slideEasing(sp: Layout.Node.Split, from: f32, to: f32) *const fn (f32) f32 {
+    const fit = sp.fit orelse return dvui.easing.outCubic;
+    if (sp.closing != null) return dvui.easing.outCubic;
+    const growing = switch (fit.child) {
+        .first => to > from,
+        .second => to < from,
+    };
+    return if (growing) dvui.easing.outBack else dvui.easing.outCubic;
 }
 
 /// The split has shut over `going`: collapse it. State is keyed by identity, so the kept child's
