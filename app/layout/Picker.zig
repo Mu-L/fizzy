@@ -297,6 +297,16 @@ pub fn draw(self: *Picker, f: *Layout) void {
     if (state.store_catalog) |store| drawStoreSection(f, &region, store, &row, &col);
 }
 
+/// How long a finger holds still on a card before it lifts rather than scrolls the list.
+const hold_to_lift_ns: i128 = 400 * std.time.ns_per_ms;
+
+/// A finger is down on the card `id` and has held there long enough to lift it.
+fn armedTouch(id: dvui.Id) bool {
+    if (!dvui.captured(id)) return false;
+    const down = dvui.dataGet(null, id, "_touch_down", i128) orelse return false;
+    return dvui.frameTimeNS() - down >= hold_to_lift_ns;
+}
+
 /// What a card did this frame.
 const Hit = union(enum) {
     none,
@@ -322,31 +332,65 @@ fn card(f: *Layout, s: *const sdk.Surface, on: bool, id_extra: usize) Hit {
         .color_border = .{ .color = if (on) theme.color(.highlight, .fill) else theme.color(.control, .border) },
     });
     defer bw.deinit();
-    bw.processEvents();
+    const id = bw.data().id;
 
     // The tile's rect is remembered from last frame: the press that starts a
     // drag is read here, before the tile is laid out.
-    const tile_rect = dvui.dataGet(null, bw.data().id, "_tile", dvui.Rect.Physical) orelse bw.data().borderRectScale().r;
+    const tile_rect = dvui.dataGet(null, id, "_tile", dvui.Rect.Physical) orelse bw.data().borderRectScale().r;
+    // A finger on a card is also how the list under it scrolls, so a finger has to hold still
+    // for a moment before the card lifts; moving sooner scrolls, as it does anywhere else in the
+    // list. A mouse lifts on any drag. Read ahead of the button's own events, because the button
+    // gives the pointer up the moment a finger moves past dvui's threshold — it takes every touch
+    // drag for a scroll, and with it went the only drag a card could start.
+    const armed = armedTouch(id);
     var lifted: ?Hit = null;
     for (dvui.events()) |*e| {
         if (e.evt != .mouse) continue;
         const me = e.evt.mouse;
-        // The button took the press and the capture; from here the pointer is ours.
-        if (!dvui.captured(bw.data().id)) continue;
+        if (me.action != .motion or !dvui.captured(id)) continue;
+        if (me.button.touch() and !armed) continue;
+        if (dvui.dragging(me.p, "fizzy_view") != null) {
+            e.handle(@src(), bw.data());
+            lifted = .{ .lifted = .{ .tile = tile_rect, .event_num = e.num } };
+            break;
+        } else if (me.button.touch()) {
+            // Armed but not yet past the threshold: still ours, not a scroll's.
+            e.handle(@src(), bw.data());
+        }
+    }
+    bw.processEvents();
+
+    // The button took the press and the capture; from here the pointer is ours.
+    for (dvui.events()) |*e| {
+        if (e.evt != .mouse) continue;
+        const me = e.evt.mouse;
+        if (!dvui.captured(id)) continue;
         if (me.action == .press and me.button.pointer()) {
             dvui.dragPreStart(me.button, me.p, .{
                 .offset = tile_rect.topLeft().diff(me.p),
                 .size = tile_rect.size(),
                 .name = "fizzy_view",
             });
-        }
-        if (me.action == .motion and dvui.dragging(me.p, "fizzy_view") != null) {
-            e.handle(@src(), bw.data());
-            lifted = .{ .lifted = .{ .tile = tile_rect, .event_num = e.num } };
-            break;
+            if (me.button.touch()) {
+                dvui.dataSet(null, id, "_touch_down", dvui.frameTimeNS());
+                // Wake when the hold is up, so the card shows it can be moved without the
+                // finger having to move first.
+                dvui.timer(id, @intCast(@divTrunc(hold_to_lift_ns, std.time.ns_per_us)));
+            } else {
+                dvui.dataRemove(null, id, "_touch_down");
+            }
         }
     }
+    if (!dvui.captured(id)) dvui.dataRemove(null, id, "_touch_down");
     bw.drawBackground();
+    if (armed and lifted == null) {
+        // Held long enough: the card is ready to move, and says so before the finger does.
+        const rs = bw.data().borderRectScale();
+        rs.r.stroke(dvui.CornerRect.all(6).scale(rs.s, dvui.CornerRect.Physical), .{
+            .color = .{ .color = theme.color(.highlight, .fill) },
+            .thickness = 2 * rs.s,
+        });
+    }
 
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{});
     defer col.deinit();

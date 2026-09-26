@@ -683,7 +683,10 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
 
     const content = box.data().contentRect();
     var bw: dvui.ButtonWidget = undefined;
-    bw.init(@src(), .{ .draw_focus = false }, .{
+    // `touch_drag`: this button is a handle — dragging it is how a view is moved. Without it
+    // dvui takes a finger dragging past the threshold for a scroll, drops the capture and ends
+    // the drag, so the chooser only ever moved under a mouse.
+    bw.init(@src(), .{ .draw_focus = false, .touch_drag = true }, .{
         .tab_index = 0,
         .rect = .{
             .x = content.w - corner_button_size - 4,
