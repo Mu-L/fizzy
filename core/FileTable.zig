@@ -1458,6 +1458,11 @@ test "a mount's failed listing is empty for a while, then asked again" {
     try mem.put("/a.txt", "");
     try table.mount("mem://box", mem.fs());
     defer table.unmount("mem://box");
+    // The failure is the point, so its warning is expected — and the build runner fails a test
+    // step that writes to stderr, passing tests and all.
+    const log_level = t.log_level;
+    t.log_level = .err;
+    defer t.log_level = log_level;
     // A directory the mount does not have: it answers NotFound.
     _ = table.listDir("mem://box/missing");
     table.pump();
