@@ -660,7 +660,7 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
     const available = !filled or picker_here or near or dragging_this or drop_here or pressing or showing;
     const alpha = chooserFade(box.data().id, if (available) 1 else 0);
 
-    if (alpha < 0.01 and !available and !dragging_this and !showing) return;
+    if (alpha < 0.01 and !available and !dragging_this and !showing and !ViewDrag.zonesShowing(self, opts.name, box.data().id)) return;
 
     var ftb: dvui.RenderFrontToBack = undefined;
     ftb.init();
@@ -844,7 +844,9 @@ fn drawContentsPhotographed(
 ) !void {
     const captured = core.anim.CrossFade.beginCapture(rect) orelse {
         // No texture targets (web) or nothing to capture: the drag goes
-        // without its still rather than the place going without its draw.
+        // without its still rather than the place going without its draw —
+        // and its drop zones go without one too (`pictures_unavailable`).
+        if (rect.w >= 1 and rect.h >= 1) self.state.view_drag.pictures_unavailable = true;
         if (on_screen) _ = try drawContents(self, opts, keywords);
         return;
     };

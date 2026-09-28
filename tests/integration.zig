@@ -3538,6 +3538,72 @@ test "while a loose drag's landing is previewed, the place holding the view lets
     try std.testing.expect(VD.previewAssignment(&layout, "Pane 1") == null);
 }
 
+// The middle of the place a view was lifted from previews nothing — a drop there is no move —
+// so it is where the drop zones are the whole picture. They must show there, and the place must
+// keep drawing normally under them: retaking its picture every frame drew it through the
+// capture path, without its background.
+test "dragging a view over its own place shows that place's drop zones" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitExtents(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    defer editor.app.layout.view_drag.discard();
+    EndlessFrame.editor = editor;
+    defer EndlessFrame.editor = null;
+
+    const draw = struct {
+        fn f(_: ?*anyopaque) anyerror!dvui.App.Result {
+            return .ok;
+        }
+    }.f;
+    try editor.app.host.registerSurface(.{ .id = "test.view", .title = "View", .keywords = &.{"slot"}, .draw = draw });
+    try dvui.testing.settle(EndlessFrame.frame);
+    var center: fizzy.Editor.Layout.Region = undefined;
+    for (editor.app.layout.regions.items) |r| {
+        if (std.mem.eql(u8, r.name, "Center")) center = r;
+    }
+
+    // The corner button, at the place's top right.
+    const cw = dvui.currentWindow();
+    const button: dvui.Point.Physical = .{ .x = center.bounds.x + center.bounds.w - 16, .y = center.bounds.y + 16 };
+    _ = try cw.addEventMouseMotion(.{ .pt = button });
+    _ = try dvui.testing.step(EndlessFrame.frame);
+    _ = try dvui.testing.step(EndlessFrame.frame);
+    _ = try cw.addEventMouseButton(.left, .press);
+    _ = try dvui.testing.step(EndlessFrame.frame);
+    // Into the middle of the same place.
+    const mid = center.bounds.center();
+    var i: usize = 1;
+    while (i <= 12) : (i += 1) {
+        const t: f32 = @as(f32, @floatFromInt(i)) / 12;
+        _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = button.x + (mid.x - button.x) * t, .y = button.y + (mid.y - button.y) * t } });
+        _ = try dvui.testing.step(EndlessFrame.frame);
+    }
+    for (0..6) |_| _ = try dvui.testing.step(EndlessFrame.frame);
+
+    const d = &editor.app.layout.view_drag;
+    try std.testing.expect(d.active());
+    // The place as this frame declared it: its id is not the one it had before its tree was set up.
+    for (editor.app.layout.regions.items) |r| {
+        if (std.mem.eql(u8, r.name, "Center")) center = r;
+    }
+    // The zones show whether or not the place can be photographed (a seed tree's leaf, as here,
+    // is not; nor is anything on a backend without texture targets).
+    try std.testing.expect(fizzy.core.widgets.DropZones.showing(center.id));
+    // Where a picture was taken, it is kept, not retaken every frame.
+    if (d.hover_texture != null) {
+        try std.testing.expectEqualStrings("Center", d.hover_name);
+        const taken = d.hover_texture;
+        _ = try dvui.testing.step(EndlessFrame.frame);
+        try std.testing.expect(std.meta.eql(taken, d.hover_texture));
+    }
+}
+
 // `core` is not a test root, so its widgets' pure rules are tested here.
 const DZ = fizzy.core.widgets.DropZones;
 

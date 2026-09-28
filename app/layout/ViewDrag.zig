@@ -73,6 +73,16 @@ hover_frost: core.anim.Frost = .{},
 /// made every dissolve a little larger than what it was dissolving from.
 hover_rect: dvui.Rect.Physical = .{},
 hover_name: []const u8 = "",
+/// The place aimed at before this one, and its picture: its drop zones fade out from it after
+/// the pointer has moved on (`drawZones`). Retired from `hover_*`, never taken on its own.
+leave_texture: ?dvui.Texture = null,
+leave_frost: core.anim.Frost = .{},
+leave_rect: dvui.Rect.Physical = .{},
+leave_name: []const u8 = "",
+/// A capture was tried this drag and the backend could not keep one (no texture targets, or no
+/// way to turn one into a texture: the web, the test backend). Nothing will ever be photographed, so the drop zones draw as plain
+/// glass rather than wait for a picture.
+pictures_unavailable: bool = false,
 /// The places this drag can land on, and where they were, frozen at lift.
 targets: [max_targets]Target = undefined,
 target_count: usize = 0,
@@ -109,14 +119,19 @@ pub fn loose(self: ViewDrag) bool {
 pub fn discard(self: *ViewDrag) void {
     if (self.texture) |tex| dvui.Texture.destroyLater(tex);
     if (self.hover_texture) |tex| dvui.Texture.destroyLater(tex);
+    if (self.leave_texture) |tex| dvui.Texture.destroyLater(tex);
     self.frost.drop();
     self.hover_frost.drop();
+    self.leave_frost.drop();
     self.* = .{};
 }
 
 pub fn takePicture(self: *ViewDrag, pic: *dvui.Picture) void {
     pic.stop();
-    const tex = dvui.textureFromTarget(pic.texture) catch return;
+    const tex = dvui.textureFromTarget(pic.texture) catch {
+        self.pictures_unavailable = true;
+        return;
+    };
     if (self.texture) |old| dvui.Texture.destroyLater(old);
     self.frost.drop();
     self.texture = tex;
@@ -126,9 +141,17 @@ pub fn takePicture(self: *ViewDrag, pic: *dvui.Picture) void {
 
 pub fn takeHover(self: *ViewDrag, pic: *dvui.Picture, name: []const u8) void {
     pic.stop();
-    const tex = dvui.textureFromTarget(pic.texture) catch return;
-    if (self.hover_texture) |old| dvui.Texture.destroyLater(old);
-    self.hover_frost.drop();
+    const tex = dvui.textureFromTarget(pic.texture) catch {
+        self.pictures_unavailable = true;
+        return;
+    };
+    if (std.mem.eql(u8, self.hover_name, name)) {
+        if (self.hover_texture) |old| dvui.Texture.destroyLater(old);
+        self.hover_frost.drop();
+    } else {
+        // Another place's picture: keep it for its zones to fade out on.
+        self.retireHover();
+    }
     self.hover_texture = tex;
     self.hover_rect = pic.r;
     self.hover_name = name;
@@ -158,6 +181,9 @@ pub const Shot = struct {
 pub fn shotWanted(l: *Layout, name: []const u8, is_source: bool, plan: ?Drop.Plan) Shot {
     const d = l.state.view_drag;
     if (!d.active()) return .{};
+    // The backend cannot keep a picture: asking again every frame would only redraw the place
+    // through a capture that goes nowhere.
+    if (d.pictures_unavailable) return .{};
     var shot: Shot = .{ .card = is_source and d.texture == null };
     // Every preview dissolves the place's old pixels away — the pane slides
     // over them on a split, the other view replaces them on a swap — so any
@@ -188,6 +214,20 @@ pub fn keepShot(l: *Layout, shot: Shot, pic: *dvui.Picture, name: []const u8) ?d
     }
     pic.stop();
     return null;
+}
+
+/// Move the aimed-at place's picture to `leave_*`, for its zones to fade out on, dropping the
+/// picture that was there.
+pub fn retireHover(self: *ViewDrag) void {
+    if (self.leave_texture) |tex| dvui.Texture.destroyLater(tex);
+    self.leave_frost.drop();
+    self.leave_texture = self.hover_texture;
+    self.leave_frost = self.hover_frost;
+    self.leave_rect = self.hover_rect;
+    self.leave_name = self.hover_name;
+    self.hover_texture = null;
+    self.hover_frost = .{};
+    self.hover_name = "";
 }
 
 pub fn clearHover(self: *ViewDrag) void {
@@ -463,10 +503,13 @@ fn aim(l: *Layout, d: *ViewDrag, name: []const u8, split: ?SplitTree.Side, t: f3
     d.preview_t = t;
     // Only a swap needs the destination's own view: a split leaves it in place.
     d.other_id = if (name.len > 0 and split == null) visibleId(l, name) orelse "" else "";
-    // Re-aimed at another part of the same place: its picture still stands (it was taken
-    // before any preview opened, and aiming only changes once the last one has shut), and the
-    // drop zones are cut from it — retaking it blanked them for a frame.
-    if (!std.mem.eql(u8, d.hover_name, name)) d.clearHover();
+    // The picture is the place under the pointer's, not the preview's: the drop zones are cut
+    // from it whether or not anything is previewed. Aimed at nothing (the middle of the place
+    // the view left, which previews nothing) it stays; re-aimed within the same place it still
+    // stands (taken before any preview opened, and aiming only changes once the last has shut).
+    // Only another place retires it. Dropping it on every frame aimed at nothing retook it on
+    // every frame, through the capture path, which drew the place without its background.
+    if (name.len > 0 and !std.mem.eql(u8, d.hover_name, name)) d.retireHover();
 }
 
 pub fn previewOn(l: *Layout, name: []const u8) bool {
@@ -720,25 +763,56 @@ fn aimedAt(l: *Layout, name: []const u8) bool {
 /// the pointer dissolving sharp over the live preview of that drop. Call after the preview has
 /// drawn (`drawHint`), so the glass lies over it. `key` is any id stable for the place.
 pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
-    if (!aimedAt(l, name)) return;
+    const aimed = aimedAt(l, name);
+    // Left for another place (or the drag ended over nothing): its zones fade out rather than
+    // vanish, for as long as they are still showing.
+    if (!aimed and !DropZones.showing(key)) return;
     const d = &l.state.view_drag;
     const whole = placeBounds(l.state, name) orelse return;
     const scale = dvui.currentWindow().natural_scale;
     const zones = DropZones.rects(whole, scale);
 
+    var pictured = false;
     var frost: ?DropZones.Frosted = null;
     if (d.hover_texture) |tex| if (std.mem.eql(u8, d.hover_name, name)) {
+        pictured = true;
         d.hover_frost.prepare(tex);
         if (d.hover_frost.texture) |t| frost = .{ .texture = t, .rect = d.hover_rect };
     };
-    // The picture is taken by the place's own draw, a frame after it becomes the target; with
-    // the blur on, wait for it rather than flash plain glass first.
-    if (frost == null and core.anim.blurRadius() >= 1) return;
+    if (!pictured) if (d.leave_texture) |tex| if (std.mem.eql(u8, d.leave_name, name)) {
+        pictured = true;
+        d.leave_frost.prepare(tex);
+        if (d.leave_frost.texture) |t| frost = .{ .texture = t, .rect = d.leave_rect };
+    };
+    // The picture is taken by the place's own draw, a frame after it becomes the target: wait
+    // that frame rather than flash plain glass first. Once it is taken, a blur that could not be
+    // made (the blur off, a backend with no render targets) is plain glass, never no zones.
+    if (!pictured and core.anim.blurRadius() >= 1 and !d.pictures_unavailable) {
+        // A place left before its picture arrived has nothing to fade out from.
+        if (!aimed) {
+            DropZones.forget(key);
+            return;
+        }
+        // Waited on for a couple of frames at most: a place drawn where nothing photographs it
+        // (a seed tree's leaf) must still show its zones, as plain glass.
+        const waited = dvui.dataGetPtrDefault(null, key, "_zones_wait", u8, 0);
+        if (waited.* < 2) {
+            waited.* += 1;
+            dvui.refresh(null, @src(), key);
+            return;
+        }
+    }
 
     const prev_clip = dvui.clipGet();
     defer dvui.clipSet(prev_clip);
     dvui.clipSet(whole);
-    DropZones.draw(key, zones, DropZones.at(zones, dvui.currentWindow().mouse_pt), frost, scale);
+    const hovered: ?DropZones.Zone = if (aimed) DropZones.at(zones, dvui.currentWindow().mouse_pt) else null;
+    DropZones.draw(key, zones, hovered, frost, scale, aimed);
+}
+
+/// Whether `key`'s zones are still on screen — aimed at, or fading out after the pointer left.
+pub fn zonesShowing(l: *Layout, name: []const u8, key: dvui.Id) bool {
+    return aimedAt(l, name) or DropZones.showing(key);
 }
 
 /// The incoming surface, drawn live in the pane that is sliding open, in the

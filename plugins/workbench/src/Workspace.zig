@@ -659,7 +659,8 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
     const zones = DZ.rects(bounds, rs.s);
     const mouse = dvui.currentWindow().mouse_pt;
     // No picture of the pane to cut glass from, so the zones draw as plain glass.
-    if (bounds.contains(mouse)) DZ.draw(data.id, zones, DZ.at(zones, mouse), null, rs.s);
+    const over = bounds.contains(mouse);
+    if (over or DZ.showing(data.id)) DZ.draw(data.id, zones, if (over) DZ.at(zones, mouse) else null, null, rs.s, over);
 
     for (dvui.events()) |*e| {
         if (!dvui.eventMatch(e, .{ .id = data.id, .r = bounds, .drag_name = "tab_drag" })) continue;

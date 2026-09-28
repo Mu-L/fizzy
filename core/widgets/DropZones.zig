@@ -138,11 +138,13 @@ const State = struct {
 
 /// Draw the zones over `r`, keyed by `id` (the place's). `hovered` is the zone under the pointer,
 /// which sharpens; the rest stay frosted. `frost` null (the blur is off, or the picture is not
-/// taken yet) draws the glass as a plain translucent fill instead.
+/// taken yet) draws the glass as a plain translucent fill instead. `target` false fades them all
+/// out — the pointer has moved to another place — until `showing` says they are gone.
 ///
-/// Call every frame the place is the target, after what the zones reveal has drawn. A place that
-/// stops being drawn over forgets its zones, so the next time it is the target they fade in anew.
-pub fn draw(id: dvui.Id, r: Rects, hovered: ?Zone, frost: ?Frosted, scale: f32) void {
+/// Call every frame the place is the target, and after while `showing`, after what the zones
+/// reveal has drawn. Faded out, a place forgets its zones, so the next time it is the target
+/// they fade in anew.
+pub fn draw(id: dvui.Id, r: Rects, hovered: ?Zone, frost: ?Frosted, scale: f32, target: bool) void {
     const st = dvui.dataGetPtrDefault(null, id, "_drop_zones", State, .{});
     const now = dvui.currentWindow().frame_time_ns;
     // A gap of more than a few frames is a new visit: start from nothing.
@@ -157,10 +159,10 @@ pub fn draw(id: dvui.Id, r: Rects, hovered: ?Zone, frost: ?Frosted, scale: f32) 
     const corners = corners_nat.scale(scale, dvui.CornerRect.Physical);
     var moving = false;
     for (all, 0..) |z, i| {
-        st.shown[i] = approach(st.shown[i], 1, dt_ms, appear_ms);
+        st.shown[i] = approach(st.shown[i], if (target) 1 else 0, dt_ms, appear_ms);
         const want: f32 = if (hovered) |h| (if (h.eql(z)) 1 else 0) else 0;
         st.sharp[i] = approach(st.sharp[i], want, dt_ms, sharpen_ms);
-        if (@abs(st.shown[i] - 1) > 0.002 or @abs(st.sharp[i] - want) > 0.002) moving = true;
+        if (@abs(st.shown[i] - @as(f32, if (target) 1 else 0)) > 0.002 or @abs(st.sharp[i] - want) > 0.002) moving = true;
 
         const alpha = st.shown[i] * (1 - st.sharp[i]);
         if (alpha <= 0.002) continue;
@@ -184,7 +186,23 @@ pub fn draw(id: dvui.Id, r: Rects, hovered: ?Zone, frost: ?Frosted, scale: f32) 
             zr.fill(corners, .{ .color = .{ .color = theme.color(.window, .fill).opacity(0.6 * alpha) }, .fade = 1.0 });
         }
     }
-    if (moving) dvui.refresh(null, @src(), id);
+    if (moving) {
+        dvui.refresh(null, @src(), id);
+    } else if (!target) {
+        forget(id);
+    }
+}
+
+/// Whether `id`'s zones are still on screen: shown, or fading out.
+pub fn showing(id: dvui.Id) bool {
+    const st = dvui.dataGetPtr(null, id, "_drop_zones", State) orelse return false;
+    for (st.shown) |v| if (v > 0.002) return true;
+    return false;
+}
+
+/// Drop `id`'s zones outright: the next time its place is the target they fade in from nothing.
+pub fn forget(id: dvui.Id) void {
+    dvui.dataRemove(null, id, "_drop_zones");
 }
 
 /// `v` eased toward `target` over `dt_ms`, with time constant `tau_ms`.
