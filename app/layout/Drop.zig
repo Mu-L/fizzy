@@ -22,6 +22,7 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const SplitTree = @import("SplitTree.zig");
+const DropZones = @import("core").widgets.DropZones;
 
 pub const Side = SplitTree.Side;
 
@@ -51,28 +52,20 @@ pub const Plan = union(enum) {
     };
 };
 
-/// How near an edge counts as a split, in points, and as a fraction of the
-/// shorter side. The fraction is what keeps a small place usable: a fixed band
-/// on a 100pt pane would leave no middle to aim at, and swapping would become
-/// unreachable exactly where precision is hardest.
-pub const edge_band: f32 = 36;
-pub const edge_band_fraction: f32 = 0.28;
-
-/// Read a pointer position against a place. Near an edge is a split on that
-/// edge; anywhere else is a swap.
+/// Read a pointer position against a place: the drop zones' own reading (`DropZones`), so what
+/// the zones show under the pointer is what a release does. The middle is a swap; each edge
+/// band, and the gap beside it, a split on that edge.
 pub fn kindAt(bounds: dvui.Rect.Physical, mouse: dvui.Point.Physical, scale: f32) Kind {
     if (bounds.w <= 0 or bounds.h <= 0) return .swap;
-    const band = @min(edge_band * scale, @min(bounds.w, bounds.h) * edge_band_fraction);
-    const dl = mouse.x - bounds.x;
-    const dr = bounds.x + bounds.w - mouse.x;
-    const dt = mouse.y - bounds.y;
-    const db = bounds.y + bounds.h - mouse.y;
-    const nearest = @min(@min(dl, dr), @min(dt, db));
-    if (nearest > band) return .swap;
-    if (nearest == dl) return .{ .split = .left };
-    if (nearest == dr) return .{ .split = .right };
-    if (nearest == dt) return .{ .split = .top };
-    return .{ .split = .bottom };
+    return switch (DropZones.at(DropZones.rects(bounds, scale), mouse)) {
+        .center => .swap,
+        .edge => |side| .{ .split = switch (side) {
+            .left => .left,
+            .right => .right,
+            .top => .top,
+            .bottom => .bottom,
+        } },
+    };
 }
 
 /// What `kind` means when the place under the pointer is (`self_drop`) or is

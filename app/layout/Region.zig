@@ -82,11 +82,12 @@ pub fn deinit(self: *Region) void {
     // paint here — still clipped — after their own chrome has drawn.
     if (self.kind_slot) {
         if (self.layout) |l| {
-            if (ViewDrag.previewOn(l, self.name)) {
-                if (self.box) |b| {
+            if (self.box) |b| {
+                if (ViewDrag.previewOn(l, self.name)) {
                     const rs = b.data().borderRectScale();
                     ViewDrag.drawHint(l, self.name, rs.r, rs.s, cardOf(b));
                 }
+                ViewDrag.drawZones(l, self.name, b.data().id);
             }
         }
     }
@@ -667,7 +668,10 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
     if (!filled or hole) drawEmptyHatch(rs.r, rs.s);
     if (drop_here or showing) {
         ViewDrag.drawHint(self, opts.name, rs.r, rs.s, cardOf(box));
-    } else if (filled and !dragging_this and alpha > 0.01) {
+    }
+    // Over the preview, in the same front-to-back pass: the glass lies on what it reveals.
+    ViewDrag.drawZones(self, opts.name, box.data().id);
+    if (!(drop_here or showing) and filled and !dragging_this and alpha > 0.01) {
         // Under the region's own border rect, not the content clip `cornerButton` runs inside:
         // the ring is on the border, in the padding, so a region with padding (every card but
         // the explorer's) clipped it away entirely — only the explorer ever showed which place

@@ -3407,3 +3407,40 @@ test "a shelf adds a view and a slot trades for it" {
     try std.testing.expectEqual(@as(usize, 0), layout.matching(main).len);
     try std.testing.expectEqualStrings("test.files", layout.selected(side).?.id);
 }
+
+// `core` is not a test root, so its widgets' pure rules are tested here.
+const DZ = fizzy.core.widgets.DropZones;
+
+test "drop zones: the middle is the center zone and each edge its own" {
+    const b: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
+    const r = DZ.rects(b, 1);
+    try std.testing.expect(DZ.at(r, .{ .x = 400, .y = 300 }).eql(.center));
+    try std.testing.expect(DZ.at(r, .{ .x = 10, .y = 300 }).eql(.{ .edge = .left }));
+    try std.testing.expect(DZ.at(r, .{ .x = 790, .y = 300 }).eql(.{ .edge = .right }));
+    try std.testing.expect(DZ.at(r, .{ .x = 400, .y = 10 }).eql(.{ .edge = .top }));
+    try std.testing.expect(DZ.at(r, .{ .x = 400, .y = 590 }).eql(.{ .edge = .bottom }));
+}
+
+test "drop zones: zones do not overlap, and the middle stands back from the bands" {
+    const r = DZ.rects(.{ .x = 0, .y = 0, .w = 800, .h = 600 }, 1);
+    for (DZ.all, 0..) |a, i| for (DZ.all[i + 1 ..]) |b| {
+        try std.testing.expect(r.of(a).intersect(r.of(b)).empty());
+    };
+    try std.testing.expect(r.center.x > r.left.x + r.left.w + DZ.gap);
+    try std.testing.expect(r.center.y > r.top.y + r.top.h + DZ.gap);
+}
+
+test "drop zones: a point in a gap belongs to the nearest zone" {
+    const r = DZ.rects(.{ .x = 0, .y = 0, .w = 800, .h = 600 }, 1);
+    // Just inside the place, in the outer gap next to the left band.
+    try std.testing.expect(DZ.at(r, .{ .x = 2, .y = 300 }).eql(.{ .edge = .left }));
+    // Between the left band and the middle, nearer the band.
+    const p: dvui.Point.Physical = .{ .x = r.left.x + r.left.w + 1, .y = 300 };
+    try std.testing.expect(DZ.at(r, p).eql(.{ .edge = .left }));
+}
+
+test "drop zones: a small place keeps a middle to aim at" {
+    const r = DZ.rects(.{ .x = 0, .y = 0, .w = 120, .h = 90 }, 1);
+    try std.testing.expect(r.center.w > 10 and r.center.h > 10);
+    try std.testing.expect(DZ.at(r, .{ .x = 60, .y = 45 }).eql(.center));
+}

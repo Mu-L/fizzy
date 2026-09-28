@@ -275,6 +275,8 @@ pub const Split = @import("widgets/Split.zig");
 /// the same as it does for `dvui.box`.
 pub const split = Split.init;
 pub const Tabs = @import("widgets/Tabs.zig");
+/// The drop targets over a place while something is dragged onto it — see its file.
+pub const DropZones = @import("widgets/DropZones.zig");
 
 /// Side of the square every glyph in a tree row occupies — the expand/collapse caret, a folder
 /// or file-type icon, a plugin's own icon, the app logo, or a letter standing in for a missing

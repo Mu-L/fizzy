@@ -32,6 +32,7 @@ const Layout = @import("Layout.zig");
 const Region = @import("Region.zig");
 const SplitTree = @import("SplitTree.zig");
 const Drop = @import("Drop.zig");
+const DropZones = core.widgets.DropZones;
 
 const ViewDrag = @This();
 
@@ -160,8 +161,9 @@ pub fn shotWanted(l: *Layout, name: []const u8, is_source: bool, plan: ?Drop.Pla
     var shot: Shot = .{ .card = is_source and d.texture == null };
     // Every preview dissolves the place's old pixels away — the pane slides
     // over them on a split, the other view replaces them on a swap — so any
-    // plan at all needs the still.
-    if (plan != null) {
+    // plan at all needs the still. So do the drop zones, which are cut from
+    // it, even where there is no plan (the middle of the place the view left).
+    if (plan != null or aimedAt(l, name)) {
         shot.hover = d.hover_texture == null or !std.mem.eql(u8, d.hover_name, name);
     }
     return shot;
@@ -450,7 +452,10 @@ fn aim(l: *Layout, d: *ViewDrag, name: []const u8, split: ?SplitTree.Side, t: f3
     d.preview_t = t;
     // Only a swap needs the destination's own view: a split leaves it in place.
     d.other_id = if (name.len > 0 and split == null) visibleId(l, name) orelse "" else "";
-    d.clearHover();
+    // Re-aimed at another part of the same place: its picture still stands (it was taken
+    // before any preview opened, and aiming only changes once the last one has shut), and the
+    // drop zones are cut from it — retaking it blanked them for a frame.
+    if (!std.mem.eql(u8, d.hover_name, name)) d.clearHover();
 }
 
 pub fn previewOn(l: *Layout, name: []const u8) bool {
@@ -675,6 +680,40 @@ pub fn drawHint(
             dissolve(l, dest, open.pane, .fade, dissolve_t);
         },
     }
+}
+
+/// Whether the pointer is over `name` as the place a release would land on.
+fn aimedAt(l: *Layout, name: []const u8) bool {
+    const d = l.state.view_drag;
+    if (!d.active() or name.len == 0) return false;
+    const target = targetAt(l, dvui.currentWindow().mouse_pt, d.name) orelse return false;
+    return std.mem.eql(u8, target, name);
+}
+
+/// The drop zones over `name` while the drag aims at it (`core.widgets.DropZones`): every
+/// option the place offers at once, frosted glass cut from the place's picture, the one under
+/// the pointer dissolving sharp over the live preview of that drop. Call after the preview has
+/// drawn (`drawHint`), so the glass lies over it. `key` is any id stable for the place.
+pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
+    if (!aimedAt(l, name)) return;
+    const d = &l.state.view_drag;
+    const whole = placeBounds(l.state, name) orelse return;
+    const scale = dvui.currentWindow().natural_scale;
+    const zones = DropZones.rects(whole, scale);
+
+    var frost: ?DropZones.Frosted = null;
+    if (d.hover_texture) |tex| if (std.mem.eql(u8, d.hover_name, name)) {
+        d.hover_frost.prepare(tex);
+        if (d.hover_frost.texture) |t| frost = .{ .texture = t, .rect = d.hover_rect };
+    };
+    // The picture is taken by the place's own draw, a frame after it becomes the target; with
+    // the blur on, wait for it rather than flash plain glass first.
+    if (frost == null and core.anim.blurRadius() >= 1) return;
+
+    const prev_clip = dvui.clipGet();
+    defer dvui.clipSet(prev_clip);
+    dvui.clipSet(whole);
+    DropZones.draw(key, zones, DropZones.at(zones, dvui.currentWindow().mouse_pt), frost, scale);
 }
 
 /// The incoming surface, drawn live in the pane that is sliding open, in the
