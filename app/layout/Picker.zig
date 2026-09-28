@@ -340,7 +340,7 @@ fn searchText(f: *Layout, s: *const sdk.Surface) []const u8 {
     for (s.keywords) |k| text.print(a, " {s}", .{k}) catch {};
     for (f.state.regions.items) |*r| {
         if (r.name.len == 0) continue;
-        if (contains(f.matchingStored(r), s.id)) text.print(a, " {s}", .{r.name}) catch {};
+        if (contains(f.matchingIn(r), s.id)) text.print(a, " {s}", .{r.name}) catch {};
     }
     return text.items;
 }

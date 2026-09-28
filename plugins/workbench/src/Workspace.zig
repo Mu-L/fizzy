@@ -646,21 +646,22 @@ fn paneSide(side: sdk.RegionSpec.Drop.Side) core.widgets.DockLayout.Side {
 /// (`core.widgets.DropZones`) — the middle opens it here, an edge in a new pane on that side. A
 /// tab dragged between panes is not read here: off its strip it is the app's view drag.
 pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
-    if (!dvui.dragName("tab_drag")) {
-        runtime.workbench().clearFileTreeTabDragDropState();
-        return;
-    }
-    const wb = runtime.workbench();
-    const path = wb.tab_drag_from_tree_path orelse return;
-
     const DZ = core.widgets.DropZones;
     const rs = data.rectScale();
     const bounds = rs.r;
     const zones = DZ.rects(bounds, rs.s);
+    const wb = runtime.workbench();
+    const dragging = dvui.dragName("tab_drag") and wb.tab_drag_from_tree_path != null;
+    if (!dvui.dragName("tab_drag")) wb.clearFileTreeTabDragDropState();
+    // Every pane shows its zones for the whole drag, the one under the pointer lit, as every
+    // place does for a dragged view; when the drag ends they fade out.
+    if (!dragging) {
+        if (DZ.showing(data.id)) DZ.draw(data.id, zones, null, rs.s, false, .add);
+        return;
+    }
+    const path = wb.tab_drag_from_tree_path.?;
     const mouse = dvui.currentWindow().mouse_pt;
-    // No picture of the pane to cut glass from, so the zones draw as plain glass.
-    const over = bounds.contains(mouse);
-    if (over or DZ.showing(data.id)) DZ.draw(data.id, zones, if (over) DZ.at(zones, mouse) else null, null, rs.s, over);
+    DZ.draw(data.id, zones, if (bounds.contains(mouse)) DZ.at(zones, mouse) else null, rs.s, true, .add);
 
     for (dvui.events()) |*e| {
         if (!dvui.eventMatch(e, .{ .id = data.id, .r = bounds, .drag_name = "tab_drag" })) continue;

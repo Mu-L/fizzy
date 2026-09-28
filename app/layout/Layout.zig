@@ -262,11 +262,6 @@ pub const handle_dist = Split.handle_dist;
 /// an assignment, exactly as they already share a selection.
 fn assignedFor(self: *Layout, keywords: []const []const u8) ?[]const []const u8 {
     const r = self.regionForKeywords(keywords) orelse return null;
-    return ViewDrag.previewAssignment(self, r.name) orelse self.state.assignment(r.name);
-}
-
-fn assignedStored(self: *Layout, keywords: []const []const u8) ?[]const []const u8 {
-    const r = self.regionForKeywords(keywords) orelse return null;
     return self.state.assignment(r.name);
 }
 
@@ -296,18 +291,10 @@ pub fn matching(self: *Layout, keywords: []const []const u8) []const *Surface {
 /// first pane's assignment. The app's own regions are unique per keyword group, so for them
 /// this is `matching`.
 pub fn matchingIn(self: *Layout, r: *const Region) []const *Surface {
-    const stored = if (r.by_name) self.state.assignment(r.name) else self.assignedStored(r.keywords);
-    const assigned = ViewDrag.previewAssignment(self, r.name) orelse stored;
+    const assigned = if (r.by_name) self.state.assignment(r.name) else self.assignedFor(r.keywords);
     // A plugin kind slot (a document pane) only shows what it accepts. Output
     // dropped on the workbench canvas must not become a document tab. A shape
     // place (Main, Panel, a leftover Center) may hold anything the user put there.
-    return self.matchingWith(r.keywords, assigned, r.kind_slot, self.orderName(r));
-}
-
-/// `matchingIn` without the view-drag preview overlay. Drop, claim, and
-/// `visibleId` have to see the stored assignment, not the landing pose.
-pub fn matchingStored(self: *Layout, r: *const Region) []const *Surface {
-    const assigned = if (r.by_name) self.state.assignment(r.name) else self.assignedStored(r.keywords);
     return self.matchingWith(r.keywords, assigned, r.kind_slot, self.orderName(r));
 }
 
@@ -594,10 +581,6 @@ pub fn selectedIn(self: *Layout, r: *const Region) ?*Surface {
     return pick(self.matchingIn(r), self.host.selectionForKey(r.selectionKey()));
 }
 
-pub fn selectedStored(self: *Layout, r: *const Region) ?*Surface {
-    return pick(self.matchingStored(r), self.host.selectionForKey(r.selectionKey()));
-}
-
 pub fn selectIn(self: *Layout, r: *const Region, id: []const u8) void {
     self.host.setSelectionForKey(r.selectionKey(), id);
 }
@@ -747,18 +730,6 @@ fn drawSwapped(self: *Layout, slot: u64, s: *Surface, pack: ?*dvui.BoxWidget, bl
     // The part on screen: a place inside a scroll area is as tall as its content.
     const rs = dvui.parentGet().data().contentRectScale().r.intersect(dvui.clipGet());
     const tr = self.state.swapFor(self.gpa, slot) orelse return self.draw(s);
-
-    // A swap preview already dissolves the outgoing still. Starting a second
-    // `transition` here would arm a new clock, and the drop would fire it —
-    // the preview that had just finished would rewind and fade again. Keep
-    // the slot in step with what the preview is showing so the landing is
-    // already the current key.
-    const d = self.state.view_drag;
-    if (d.active() and d.preview_t > 0.001 and d.preview_split == null) {
-        tr.prev_id = s.id;
-        tr.prev_key = std.hash.Wyhash.hash(0, s.id);
-        return self.draw(s);
-    }
 
     const Ctx = struct {
         layout: *Layout,

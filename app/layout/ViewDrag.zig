@@ -2,27 +2,23 @@
 //!
 //! The gesture is one thing, so it is one file: the state that survives
 //! between frames, the hit-test that decides what is under the pointer, the
-//! preview that shows what will happen, and the assignment that lands when
+//! drop zones that show where it can go, and the assignment that lands when
 //! the button comes up. `Region` declares places; this moves views between
-//! them. The rule both the preview and the landing obey is `Drop`, and the
-//! whole design is written down in `SPLITS.md`.
+//! them. The rule the zones and the landing obey is `Drop`, and the whole
+//! design is written down in `SPLITS.md`.
 //!
-//! Three things are worth knowing before changing anything here:
+//! Two things are worth knowing before changing anything here:
 //!
-//! **The float is a photograph.** The dragged surface is captured once, at
-//! lift, and the card under the pointer blits that texture. Drawing the live
-//! surface twice in one frame is not something a plugin has to tolerate.
+//! **The view is drawn once: as the card under the pointer.** The dragged
+//! surface is photographed once, at lift, and the card blits that picture.
+//! Its place stands empty (hatched) until the drop, and no place draws it as
+//! a preview of landing there — one view in two places at once was harder to
+//! read than a view that plainly travels. The layout moves after the drop,
+//! with the animations every split and swap already has.
 //!
-//! **A landing area draws the real thing.** A swap remaps both places'
-//! assignments for the frame (`previewAssignment`), so each lays out the
-//! other's view for real; a split slides a live copy of the incoming surface
-//! in from the edge. The preview is the result, not a coloured rectangle
-//! standing in for it.
-//!
-//! **A place being previewed keeps its own widgets.** The clip that shows a
-//! place shrinking to half is set on the place's existing box. Wrapping the
-//! contents in a child box to clip them remounts every widget inside, which
-//! for a document pane means losing its scroll, selection and undo.
+//! **Every place it could land shows its drop zones** (`drawZones`,
+//! `core.widgets.DropZones`), all five at once, so every option in the window
+//! is in view; the one under the pointer is the one a release takes.
 const std = @import("std");
 const dvui = @import("dvui");
 const core = @import("core");
@@ -43,46 +39,11 @@ name: []const u8 = "",
 from: dvui.Size.Physical = .{},
 /// The lifted surface as it last drew. The floating card is this texture.
 texture: ?dvui.Texture = null,
-/// Its frost, for the swap-out dissolve (`core.anim.Frost`), and where it was taken.
-frost: core.anim.Frost = .{},
+/// Where it was taken.
 texture_rect: dvui.Rect.Physical = .{},
 start_ns: i128 = 0,
-/// Place being previewed, interned. Empty when nothing is easing.
-preview_name: []const u8 = "",
-/// The edge under the pointer, as read. `Drop.plan` turns it into what will
-/// happen; this stays the raw reading so the plan is derived in one place.
-preview_split: ?SplitTree.Side = null,
-/// 0 shut, 1 fully open. Eases both ways, so leaving a place slides it back.
-preview_t: f32 = 0,
-preview_tick_ns: i128 = 0,
-/// Surface lifted from the source. Landing areas draw this one live.
+/// Surface lifted from the source: what the card under the pointer shows, and what lands.
 moved_id: []const u8 = "",
-/// The destination's own visible surface, drawn back in the source's hole
-/// while a swap is previewed.
-other_id: []const u8 = "",
-moved_ids: [1][]const u8 = .{""},
-other_ids: [1][]const u8 = .{""},
-/// Set while photographing the source: matching must report the stored
-/// assignment, or the capture would catch the preview instead of the view.
-capturing: bool = false,
-/// The destination as it looked before the preview, for the outgoing blur.
-hover_texture: ?dvui.Texture = null,
-hover_frost: core.anim.Frost = .{},
-/// Where `hover_texture` was taken, so it is blitted back at its own size. It is a still of the
-/// place's *content* rect, and possibly already mid pull-back; stretching it to the whole place
-/// made every dissolve a little larger than what it was dissolving from.
-hover_rect: dvui.Rect.Physical = .{},
-hover_name: []const u8 = "",
-/// The place aimed at before this one, and its picture: its drop zones fade out from it after
-/// the pointer has moved on (`drawZones`). Retired from `hover_*`, never taken on its own.
-leave_texture: ?dvui.Texture = null,
-leave_frost: core.anim.Frost = .{},
-leave_rect: dvui.Rect.Physical = .{},
-leave_name: []const u8 = "",
-/// A capture was tried this drag and the backend could not keep one (no texture targets, or no
-/// way to turn one into a texture: the web, the test backend). Nothing will ever be photographed, so the drop zones draw as plain
-/// glass rather than wait for a picture.
-pictures_unavailable: bool = false,
 /// The places this drag can land on, and where they were, frozen at lift.
 targets: [max_targets]Target = undefined,
 target_count: usize = 0,
@@ -118,44 +79,15 @@ pub fn loose(self: ViewDrag) bool {
 
 pub fn discard(self: *ViewDrag) void {
     if (self.texture) |tex| dvui.Texture.destroyLater(tex);
-    if (self.hover_texture) |tex| dvui.Texture.destroyLater(tex);
-    if (self.leave_texture) |tex| dvui.Texture.destroyLater(tex);
-    self.frost.drop();
-    self.hover_frost.drop();
-    self.leave_frost.drop();
     self.* = .{};
 }
 
 pub fn takePicture(self: *ViewDrag, pic: *dvui.Picture) void {
     pic.stop();
-    const tex = dvui.textureFromTarget(pic.texture) catch {
-        self.pictures_unavailable = true;
-        return;
-    };
+    const tex = dvui.textureFromTarget(pic.texture) catch return;
     if (self.texture) |old| dvui.Texture.destroyLater(old);
-    self.frost.drop();
     self.texture = tex;
     self.texture_rect = pic.r;
-    self.frost.prepare(tex);
-}
-
-pub fn takeHover(self: *ViewDrag, pic: *dvui.Picture, name: []const u8) void {
-    pic.stop();
-    const tex = dvui.textureFromTarget(pic.texture) catch {
-        self.pictures_unavailable = true;
-        return;
-    };
-    if (std.mem.eql(u8, self.hover_name, name)) {
-        if (self.hover_texture) |old| dvui.Texture.destroyLater(old);
-        self.hover_frost.drop();
-    } else {
-        // Another place's picture: keep it for its zones to fade out on.
-        self.retireHover();
-    }
-    self.hover_texture = tex;
-    self.hover_rect = pic.r;
-    self.hover_name = name;
-    self.hover_frost.prepare(tex);
 }
 
 /// What photograph this place owes the drag this frame.
@@ -167,74 +99,26 @@ pub fn takeHover(self: *ViewDrag, pic: *dvui.Picture, name: []const u8) void {
 pub const Shot = struct {
     /// The lifted view, for the floating card. Taken once, at lift.
     card: bool = false,
-    /// The destination as it looked before the preview, for the outgoing
-    /// blur. Taken once per place the pointer aims at.
-    hover: bool = false,
 
     pub fn any(self: Shot) bool {
-        return self.card or self.hover;
+        return self.card;
     }
 };
 
-/// Nothing is owed unless a drag is live and the existing texture is missing
-/// or belongs to a different place.
-pub fn shotWanted(l: *Layout, name: []const u8, is_source: bool, plan: ?Drop.Plan) Shot {
+/// Nothing is owed unless a drag is live, this is its source, and the card has no picture yet.
+pub fn shotWanted(l: *Layout, is_source: bool) Shot {
     const d = l.state.view_drag;
     if (!d.active()) return .{};
-    // The backend cannot keep a picture: asking again every frame would only redraw the place
-    // through a capture that goes nowhere.
-    if (d.pictures_unavailable) return .{};
-    var shot: Shot = .{ .card = is_source and d.texture == null };
-    // Every preview dissolves the place's old pixels away — the pane slides
-    // over them on a split, the other view replaces them on a swap — so any
-    // plan at all needs the still. So do the drop zones, which are cut from
-    // it, even where there is no plan (the middle of the place the view left).
-    if (plan != null or aimedAt(l, name)) {
-        shot.hover = d.hover_texture == null or !std.mem.eql(u8, d.hover_name, name);
-    }
-    return shot;
+    return .{ .card = is_source and d.texture == null };
 }
 
-/// Keep what the place's draw recorded, and hand the texture back so the
-/// caller can blit the very same pixels to the screen.
-///
-/// One capture yields one texture: `textureFromTarget` consumes the render
-/// target. When both are owed the card wins and the hover is taken next
-/// frame — a sixtieth of a second nobody sees, and the alternative is the
-/// second draw this whole arrangement exists to avoid.
-pub fn keepShot(l: *Layout, shot: Shot, pic: *dvui.Picture, name: []const u8) ?dvui.Texture {
-    var d = &l.state.view_drag;
+/// Keep what the source's draw recorded as the card's picture.
+pub fn keepShot(l: *Layout, shot: Shot, pic: *dvui.Picture) void {
     if (shot.card) {
-        d.takePicture(pic);
-        return d.texture;
-    }
-    if (shot.hover) {
-        d.takeHover(pic, l.state.internName(l.gpa, name));
-        return d.hover_texture;
+        l.state.view_drag.takePicture(pic);
+        return;
     }
     pic.stop();
-    return null;
-}
-
-/// Move the aimed-at place's picture to `leave_*`, for its zones to fade out on, dropping the
-/// picture that was there.
-pub fn retireHover(self: *ViewDrag) void {
-    if (self.leave_texture) |tex| dvui.Texture.destroyLater(tex);
-    self.leave_frost.drop();
-    self.leave_texture = self.hover_texture;
-    self.leave_frost = self.hover_frost;
-    self.leave_rect = self.hover_rect;
-    self.leave_name = self.hover_name;
-    self.hover_texture = null;
-    self.hover_frost = .{};
-    self.hover_name = "";
-}
-
-pub fn clearHover(self: *ViewDrag) void {
-    if (self.hover_texture) |tex| dvui.Texture.destroyLater(tex);
-    self.hover_frost.drop();
-    self.hover_texture = null;
-    self.hover_name = "";
 }
 
 /// Begin carrying the view out of `name`. The place keeps drawing until the
@@ -268,18 +152,11 @@ pub fn beginLoose(l: *Layout, id: []const u8, from: dvui.Rect.Physical, texture:
 
 /// Photograph the places, the way the card photographs the view.
 ///
-/// **A drag must not change the map it is being read against.** It does,
-/// constantly, in two ways. A preview draws the view it is about to land, and
-/// whatever regions *that* declares — a workspace's document panes — appear
-/// as new, smaller places under the pointer, which then win on area. And a
-/// place previewing a split pulls back to its half, so the very rect the
-/// pointer is aiming at moves away from the pointer.
-///
-/// Either one makes the reading flip every frame: aim, preview, the reading
-/// changes, the preview closes, the reading changes back. That is not a
-/// wobble to damp out with a threshold — it is a loop, and the only way out
-/// is to cut it. Frozen at lift, the hit-test is a pure function of where the
-/// pointer is, and the drag is as steady as your hand.
+/// **A drag must not change the map it is being read against.** Places move
+/// under a drag — the one it came from stands empty, and a place that hides
+/// when empty folds away — and a hit-test read against the live layout would
+/// chase them. Frozen at lift, it is a pure function of where the pointer is,
+/// and the drag is as steady as your hand.
 fn mapTargets(l: *Layout, d: *ViewDrag) void {
     d.target_count = 0;
     const surface_kw = draggedKeywords(l);
@@ -388,9 +265,7 @@ pub fn placeBounds(state: *const Layout.State, name: []const u8) ?dvui.Rect.Phys
 }
 
 /// A place's content size in points, frozen mid-drag for the same reason its
-/// bounds are: a place previewing a split has pulled back to the half it
-/// would keep, and halving *that* to settle the landing split would land the
-/// new pane at a quarter of the place the user was shown.
+/// bounds are: the split a drop settles is sized from the place the user saw.
 pub fn placeSize(state: *const Layout.State, name: []const u8) ?dvui.Size {
     if (frozen(state, name)) |t| {
         if (t.size.w > 0 and t.size.h > 0) return t.size;
@@ -412,279 +287,26 @@ pub fn regionNamed(state: *const Layout.State, name: []const u8) ?*const Region 
 /// assignment. A multi place drags the tab you can see, not all of them.
 pub fn visibleId(l: *Layout, name: []const u8) ?[]const u8 {
     if (regionNamed(l.state, name)) |r| {
-        if (l.selectedStored(r)) |s| return s.id;
+        if (l.selectedIn(r)) |s| return s.id;
     }
     const ids = l.state.assignment(name) orelse return null;
     return if (ids.len > 0) ids[0] else null;
 }
 
-// ── The preview ─────────────────────────────────────────────────────────────────────────────────
+// ── The live drag ───────────────────────────────────────────────────────────────────────────────
 
-/// How long a preview takes to slide fully open, in seconds. The same number
-/// runs it backwards when the pointer leaves, so a place you brush past
-/// closes at the speed it opened.
-const preview_dur_s: f32 = 0.28;
-
-/// Advance the preview toward what the pointer is over. Called from every
-/// place that draws during a drag, and idempotent within a frame — whichever
-/// one runs first does the work.
+/// Keep a live drag moving: its view named, and frames coming while it rides the pointer.
+/// Called from every place that draws during a drag; idempotent within a frame.
 pub fn tick(l: *Layout) void {
     var d = &l.state.view_drag;
     if (!d.active()) return;
-    const now = dvui.currentWindow().frame_time_ns;
-    if (d.preview_tick_ns == now) return;
-
-    var dt: f32 = 1.0 / 60.0;
-    if (d.preview_tick_ns != 0) {
-        const ns: f32 = @floatFromInt(now - d.preview_tick_ns);
-        dt = std.math.clamp(ns / @as(f32, std.time.ns_per_s), 0.0, 0.05);
-    }
-    d.preview_tick_ns = now;
-
-    const mouse = dvui.currentWindow().mouse_pt;
-    const scale = dvui.currentWindow().natural_scale;
-    var hover_name: []const u8 = "";
-    var hover_split: ?SplitTree.Side = null;
-    if (targetAt(l, mouse, d.name)) |dest| {
-        const kind = kindAt(l.state, dest, mouse, scale);
-        // Null plan: the middle of your own place, which is not a hover. A view carried loose
-        // has no place of its own, but the middle of a shelf already holding it is the same
-        // thing — a drop there changes nothing (`swap`), so there is nothing to preview.
-        const own = std.mem.eql(u8, dest, d.name) or (kind == .swap and d.loose() and shelfHolds(l, dest, d.moved_id));
-        if (Drop.plan(kind, own) != null) {
-            hover_name = dest;
-            hover_split = switch (kind) {
-                .swap => null,
-                .split => |s| s,
-            };
-        }
-    }
-
     if (d.moved_id.len == 0) {
         if (visibleId(l, d.name)) |id| d.moved_id = id;
     }
-
-    if (d.preview_name.len == 0 and hover_name.len > 0) {
-        aim(l, d, hover_name, hover_split, 0);
-    }
-
-    const same = std.mem.eql(u8, d.preview_name, hover_name) and
-        ((d.preview_split == null) == (hover_split == null)) and
-        (hover_split == null or d.preview_split.? == hover_split.?);
-    const step = dt / preview_dur_s;
-    if (hover_name.len > 0 and same) d.preview_t += step else d.preview_t -= step;
-    d.preview_t = std.math.clamp(d.preview_t, 0, 1);
-
-    // Fully shut is the only moment the preview may change what it is aimed
-    // at. Switching mid-slide would teleport a half-open pane to another
-    // place, which reads as a glitch rather than a change of mind.
-    if (d.preview_t <= 0) {
-        if (hover_name.len > 0 and !same) {
-            aim(l, d, hover_name, hover_split, step);
-        } else if (hover_name.len == 0) {
-            aim(l, d, "", null, 0);
-        }
-    }
-
     dvui.refresh(null, @src(), null);
 }
 
-/// `name` shows several views and `id` is one of them.
-fn shelfHolds(l: *Layout, name: []const u8, id: []const u8) bool {
-    const r = regionNamed(l.state, name) orelse return false;
-    if (r.shows != .many) return false;
-    for (holding(l, name)) |x| if (std.mem.eql(u8, x, id)) return true;
-    return false;
-}
-
-fn aim(l: *Layout, d: *ViewDrag, name: []const u8, split: ?SplitTree.Side, t: f32) void {
-    d.preview_name = if (name.len > 0) l.state.internName(l.gpa, name) else "";
-    d.preview_split = split;
-    d.preview_t = t;
-    // Only a swap needs the destination's own view: a split leaves it in place.
-    d.other_id = if (name.len > 0 and split == null) visibleId(l, name) orelse "" else "";
-    // The picture is the place under the pointer's, not the preview's: the drop zones are cut
-    // from it whether or not anything is previewed. Aimed at nothing (the middle of the place
-    // the view left, which previews nothing) it stays; re-aimed within the same place it still
-    // stands (taken before any preview opened, and aiming only changes once the last has shut).
-    // Only another place retires it. Dropping it on every frame aimed at nothing retook it on
-    // every frame, through the capture path, which drew the place without its background.
-    if (name.len > 0 and !std.mem.eql(u8, d.hover_name, name)) d.retireHover();
-}
-
-pub fn previewOn(l: *Layout, name: []const u8) bool {
-    const d = l.state.view_drag;
-    return d.preview_t > 0.001 and std.mem.eql(u8, d.preview_name, name);
-}
-
-/// The eased 0..1 the preview draws at, as opposed to the linear `preview_t`.
-pub fn previewVisual(l: *Layout) f32 {
-    return outCubic(std.math.clamp(l.state.view_drag.preview_t, 0, 1));
-}
-
-/// Linear 0..1 through the preview, for anything that has its own curve —
-/// the dissolve's blur-then-fade is one. Feeding it `previewVisual` instead
-/// spent the hold (the only part that is a blur) in the first few frames of
-/// the ease, and the rest of the motion was just alpha.
-pub fn previewClock(l: *Layout) f32 {
-    return std.math.clamp(l.state.view_drag.preview_t, 0, 1);
-}
-
-/// What `name` is previewing this frame. The preview and the release read the
-/// same `Drop.plan`, so the pane that slides open is the one that lands.
-pub fn previewPlan(l: *Layout, name: []const u8) ?Drop.Plan {
-    if (!previewOn(l, name)) return null;
-    const d = l.state.view_drag;
-    const kind: Drop.Kind = if (d.preview_split) |side| .{ .split = side } else .swap;
-    return Drop.plan(kind, std.mem.eql(u8, name, d.name));
-}
-
-/// A swap is being previewed. The pose that is already opening is the pose
-/// until it shuts — re-reading the pointer here would flip the remap off the
-/// moment the pointer brushed an edge, which restarts `drawSwapped`'s clock
-/// every frame and is why a dissolve looked like a fade that kept snapping
-/// back to the start.
-pub fn swapping(l: *Layout) bool {
-    const d = l.state.view_drag;
-    if (!d.active() or d.preview_name.len == 0 or d.preview_t <= 0.001) return false;
-    if (d.preview_split != null) return false;
-    return !std.mem.eql(u8, d.preview_name, d.name);
-}
-
-/// What a place should show while a swap is previewed, so both ends lay out
-/// the other's view for real. Null leaves the stored assignment alone —
-/// which is what the release itself, and `visibleId`, must always see.
-pub fn previewAssignment(l: *Layout, name: []const u8) ?[]const []const u8 {
-    if (l.state.view_drag.capturing) return null;
-    var d = &l.state.view_drag;
-    // A view carried loose (a tab dragged off its strip) was lifted out of no place, so no place
-    // stands empty for it — the one holding it would go on drawing it beside the preview of its
-    // landing, the same surface twice. While a landing is previewed, it leaves.
-    if (d.active() and d.loose() and d.preview_t > 0.001 and d.moved_id.len > 0 and
-        !(swapping(l) and std.mem.eql(u8, name, d.preview_name)))
-    {
-        const stored = l.state.assignment(name) orelse return null;
-        for (stored) |id| if (std.mem.eql(u8, id, d.moved_id)) {
-            var kept = std.ArrayListUnmanaged([]const u8).initCapacity(l.arena, stored.len) catch return null;
-            for (stored) |x| if (!std.mem.eql(u8, x, d.moved_id)) kept.appendAssumeCapacity(x);
-            return kept.items;
-        };
-        return null;
-    }
-    if (!swapping(l)) return null;
-    if (std.mem.eql(u8, name, d.preview_name)) {
-        if (d.moved_id.len == 0) return null;
-        d.moved_ids[0] = d.moved_id;
-        return d.moved_ids[0..1];
-    }
-    if (std.mem.eql(u8, name, d.name)) {
-        // A shelf takes the view; it does not send one back. The hole the
-        // view left is a hole, not the place's current tab riding the other
-        // way — that is a trade, and a trade is what a slot does.
-        const dest_many = if (regionNamed(l.state, d.preview_name)) |r| r.shows == .many else false;
-        if (dest_many) return &.{};
-        if (d.other_id.len == 0) return &.{};
-        d.other_ids[0] = d.other_id;
-        return d.other_ids[0..1];
-    }
-    return null;
-}
-
 // ── Preview geometry ────────────────────────────────────────────────────────────────────────────
-
-/// A split opening: where the new pane is, and how far the place being split
-/// has pulled back to make room for it.
-///
-/// One function for all of it, because three different readings of "half of
-/// this place" is how a preview stops matching what it previews. The card
-/// that shrinks, the pane that slides in and the gap between them are all
-/// measured here, from the same numbers a real split would settle at.
-pub const Opening = struct {
-    /// The pane sliding in from `side`, in physical points.
-    pane: dvui.Rect.Physical,
-    /// How far the kept half's edge on `side` has moved: the pane plus the
-    /// sash gap. This is what the place being split insets itself by.
-    inset: f32,
-};
-
-pub fn opening(bounds: dvui.Rect.Physical, side: SplitTree.Side, t: f32, scale: f32) Opening {
-    const u = std.math.clamp(t, 0, 1);
-    const gap = Split.handle_size * scale;
-    const along = switch (side) {
-        .left, .right => bounds.w,
-        .top, .bottom => bounds.h,
-    };
-    // Halved the way a real split halves: the sash comes out of the middle
-    // first, so the two sides end up the same size rather than the new one
-    // being a sash narrower than the old.
-    const full = @max(0, (along - gap) * 0.5);
-    const size = full * u;
-    var pane = bounds;
-    switch (side) {
-        .left => pane.w = size,
-        .right => {
-            pane.w = size;
-            pane.x = bounds.x + bounds.w - size;
-        },
-        .top => pane.h = size,
-        .bottom => {
-            pane.h = size;
-            pane.y = bounds.y + bounds.h - size;
-        },
-    }
-    return .{ .pane = pane, .inset = size + gap * u };
-}
-
-/// Pull a place back to the half it keeps while a split previews on it.
-///
-/// The place is *laid out* smaller, not clipped: its contents reflow into the
-/// half they will actually have, so what is under the pointer is the
-/// arrangement the release produces rather than a cropped picture of the old
-/// one. A margin does that in place — putting the contents inside a sized
-/// child box would rebuild every widget in them, and a document pane would
-/// lose its scroll and undo every time the pointer brushed an edge.
-///
-/// The pinned size follows the margin down so the *slot* does not change: a
-/// resizable place whose minimum grew by the inset would widen the window's
-/// whole arrangement the moment you hovered its edge.
-pub fn pullBack(
-    l: *Layout,
-    name: []const u8,
-    opts: *dvui.Options,
-    mint: SplitTree.Side,
-    axis: dvui.enums.Direction,
-    pinned: bool,
-) void {
-    const whole = placeBounds(l.state, name) orelse return;
-    if (whole.w <= 0 or whole.h <= 0) return;
-    const scale = dvui.currentWindow().natural_scale;
-    if (scale <= 0) return;
-    const inset = opening(whole, mint, previewVisual(l), scale).inset / scale;
-    if (inset <= 0) return;
-
-    var m = opts.margin orelse dvui.Rect{};
-    switch (mint) {
-        .left => m.x += inset,
-        .top => m.y += inset,
-        .right => m.w += inset,
-        .bottom => m.h += inset,
-    }
-    opts.margin = m;
-
-    const along_axis = switch (mint) {
-        .left, .right => axis == .horizontal,
-        .top, .bottom => axis == .vertical,
-    };
-    if (!pinned or !along_axis) return;
-    if (opts.min_size_content) |*min| switch (axis) {
-        .horizontal => min.w = @max(0, min.w - inset),
-        .vertical => min.h = @max(0, min.h - inset),
-    };
-    if (opts.max_size_content) |max| opts.max_size_content = switch (axis) {
-        .horizontal => .width(@max(0, max.w - inset)),
-        .vertical => .height(@max(0, max.h - inset)),
-    };
-}
 
 fn outCubic(t: f32) f32 {
     const u = 1 - t;
@@ -692,63 +314,6 @@ fn outCubic(t: f32) f32 {
 }
 
 // ── Painting ────────────────────────────────────────────────────────────────────────────────────
-
-/// How a place is dressed, so the pane a preview opens is dressed the same.
-///
-/// A preview that draws a bare rectangle where a rounded, padded card is
-/// about to be is a preview of something else. Taken from the destination's
-/// own box rather than guessed, so an app that restyles its places gets a
-/// preview in its own style without saying so.
-pub const Card = struct {
-    corners: dvui.CornerRect.Physical = .{},
-    fill: dvui.Color = .black,
-    padding: dvui.Rect = .{},
-};
-
-/// The landing preview for `dest`: the pane that is opening, what goes in it,
-/// and the destination's outgoing content dissolving away.
-pub fn drawHint(
-    l: *Layout,
-    dest: []const u8,
-    bounds: dvui.Rect.Physical,
-    scale: f32,
-    card: Card,
-) void {
-    const t = previewVisual(l);
-    const dissolve_t = previewClock(l);
-    // The place has pulled back; the opening is measured against what it was.
-    const whole = placeBounds(l.state, dest) orelse bounds;
-
-    // The pane opens in the space the place gave up, which is outside the
-    // clip the pulled-back card leaves behind — so paint against the place's
-    // whole rect instead of intersecting with what is left of it.
-    const prev_clip = dvui.clipGet();
-    defer dvui.clipSet(prev_clip);
-    dvui.clipSet(whole);
-
-    switch (previewPlan(l, dest) orelse return) {
-        // Both places are already laying out the other's view. What is left
-        // is making it read as a trade rather than a jump cut: the pixels
-        // that were here blur away over the ones arriving, the same dissolve
-        // a surface change uses anywhere else.
-        .swap => dissolve(l, dest, whole, .frost, dissolve_t),
-        .split => |s| {
-            // `mint` is the pane that opens — the dropped edge when the view
-            // moves into it, the far edge when the origin keeps the view.
-            const open = opening(whole, s.mint, t, scale);
-            if (open.pane.w <= 1 or open.pane.h <= 1) return;
-            open.pane.fill(card.corners, .{ .color = .{ .color = card.fill }, .fade = 1.0 });
-            if (s.fills_mint) {
-                drawLiveIn(l, open.pane, l.state.view_drag.moved_id, card);
-            } else {
-                Region.drawEmptyHatch(open.pane, scale);
-            }
-            // Only over the pane: the rest of the place is drawing its real,
-            // re-laid-out half, and blurring that would undo the point.
-            dissolve(l, dest, open.pane, .fade, dissolve_t);
-        },
-    }
-}
 
 /// Whether the pointer is over `name` as the place a release would land on.
 fn aimedAt(l: *Layout, name: []const u8) bool {
@@ -758,145 +323,44 @@ fn aimedAt(l: *Layout, name: []const u8) bool {
     return std.mem.eql(u8, target, name);
 }
 
-/// The drop zones over `name` while the drag aims at it (`core.widgets.DropZones`): every
-/// option the place offers at once, frosted glass cut from the place's picture, the one under
-/// the pointer dissolving sharp over the live preview of that drop. Call after the preview has
-/// drawn (`drawHint`), so the glass lies over it. `key` is any id stable for the place.
+/// The drop zones over `name` while it is somewhere the view could land
+/// (`core.widgets.DropZones`): every option the place offers at once, as the dialogs' frosted
+/// glass, the one under the pointer lit. Call after the place's own contents, so the glass lies
+/// over them. `key` is any id stable for the place.
 pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
+    // Every place the view could land shows all its zones for the whole drag, so every option
+    // is in view at once; the one under the pointer lights. When the drag ends they fade out
+    // rather than vanish, for as long as they are still showing.
+    const target = isTarget(l, name);
+    if (!target and !DropZones.showing(key)) return;
     const aimed = aimedAt(l, name);
-    // Left for another place (or the drag ended over nothing): its zones fade out rather than
-    // vanish, for as long as they are still showing.
-    if (!aimed and !DropZones.showing(key)) return;
-    const d = &l.state.view_drag;
-    const whole = placeBounds(l.state, name) orelse return;
+    const whole = placeBounds(l.state, name) orelse {
+        DropZones.forget(key);
+        return;
+    };
     const scale = dvui.currentWindow().natural_scale;
     const zones = DropZones.rects(whole, scale);
-
-    var pictured = false;
-    var frost: ?DropZones.Frosted = null;
-    if (d.hover_texture) |tex| if (std.mem.eql(u8, d.hover_name, name)) {
-        pictured = true;
-        d.hover_frost.prepare(tex);
-        if (d.hover_frost.texture) |t| frost = .{ .texture = t, .rect = d.hover_rect };
-    };
-    if (!pictured) if (d.leave_texture) |tex| if (std.mem.eql(u8, d.leave_name, name)) {
-        pictured = true;
-        d.leave_frost.prepare(tex);
-        if (d.leave_frost.texture) |t| frost = .{ .texture = t, .rect = d.leave_rect };
-    };
-    // The picture is taken by the place's own draw, a frame after it becomes the target: wait
-    // that frame rather than flash plain glass first. Once it is taken, a blur that could not be
-    // made (the blur off, a backend with no render targets) is plain glass, never no zones.
-    if (!pictured and core.anim.blurRadius() >= 1 and !d.pictures_unavailable) {
-        // A place left before its picture arrived has nothing to fade out from.
-        if (!aimed) {
-            DropZones.forget(key);
-            return;
-        }
-        // Waited on for a couple of frames at most: a place drawn where nothing photographs it
-        // (a seed tree's leaf) must still show its zones, as plain glass.
-        const waited = dvui.dataGetPtrDefault(null, key, "_zones_wait", u8, 0);
-        if (waited.* < 2) {
-            waited.* += 1;
-            dvui.refresh(null, @src(), key);
-            return;
-        }
-    }
-
     const prev_clip = dvui.clipGet();
     defer dvui.clipSet(prev_clip);
     dvui.clipSet(whole);
     const hovered: ?DropZones.Zone = if (aimed) DropZones.at(zones, dvui.currentWindow().mouse_pt) else null;
-    DropZones.draw(key, zones, hovered, frost, scale, aimed);
+    const center: DropZones.Center = if (regionNamed(l.state, name)) |r| (if (r.shows == .many) .add else .replace) else .replace;
+    DropZones.draw(key, zones, hovered, scale, target, center);
 }
 
-/// Whether `key`'s zones are still on screen — aimed at, or fading out after the pointer left.
-pub fn zonesShowing(l: *Layout, name: []const u8, key: dvui.Id) bool {
-    return aimedAt(l, name) or DropZones.showing(key);
-}
-
-/// The incoming surface, drawn live in the pane that is sliding open, in the
-/// same card the place it is landing in wears. A float rather than a box in
-/// the parent: this runs mid-layout, inside a place that has already sized
-/// itself.
-fn drawLiveIn(l: *Layout, dest: dvui.Rect.Physical, id: []const u8, card: Card) void {
-    if (id.len == 0 or dest.w < 2 or dest.h < 2) return;
-    const s = l.host.surfaceById(id) orelse return;
-    const nat = dest.toNatural();
-    var fw: dvui.FloatingWidget = undefined;
-    fw.init(@src(), .{ .mouse_events = false }, .{
-        .rect = .{ .x = nat.x, .y = nat.y, .w = nat.w, .h = nat.h },
-        .padding = card.padding,
-        .background = false,
-    });
-    defer fw.deinit();
-    const prev_clip = dvui.clip(fw.data().contentRectScale().r);
-    defer dvui.clipSet(prev_clip);
-    _ = s.draw(s.ctx) catch {};
-}
-
-/// A place's own content, dimmed, while the pointer is over the place the
-/// drag came from.
-///
-/// Your own place is not losing anything — the view is being carried, not
-/// taken away — so hatching it as a hole says the opposite of what dropping
-/// here does. Dimming says "this is the one in your hand" and leaves the
-/// content readable, which is what you are aiming with.
-pub fn dimSource(l: *Layout, rs: dvui.RectScale, corners: dvui.CornerRect.Physical) void {
-    if (!overSelf(l)) return;
-    const theme = dvui.themeGet();
-    // The card, not the content rect the place is clipped to: a dim that
-    // stops short of the padding leaves a bright border around it.
-    const prev = dvui.clipGet();
-    defer dvui.clipSet(prev);
-    dvui.clipSet(rs.r);
-    rs.r.fill(corners, .{ .color = .{ .color = theme.color(.window, .fill).opacity(0.55) }, .fade = 1.0 });
-}
-
-/// True while the pointer is inside the place the drag came from.
-pub fn overSelf(l: *Layout) bool {
+/// Whether `name` is somewhere the dragged view could land — one of the places mapped at lift
+/// (`mapTargets`), or the place it came from.
+fn isTarget(l: *Layout, name: []const u8) bool {
     const d = l.state.view_drag;
-    if (!d.active()) return false;
-    const bounds = placeBounds(l.state, d.name) orelse return false;
-    return bounds.contains(dvui.currentWindow().mouse_pt);
+    if (!d.active() or name.len == 0) return false;
+    if (std.mem.eql(u8, d.name, name)) return true;
+    for (d.targets[0..d.target_count]) |t| if (std.mem.eql(u8, t.name, name)) return true;
+    return false;
 }
 
-/// The source's own last pixels blurring away while a swap is previewed —
-/// the far end of the same dissolve the destination is running, so a trade
-/// looks like one motion happening in two places.
-pub fn drawSwapOut(l: *Layout, bounds: dvui.Rect.Physical) void {
-    if (!swapping(l)) return;
-    const tex = l.state.view_drag.texture orelse return;
-    const s = core.anim.crossfade.sample(.frost, previewClock(l), false);
-    const prev = dvui.clipGet();
-    defer dvui.clipSet(prev);
-    dvui.clipSet(bounds);
-    core.anim.blit(tex, &l.state.view_drag.frost, l.state.view_drag.texture_rect, s.out_blur, s.out_alpha);
-}
-
-/// The destination's last pixels, drawn back where they were taken and dissolving away inside
-/// `within`.
-///
-/// A *swap* frosts them out (`Kind.frost`: defocus and fade together, never a held opaque
-/// frost — the traded view is already drawing live underneath), so a trade reads as one motion
-/// happening in two places. A *split* only fades them: the pixels under an opening pane
-/// are the edge of content that is still there, sharp, right beside it, and frosting that edge
-/// paints coloured blobs of the neighbour into the new pane. Fading reads as the pane sliding
-/// over what was there, which is what is happening.
-fn dissolve(
-    l: *Layout,
-    dest_name: []const u8,
-    within: dvui.Rect.Physical,
-    kind: core.anim.Kind,
-    t: f32,
-) void {
-    const d = &l.state.view_drag;
-    const tex = d.hover_texture orelse return;
-    if (!std.mem.eql(u8, d.hover_name, dest_name)) return;
-    const s = core.anim.crossfade.sample(kind, t, false);
-    const prev = dvui.clip(within);
-    defer dvui.clipSet(prev);
-    core.anim.blit(tex, &d.hover_frost, d.hover_rect, s.out_blur, s.out_alpha);
+/// Whether `key`'s zones are on screen — a place the drag could land, or fading out after it.
+pub fn zonesShowing(l: *Layout, name: []const u8, key: dvui.Id) bool {
+    return isTarget(l, name) or DropZones.showing(key);
 }
 
 /// The card under the pointer. Always visible while dragging: it is the only
@@ -1019,12 +483,6 @@ pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) 
     switch (plan) {
         .swap => swap(l, source, dest, moved),
         .split => |s| {
-            // A drop that has already previewed this split must not ease the
-            // leaf from zero: the pane is already open, and starting again
-            // snaps the leftover back to full and slides the new side in a
-            // second time. Seed from the preview's own clock so the real
-            // split continues from the size the user was just looking at.
-            l.state.slide_open_from = if (previewOn(l, dest)) previewVisual(l) else 0;
             const new = Region.splitOn(l, dest, s.mint) orelse return;
             // A self-split leaves the view in the origin, which `mint` has
             // already put under the pointer. Moving it onto the fresh leaf
@@ -1107,7 +565,7 @@ fn swap(l: *Layout, source: []const u8, dest: []const u8, moved: []const u8) voi
 fn holding(l: *Layout, name: []const u8) []const []const u8 {
     if (l.state.assignment(name)) |ids| return ids;
     const r = regionNamed(l.state, name) orelse return &.{};
-    const items = l.matchingStored(r);
+    const items = l.matchingIn(r);
     var out = std.ArrayListUnmanaged([]const u8).initCapacity(l.arena, items.len) catch return &.{};
     for (items) |s| out.appendAssumeCapacity(s.id);
     return out.items;
@@ -1228,56 +686,6 @@ fn idsReplacing(arena: std.mem.Allocator, ids: []const []const u8, drop: []const
     }
     if (!replaced) out.appendAssumeCapacity(add);
     return out.items;
-}
-
-test "a split preview grows from the dropped edge to an even half" {
-    const r: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
-    const half = (200 - Split.handle_size) / 2;
-
-    try std.testing.expectEqual(@as(f32, 0), opening(r, .left, 0, 1).pane.w);
-
-    const left = opening(r, .left, 1, 1);
-    try std.testing.expectApproxEqAbs(half, left.pane.w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 0), left.pane.x, 0.01);
-    // What the pane takes plus the sash is exactly what the place gives up,
-    // so the two halves come out the same size.
-    try std.testing.expectApproxEqAbs(half, 200 - left.inset, 0.01);
-
-    const right = opening(r, .right, 1, 1);
-    try std.testing.expectApproxEqAbs(200 - half, right.pane.x, 0.01);
-    try std.testing.expectApproxEqAbs(half, right.pane.w, 0.01);
-}
-
-test "a place not being previewed gives up nothing" {
-    const r: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
-    try std.testing.expectEqual(@as(f32, 0), opening(r, .left, 0, 1).inset);
-    try std.testing.expectEqual(@as(f32, 0), opening(r, .top, 0, 1).inset);
-}
-
-test "the pane and the place it pulls back from never overlap" {
-    const r: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 120, .h = 300 };
-    var t: f32 = 0;
-    while (t <= 1.0) : (t += 0.05) {
-        for (std.meta.tags(SplitTree.Side)) |side| {
-            const o = opening(r, side, t, 1);
-            const along = switch (side) {
-                .left, .right => o.pane.w,
-                .top, .bottom => o.pane.h,
-            };
-            try std.testing.expect(o.inset >= along);
-        }
-    }
-}
-
-test "the dissolve clock is the preview's linear time, not its ease" {
-    // outCubic(0.2) is already past the blur hold. The dissolve must not use it.
-    const eased = 1 - (1 - 0.2) * (1 - 0.2) * (1 - 0.2);
-    try std.testing.expect(eased > core.anim.crossfade.hold);
-    const fading = core.anim.crossfade.sample(.blur, eased, false);
-    try std.testing.expect(fading.out_alpha < 1);
-    const blurring = core.anim.crossfade.sample(.blur, 0.2, false);
-    try std.testing.expectEqual(@as(f32, 1), blurring.out_alpha);
-    try std.testing.expect(blurring.out_blur < 1);
 }
 
 test "a document pane does not accept a panel surface" {

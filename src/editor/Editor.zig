@@ -73,7 +73,6 @@ const FolderWatcher = Watch.FolderWatcher;
 pub const Workspace = workbench_mod.Workspace;
 pub const Explorer = @import("explorer/Explorer.zig");
 pub const IgnoreRules = @import("explorer/IgnoreRules.zig");
-pub const Panel = @import("panel/Panel.zig");
 pub const Sidebar = @import("Sidebar.zig");
 pub const Infobar = @import("Infobar.zig");
 pub const Menu = @import("Menu.zig");
@@ -111,8 +110,6 @@ keybind_profile: Keybinds.Profile = .vscode,
 command_palette: @import("CommandPalette.zig") = .{},
 
 explorer: *Explorer,
-
-panel: *Panel,
 
 last_titlebar_color: dvui.Color,
 
@@ -339,7 +336,6 @@ pub fn init(
             .secrets = try .init(app.allocator, dvui.io, config_folder),
         },
         .explorer = try app.allocator.create(Explorer),
-        .panel = try app.allocator.create(Panel),
         .sidebar = try .init(),
         .infobar = try .init(),
         .last_titlebar_color = dvui.themeGet().color(.control, .fill),
@@ -565,7 +561,6 @@ pub fn init(
     fizzy.backend.setTitlebarColor(dvui.currentWindow(), dvui.themeGet().color(.content, .fill).opacity(if (dvui.themeGet().dark) editor.app.settings.window_opacity_dark else editor.app.settings.window_opacity_light));
 
     editor.explorer.* = .init();
-    editor.panel.* = .init();
     editor.app.open_files = .empty;
     try editor.workbench.initDefaultWorkspace();
 
@@ -1704,9 +1699,6 @@ pub fn unloadPlugin(editor: *Editor, id: []const u8, force: bool) UnloadError!vo
     // Remove all contributions + services + active-id references (before dlclose), then
     // run the plugin's own teardown.
     editor.app.host.unregisterPlugin(plugin);
-    // The bottom panel borrows `BottomView.id` slices (grouping keys, per-split active tab)
-    // that live in the image we're about to unmap — drop them while they're still readable.
-    editor.panel.forgetUnregisteredSurfaces(&editor.app.host);
     fizzy.backend.rebuildDynamicNativeMenus();
     plugin.deinit();
 
@@ -5476,8 +5468,6 @@ pub fn deinit(editor: *Editor) !void {
     editor.app.settings.deinit(editor.app.gpa);
 
     editor.explorer.deinit();
-    editor.panel.deinit(editor.app.gpa);
-    editor.app.gpa.destroy(editor.panel);
 
     PluginStore.deinit();
     editor.unloadPluginLibs();

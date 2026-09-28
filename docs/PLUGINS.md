@@ -594,8 +594,8 @@ the assignment list read back.
 
 **Dragging a view onto a region is the app's gesture, everywhere.** While a view is dragged,
 the region under the pointer shows its drop zones (the middle and each edge,
-`core.widgets.DropZones`) and a live preview of the drop; a plugin's region gets the same. Two
-pieces let a plugin take part:
+`core.widgets.DropZones`), every place it could land showing all of them; a plugin's region
+gets the same. Two pieces let a plugin take part:
 
 - `host.beginViewDrag(surface_id, from_rect)` hands something of yours to that drag — the
   workbench calls it when a document tab is dragged off its tab strip.

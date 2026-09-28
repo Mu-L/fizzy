@@ -42,50 +42,36 @@ fizzy's Workspace would lose its open documents. The origin keeps the view, and 
 is what puts it under the pointer.
 
 This table is `Drop.plan`, and it is about forty lines with no drawing and no state in it. The
-preview and the release both call it, which is the reason they cannot disagree.
+drop zones and the release both read the same geometry (`Drop.kindAt` over
+`core.widgets.DropZones`), which is the reason they cannot disagree.
 
 ## Feedback while dragging
 
-A drag is a question ("where does this go?") and the preview is the answer, shown as the
-result rather than as a symbol for it.
+A drag is a question ("where does this go?"). The answer is shown as the options, all at once,
+and the view you are carrying — never as the view drawn in two places.
 
-- **The float is a photograph.** The dragged surface is captured once, at lift. The card
-  following the pointer blits that texture, so no plugin is asked to draw twice in a frame.
-- **A photograph is taken from the place's own draw.** The drag needs two stills — the lifted
-  view for the card, the destination as it stood for the outgoing blur — and both come from the
-  draw the place was going to do anyway, blitted back to the screen afterwards. Never a second
-  `drawContents` in the same frame: that builds every widget under the place twice, and dvui
-  reports a duplicate id for each one of them.
-- **The float never hides.** It is the only thing saying what is being carried. Hiding it over
-  a drop target made the gesture look cancelled.
-- **A swap previews by swapping.** Both places remap their assignment for the frame and lay
-  out the other's view for real, and each one's old pixels blur away over the new — the same
-  crossfade a surface change uses anywhere else, so this is not a special motion to learn.
-  The dissolve is on the preview's *linear* clock, not the pane's ease: the ease spends the
-  blur (the first third) in a handful of frames and the rest is only alpha. The pose that is
-  already opening stays the pose until it shuts — re-reading the pointer mid-slide restarted
-  the clock every time the pointer brushed an edge.
-- **A drop continues the preview.** A split that has already slid open does not ease the new
-  leaf from zero (that snaps the leftover back to full). A swap that has already remapped
-  does not start a second `transition` on release.
-- **A split previews by splitting.** The place being split *pulls back* to the half it will
-  keep — really laid out at that size, its contents reflowed, not a crop of the old picture —
-  and the new pane slides open in the space it gave up, wearing the same card the real one
-  will. Whatever is arriving draws live in it; a self-split's leaf is empty, so it hatches.
-- **Over your own place, your content dims and stays.** The view is in your hand, not gone, so
-  hatching your own place as a hole says the opposite of what dropping there does.
-- **Leaving slides it shut.** The preview eases both directions at the same speed, so brushing
-  past a place costs nothing and shows you it cost nothing.
-- **A preview never remounts anything.** The pull-back is a margin on the place's *own* box.
-  Putting the contents inside a sized child box would rebuild every widget in them, and a
-  document pane would lose its scroll, selection and undo each time the pointer brushed an edge.
+- **The view is drawn once: as the card under the pointer.** The dragged surface is photographed
+  once, at lift, from the draw its place was doing anyway (never a second `drawContents` in the
+  same frame: that builds every widget under the place twice, and dvui reports a duplicate id for
+  each of them). The card blits that picture and never hides — it is the only thing saying what
+  is being carried.
+- **Its place stands empty.** Hatched, as an empty place always is, until the drop — the view is
+  in your hand, and a place still drawing it would say it had not moved.
+- **Every place it could land shows its drop zones.** All five of them — the middle and each
+  edge — on every such place at once, so every option in the window is in view before you move
+  toward any of them. They are the dialogs' frosted glass, the app's surface rounding, an even gap
+  around each, and a faint icon saying what a drop there does: a pane opening on that side, or
+  the middle's trade (one view) or join (several). The one under the pointer lights.
+- **Nothing is previewed in place.** No place poses the view as if it had landed, and none pulls
+  back to make room: one copy of a view is easier to read than two, and the layout that answers
+  the drop moves after it, with the easing every split and swap already has.
+- **The zones come and go softly.** They fade in as the drag starts and out as it ends, by
+  growing and shrinking the frost itself — never its opacity, since a frost replaces what it
+  covers and a half-opaque one would show a see-through window's content through it.
 - **A drag does not change the map it is read against.** The places, and where they are, are
-  photographed at lift, exactly like the view is. Two loops make this necessary: a preview draws
-  the view it is about to land, and the panes *that* view declares would register as new, smaller
-  places under the pointer; and a place previewing a split pulls back, moving the rect the pointer
-  is aiming at. Either one flips the reading every frame — aim, preview, reading changes, preview
-  closes, reading changes back — which is not a wobble to damp out but a loop to cut. Frozen, the
-  hit-test is a pure function of where the pointer is.
+  photographed at lift, exactly like the view is. Places move during a drag — the source stands
+  empty, a place that hides when empty folds away — and a hit-test read against the live layout
+  would chase them. Frozen, it is a pure function of where the pointer is.
 
 ## Where the view goes when a place is split
 
@@ -100,9 +86,8 @@ This holds for both entry points:
 The rule keeps a split feeling like a division of something that already exists, rather than
 a replacement of it by two new things.
 
-A split lands where the preview showed it: even halves with the sash out of the middle, both
-measured from the place as it stood *before* it pulled back. Measuring the live place instead
-halves a half — the pane opens at a quarter of what the user was just shown.
+A split lands as even halves with the sash out of the middle, measured from the place as it
+stood when the drag began — the place the user was shown.
 
 ## A place a split made shuts when its last view leaves
 
@@ -146,7 +131,7 @@ and assignment untouched throughout — a split and its undo are symmetric.
 | File | Holds |
 |---|---|
 | `Drop.zig` | The rule. No drawing, no state, no allocator. |
-| `ViewDrag.zig` | The gesture: drag state, hit-testing, preview animation and painting, and the assignment that lands. |
+| `ViewDrag.zig` | The gesture: drag state, hit-testing, the card, the drop zones over every place, and the assignment that lands. |
 | `SplitTree.zig` | The tree: split, collapse, persistence links. Geometry-free. |
 | `Region.zig` | Declaring a place and walking the tree to draw its leaves. |
 | `Picker.zig` | The menu on a place: assign, clear, remove, split. |

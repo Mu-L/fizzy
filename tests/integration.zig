@@ -2173,15 +2173,12 @@ test "a hide_when_empty panel stays while its view is dragged onto main" {
     var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
     const ViewDrag = fizzy.Editor.Layout.ViewDrag;
     ViewDrag.begin(&layout, "Panel", .{ .x = 0, .y = 400, .w = 800, .h = 200 });
-    editor.app.layout.view_drag.preview_name = editor.app.layout.internName(editor.app.gpa, "Main");
-    editor.app.layout.view_drag.preview_t = 1;
     editor.app.layout.view_drag.moved_id = "test.output";
-    editor.app.layout.view_drag.other_id = "";
 
-    const panel_kw = fizzy.sdk.keywords.ide.panel;
-    try std.testing.expectEqual(@as(usize, 0), layout.matching(panel_kw).len);
+    // Its view rides the pointer, but it is still the panel's until the drop: the panel stands
+    // empty (hatched), not gone.
     const panel = ViewDrag.regionNamed(&editor.app.layout, "Panel") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 1), layout.matchingStored(panel).len);
+    try std.testing.expectEqual(@as(usize, 1), layout.matchingIn(panel).len);
 
     _ = try dvui.testing.step(EmptyPanelFrame.frame);
     var panel_h: f32 = 0;
@@ -3499,49 +3496,7 @@ test "a region with no drop handler takes the middle by the app's default" {
     try std.testing.expectEqual(@as(usize, 0), from.len);
 }
 
-test "while a loose drag's landing is previewed, the place holding the view lets it go" {
-    var ctx = try shim.init(std.testing.allocator);
-    defer ctx.deinit(std.testing.allocator);
-    const editor = ctx.editor;
-    editor.app.gpa = std.testing.allocator;
-    defer editor.app.layout.regions.deinit(editor.app.gpa);
-    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
-    defer editor.app.layout.deinitQualified(editor.app.gpa);
-    defer editor.app.layout.deinitAssignments(editor.app.gpa);
-    defer editor.app.layout.view_drag = .{};
-
-    const draw = struct {
-        fn f(_: ?*anyopaque) anyerror!dvui.App.Result {
-            return .ok;
-        }
-    }.f;
-    try editor.app.host.registerSurface(.{ .id = "test.doc", .title = "a.txt", .keywords = fizzy.sdk.document.keywords, .draw = draw });
-    try editor.app.host.registerSurface(.{ .id = "test.other", .title = "b.txt", .keywords = fizzy.sdk.document.keywords, .draw = draw });
-    dropRegions(editor);
-    try editor.app.layout.assign(editor.app.gpa, "Pane 1", &.{ "test.doc", "test.other" });
-
-    var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
-    const VD = fizzy.Editor.Layout.ViewDrag;
-    var d = &editor.app.layout.view_drag;
-    d.name = VD.loose_source;
-    d.moved_id = "test.doc";
-    d.preview_name = "Pane 0";
-    d.preview_split = .right;
-    d.preview_t = 0.5;
-
-    const shown = VD.previewAssignment(&layout, "Pane 1") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 1), shown.len);
-    try std.testing.expectEqualStrings("test.other", shown[0]);
-
-    // No preview, no change: it is still where it was until the drop.
-    d.preview_t = 0;
-    try std.testing.expect(VD.previewAssignment(&layout, "Pane 1") == null);
-}
-
-// The middle of the place a view was lifted from previews nothing — a drop there is no move —
-// so it is where the drop zones are the whole picture. They must show there, and the place must
-// keep drawing normally under them: retaking its picture every frame drew it through the
-// capture path, without its background.
+// Every place a dragged view could land shows its drop zones, the place it came from included.
 test "dragging a view over its own place shows that place's drop zones" {
     var ctx = try shim.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
@@ -3592,16 +3547,7 @@ test "dragging a view over its own place shows that place's drop zones" {
     for (editor.app.layout.regions.items) |r| {
         if (std.mem.eql(u8, r.name, "Center")) center = r;
     }
-    // The zones show whether or not the place can be photographed (a seed tree's leaf, as here,
-    // is not; nor is anything on a backend without texture targets).
     try std.testing.expect(fizzy.core.widgets.DropZones.showing(center.id));
-    // Where a picture was taken, it is kept, not retaken every frame.
-    if (d.hover_texture != null) {
-        try std.testing.expectEqualStrings("Center", d.hover_name);
-        const taken = d.hover_texture;
-        _ = try dvui.testing.step(EndlessFrame.frame);
-        try std.testing.expect(std.meta.eql(taken, d.hover_texture));
-    }
 }
 
 // `core` is not a test root, so its widgets' pure rules are tested here.
@@ -3617,13 +3563,16 @@ test "drop zones: the middle is the center zone and each edge its own" {
     try std.testing.expect(DZ.at(r, .{ .x = 400, .y = 590 }).eql(.{ .edge = .bottom }));
 }
 
-test "drop zones: zones do not overlap, and the middle stands back from the bands" {
+test "drop zones: zones do not overlap, and every gap is the same" {
     const r = DZ.rects(.{ .x = 0, .y = 0, .w = 800, .h = 600 }, 1);
     for (DZ.all, 0..) |a, i| for (DZ.all[i + 1 ..]) |b| {
         try std.testing.expect(r.of(a).intersect(r.of(b)).empty());
     };
-    try std.testing.expect(r.center.x > r.left.x + r.left.w + DZ.gap);
-    try std.testing.expect(r.center.y > r.top.y + r.top.h + DZ.gap);
+    // The middle is one gap from the bands, as the bands are from each other and the edge.
+    try std.testing.expectApproxEqAbs(r.left.x + r.left.w + DZ.gap, r.center.x, 0.01);
+    try std.testing.expectApproxEqAbs(r.top.y + r.top.h + DZ.gap, r.center.y, 0.01);
+    try std.testing.expectApproxEqAbs(r.left.x + r.left.w + DZ.gap, r.top.x, 0.01);
+    try std.testing.expectApproxEqAbs(DZ.gap, r.left.x, 0.01);
 }
 
 test "drop zones: a point in a gap belongs to the nearest zone" {

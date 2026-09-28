@@ -81,17 +81,11 @@ pub fn selectionKey(self: *const Region) u64 {
 }
 
 pub fn deinit(self: *Region) void {
-    // Plugin panes skip the corner button, so a retracting slide has to
-    // paint here — still clipped — after their own chrome has drawn.
+    // Plugin panes skip the corner button, so their drop zones are drawn
+    // here — still clipped — after their own chrome has drawn.
     if (self.kind_slot) {
         if (self.layout) |l| {
-            if (self.box) |b| {
-                if (ViewDrag.previewOn(l, self.name)) {
-                    const rs = b.data().borderRectScale();
-                    ViewDrag.drawHint(l, self.name, rs.r, rs.s, cardOf(b));
-                }
-                ViewDrag.drawZones(l, self.name, b.data().id);
-            }
+            if (self.box) |b| ViewDrag.drawZones(l, self.name, b.data().id);
         }
     }
     if (self.prev_clip) |c| dvui.clipSet(c);
@@ -210,9 +204,10 @@ pub fn isPeeking(self: Region) bool {
 /// `panel_chrome`) named *fizzy's own* furniture from inside the generic layer. That is the
 /// case CLAUDE.md calls a bug in `Layout` rather than a special case: a shape is supposed to be
 /// ordinary code over this API, and an app copying `src/editor/layout.zig` could not have written those two
-/// values itself. As a function pointer they are just `explorerPane` and `bottomPane` in
-/// `src/editor/layout.zig` — app code, passed in, replaceable by the app's own loop over `matching` /
-/// `selected` / `draw`, which is the governing test for everything here.
+/// values itself. As a function pointer it is just `explorerPane` in `src/editor/layout.zig` —
+/// app code, passed in, replaceable by the app's own loop over `matching` / `selected` / `draw`,
+/// which is the governing test for everything here. (The bottom panel had one too, until
+/// `shows = .many` drew the same strip generically: it is a plain Multiple place now.)
 ///
 /// It also retired the two values nothing used (`.tabs`, `.icons`); `Layout.tabbed` is the
 /// first of those as a plain function, and the icon rail was never this shape to begin with —
@@ -365,7 +360,7 @@ pub fn init(self: *Layout, src: std.builtin.SourceLocation, init_opts: InitOptio
     // `hide_when_empty` is "nothing belongs here when idle" — the picker
     // emptied it, every panel view is toggled off — not the view sitting
     // on the pointer. Shape places stay; only a drop commits the hole.
-    const matches = self.matchingStored(&probe);
+    const matches = self.matchingIn(&probe);
     // Cleared through the picker is not "nothing belongs here": the user asked for an empty
     // place and expects to see it, hatch and all, until they put something back. Only a
     // place nothing *chose* — every view toggled off, no assignment — folds away.
@@ -527,17 +522,6 @@ pub fn init(self: *Layout, src: std.builtin.SourceLocation, init_opts: InitOptio
         .drop_ctx = init_opts.drop_ctx,
     });
 
-    // A previewed split is laid out, not drawn over: the place really pulls
-    // back to the half it would keep, so the arrangement under the pointer is
-    // the one the release produces. `ViewDrag.pullBack` explains why this is a
-    // margin and not a child box.
-    if (init_opts.name.len > 0) {
-        if (ViewDrag.previewPlan(self, init_opts.name)) |p| switch (p) {
-            .swap => {},
-            .split => |s| ViewDrag.pullBack(self, init_opts.name, &box_opts, s.mint, axis, init_opts.resize),
-        };
-    }
-
     const box = dvui.box(src, .{ .dir = init_opts.dir }, box_opts);
     if (init_opts.resize) Split.recordEdges(id, box.data(), axis);
     if (init_opts.name.len > 0) {
@@ -575,34 +559,21 @@ pub fn init(self: *Layout, src: std.builtin.SourceLocation, init_opts: InitOptio
     // layered form later — a tray blurring what is behind it needs the region underneath to have
     // drawn, at every size the tray takes.
     //
-    // Photographed, when the drag needs a still, from this very draw and no
-    // other — see `drawContentsPhotographed`. Landing areas draw the
-    // surfaces live: a swap remaps matching so each place lays out the
-    // other's view; a self-split keeps this place's view (the new leaf
-    // is empty); a cross-place split leaves a hole and draws the moved
-    // view in the incoming pane.
+    // Photographed, when the drag needs the card's picture, from this very
+    // draw and no other — see `drawContentsPhotographed`.
     if (!shut_now and keywords.len > 0 and !init_opts.manual_contents) {
-        const plan = ViewDrag.previewPlan(self, init_opts.name);
-        const swapped = ViewDrag.swapping(self);
-        // The source stands empty while its view rides the pointer — but not
-        // while the pointer is over it. Aiming at your own place must show
-        // your own content, dimmed: that is the thing you are placing.
-        const on_screen = !dragging_this or swapped or ViewDrag.overSelf(self);
-        const shot = ViewDrag.shotWanted(self, init_opts.name, dragging_this, plan);
+        // The view rides the pointer as its card, drawn once: its place stands
+        // empty (hatched, `cornerButton`) until the drop.
+        const on_screen = !dragging_this;
+        const shot = ViewDrag.shotWanted(self, dragging_this);
 
         if (shot.any()) {
-            try drawContentsPhotographed(self, init_opts, keywords, clip_to, shot, on_screen);
+            try drawContentsPhotographed(self, init_opts, keywords, clip_to, shot);
         } else if (on_screen) {
             _ = try drawContents(self, init_opts, keywords);
         }
     }
-    if (dragging_this) {
-        const rs = box.data().borderRectScale();
-        const corners = box_opts.cornersGet().scale(rs.s, dvui.CornerRect.Physical);
-        ViewDrag.drawSwapOut(self, rs.r);
-        ViewDrag.dimSource(self, rs, corners);
-        ViewDrag.drawFloat(self);
-    }
+    if (dragging_this) ViewDrag.drawFloat(self);
 
     return .{
         .name = init_opts.name,
@@ -656,11 +627,10 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
         mouse.y >= rs.r.y and mouse.y <= rs.r.y + corner_reach * rs.s;
     const pressing = dvui.dataGet(null, box.data().id, "_chooser_press", bool) orelse false;
     if (self.state.view_drag.active()) ViewDrag.tick(self);
-    const showing = ViewDrag.previewOn(self, opts.name);
-    const available = !filled or picker_here or near or dragging_this or drop_here or pressing or showing;
+    const available = !filled or picker_here or near or dragging_this or drop_here or pressing;
     const alpha = chooserFade(box.data().id, if (available) 1 else 0);
 
-    if (alpha < 0.01 and !available and !dragging_this and !showing and !ViewDrag.zonesShowing(self, opts.name, box.data().id)) return;
+    if (alpha < 0.01 and !available and !dragging_this and !ViewDrag.zonesShowing(self, opts.name, box.data().id)) return;
 
     var ftb: dvui.RenderFrontToBack = undefined;
     ftb.init();
@@ -671,17 +641,12 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
     // square outline sitting on the rounded card.
     const corners = box.data().options.cornersGet().scale(rs.s, dvui.CornerRect.Physical);
     const theme = dvui.themeGet();
-    // The place the view was lifted out of stands empty — unless it is the
-    // landing, or the pointer is over it, in which case it keeps its content
-    // and dims instead.
-    const hole = dragging_this and !ViewDrag.swapping(self) and !ViewDrag.overSelf(self);
-    if (!filled or hole) drawEmptyHatch(rs.r, rs.s);
-    if (drop_here or showing) {
-        ViewDrag.drawHint(self, opts.name, rs.r, rs.s, cardOf(box));
-    }
-    // Over the preview, in the same front-to-back pass: the glass lies on what it reveals.
+    // The place the view was lifted out of stands empty while its view rides
+    // the pointer.
+    if (!filled or dragging_this) drawEmptyHatch(rs.r, rs.s);
+    // In the same front-to-back pass as the contents' chrome: the glass lies on them.
     ViewDrag.drawZones(self, opts.name, box.data().id);
-    if (!(drop_here or showing) and filled and !dragging_this and alpha > 0.01) {
+    if (!drop_here and filled and !dragging_this and alpha > 0.01) {
         // Under the region's own border rect, not the content clip `cornerButton` runs inside:
         // the ring is on the border, in the padding, so a region with padding (every card but
         // the explorer's) clipped it away entirely — only the explorer ever showed which place
@@ -693,7 +658,7 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
         rs.r.insetAll(half).stroke(corners, .{ .color = .{ .color = theme.focus.opacity(alpha) }, .thickness = 2 * half });
     }
 
-    if (alpha < 0.01 and !pressing and !dragging_this and !showing) return;
+    if (alpha < 0.01 and !pressing and !dragging_this) return;
 
     const content = box.data().contentRect();
     var bw: dvui.ButtonWidget = undefined;
@@ -840,32 +805,15 @@ fn drawContentsPhotographed(
     keywords: []const []const u8,
     rect: dvui.Rect.Physical,
     shot: ViewDrag.Shot,
-    on_screen: bool,
 ) !void {
-    const captured = core.anim.CrossFade.beginCapture(rect) orelse {
-        // No texture targets (web) or nothing to capture: the drag goes
-        // without its still rather than the place going without its draw —
-        // and its drop zones go without one too (`pictures_unavailable`).
-        if (rect.w >= 1 and rect.h >= 1) self.state.view_drag.pictures_unavailable = true;
-        if (on_screen) _ = try drawContents(self, opts, keywords);
-        return;
-    };
-    var pic = captured;
-
-    // Photograph the place as it stands, not as the preview poses it: the
-    // still is taken on the frame the preview is aimed, before the place has
-    // pulled back, which is exactly the picture the dissolve needs.
-    self.state.view_drag.capturing = true;
+    // No texture targets (web) or nothing to capture: the card goes without
+    // its picture (it draws as a plain card), and nothing else is lost — the
+    // place is standing empty while its view rides the pointer anyway.
+    var pic = core.anim.CrossFade.beginCapture(rect) orelse return;
     const prev_clip = dvui.clip(rect);
     _ = try drawContents(self, opts, keywords);
     dvui.clipSet(prev_clip);
-    self.state.view_drag.capturing = false;
-
-    // `pic.r`, not `rect`: `Picture.start` enlarges to pixel boundaries, and
-    // blitting the smaller rect would sample the wrong UVs.
-    const tex = ViewDrag.keepShot(self, shot, &pic, opts.name) orelse return;
-    if (!on_screen) return;
-    core.anim.blit(tex, null, pic.r, 0, 1);
+    ViewDrag.keepShot(self, shot, &pic);
 }
 
 fn persistExtent(self: *Layout, opts: InitOptions, id: dvui.Id, chosen: f32, shown: f32) void {
@@ -1100,15 +1048,6 @@ fn sashWidth(self: *Layout, name: []const u8, target: dvui.Id) f32 {
 /// used to pick up extra space on one side.
 /// What a place looks like, read off the place itself, so a pane a preview
 /// opens is dressed like the pane that will be there.
-fn cardOf(box: *dvui.BoxWidget) ViewDrag.Card {
-    const o = box.data().options;
-    return .{
-        .corners = o.cornersGet().scale(box.data().borderRectScale().s, dvui.CornerRect.Physical),
-        .fill = o.color(.fill).toColor(),
-        .padding = o.paddingGet(),
-    };
-}
-
 /// A card's padding, folded away over the last stretch of a close.
 ///
 /// Padding is room the place takes up, so a card closed to nothing is still as wide as its own

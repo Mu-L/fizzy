@@ -92,8 +92,9 @@ pub fn layout(ctx: ?*anyopaque, f: *Layout) !dvui.App.Result {
         var panel = try f.region(@src(), .{
             .name = "Panel",
             .keywords = bottom,
+            // A Multiple place like any other: the generic strip, reorder, drag off to the view
+            // drag, and splitting it is the region Split every place has.
             .shows = .many,
-            .content = .{ .ctx = editor, .draw = bottomPane },
             .resize = true,
             .collapsible = true,
             .hide_when_empty = true,
@@ -144,10 +145,6 @@ fn explorerPane(ctx: ?*anyopaque, f: *Layout, keywords: []const []const u8) !dvu
     return editor.explorer.draw(editor, f, keywords);
 }
 
-fn bottomPane(ctx: ?*anyopaque, f: *Layout, keywords: []const []const u8) !dvui.App.Result {
-    const editor: *fizzy.Editor = @ptrCast(@alignCast(ctx.?));
-    return editor.panel.draw(editor, f, keywords);
-}
 
 // ── Blur harness ───────────────────────────────────────────────────────────────────────────────
 //

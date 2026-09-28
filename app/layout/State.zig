@@ -122,11 +122,6 @@ pending_dock: ?core.widgets.DockLayout = null,
 tree_cleared: bool = false,
 /// New leaf that should ease open this frame. Interned; empty when none.
 slide_open: []const u8 = "",
-/// Where that ease starts, 0..1 of the leaf's target. Zero is a first
-/// appearance (picker split). A view-drag that already previewed the
-/// split seeds this from the preview so the real pane does not start
-/// over from nothing — that restart is the snap after a smooth preview.
-slide_open_from: f32 = 0,
 /// A place's view being dragged to another place. Empty `name` when idle.
 view_drag: ViewDrag = .{},
 /// Explorer/panel split ratios — "window shape" state persisted in `window.zon`, not
@@ -681,7 +676,6 @@ pub fn resetLayout(self: *State, gpa: std.mem.Allocator) void {
     self.splits = .{};
     self.clearDock();
     self.slide_open = "";
-    self.slide_open_from = 0;
     self.view_drag.discard();
     self.discardSwaps();
     self.center_transition.discard();
@@ -723,12 +717,12 @@ pub fn requestSlideOpen(self: *State, name: []const u8) void {
     self.slide_open = name;
 }
 
+/// Whether `name` should ease open this frame, and from where (0…1 of its target): always from
+/// nothing — a new leaf appears by growing into its space.
 pub fn takeSlideOpen(self: *State, name: []const u8) ?f32 {
     if (self.slide_open.len == 0 or !std.mem.eql(u8, self.slide_open, name)) return null;
     self.slide_open = "";
-    const from = std.math.clamp(self.slide_open_from, 0, 1);
-    self.slide_open_from = 0;
-    return from;
+    return 0;
 }
 
 pub fn deinitAssignments(self: *State, gpa: std.mem.Allocator) void {
