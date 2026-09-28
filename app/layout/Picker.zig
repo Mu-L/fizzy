@@ -219,6 +219,12 @@ pub fn draw(self: *Picker, f: *Layout) void {
         }
     }
 
+    // The same filter box as the file tree's, the settings' and the store's. It matches what a
+    // card says and what it does not: the view's title, the plugin it comes from, its tags (the
+    // keywords it asks for) and the place showing it now.
+    const filter_text = core.widgets.filterRow(@src(), "Filter views...", .{ .margin = .{ .y = 2, .h = 4 } });
+    const query = core.fuzzy.Query.init(filter_text);
+
     const width = @as(f32, @floatFromInt(columns)) * (preview.w + 16) + 16;
     var scroll = dvui.scrollArea(@src(), .{}, .{
         .min_size_content = .{ .w = width, .h = list_height },
@@ -234,8 +240,11 @@ pub fn draw(self: *Picker, f: *Layout) void {
     var row: ?*dvui.BoxWidget = null;
     defer if (row) |r| r.deinit();
     var col: usize = 0;
-    for (f.host.surfaces.items, 0..) |*s, i| {
-        if (s.hidden) continue;
+    for (offered(f, &region, &query)) |ranked| {
+        // `i` is the surface's place in the registry, not in this list: a card keeps its widget
+        // id while the filter reorders what is around it.
+        const i = ranked.item;
+        const s = &f.host.surfaces.items[i];
         if (col == 0) {
             if (row) |r| r.deinit();
             row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = i, .expand = .horizontal });
@@ -294,7 +303,46 @@ pub fn draw(self: *Picker, f: *Layout) void {
         dvui.refresh(null, @src(), null);
     }
 
-    if (state.store_catalog) |store| drawStoreSection(f, &region, store, &row, &col);
+    if (state.store_catalog) |store| drawStoreSection(f, &region, store, &row, &col, &query);
+}
+
+/// The surfaces this region's picker offers — what the region may show at all (`Layout.offers`:
+/// no document in a plain place, only documents in a document pane) — that match `query`, best
+/// first. In registry order while the query is empty. Indices into `host.surfaces`.
+fn offered(f: *Layout, region: *const Layout.Region, query: *const core.fuzzy.Query) []core.fuzzy.Ranked(usize) {
+    var out: std.ArrayListUnmanaged(core.fuzzy.Ranked(usize)) = .empty;
+    for (f.host.surfaces.items, 0..) |*s, i| {
+        if (s.hidden) continue;
+        if (!f.offers(region, s)) continue;
+        const score = if (query.isEmpty()) 0 else core.fuzzy.score(searchText(f, s), query, .{}) orelse continue;
+        out.append(f.arena, .{ .item = i, .score = score, .tie = i }) catch break;
+    }
+    if (!query.isEmpty()) core.fuzzy.sort(usize, out.items);
+    return out.items;
+}
+
+/// Where a view comes from, as its card says it: the plugin's name, or "Built-in" for one the app
+/// itself registered (Output, Settings). Not the app's own name — this picker is the framework's,
+/// and an app built on it is not fizzy.
+fn ownerName(s: *const sdk.Surface) []const u8 {
+    return if (s.owner) |p| p.display_name else "Built-in";
+}
+
+/// Everything a view is found by, as one line, so a query can span fields: `files workbench`
+/// finds Files through its title and its plugin together, where scoring each field on its own
+/// would need both words in one of them.
+fn searchText(f: *Layout, s: *const sdk.Surface) []const u8 {
+    var text: std.ArrayListUnmanaged(u8) = .empty;
+    const a = f.arena;
+    text.appendSlice(a, s.title) catch return s.title;
+    text.print(a, " {s}", .{ownerName(s)}) catch {};
+    if (s.owner) |p| text.print(a, " {s}", .{p.id}) catch {};
+    for (s.keywords) |k| text.print(a, " {s}", .{k}) catch {};
+    for (f.state.regions.items) |*r| {
+        if (r.name.len == 0) continue;
+        if (contains(f.matchingStored(r), s.id)) text.print(a, " {s}", .{r.name}) catch {};
+    }
+    return text.items;
 }
 
 /// How long a finger holds still on a card before it lifts rather than scrolls the list.
@@ -426,14 +474,11 @@ fn card(f: *Layout, s: *const sdk.Surface, on: bool, id_extra: usize) Hit {
         .max_size_content = .width(preview.w),
         .color_text = .{ .color = if (on) theme.color(.highlight, .fill) else theme.color(.window, .text) },
     });
-    const owner = if (s.owner) |p| p.display_name else "";
-    if (owner.len > 0) {
-        dvui.labelNoFmt(@src(), owner, .{}, .{
-            .padding = .{},
-            .font = dvui.Font.theme(.heading),
-            .color_text = .{ .color = theme.color(.control, .text) },
-        });
-    }
+    dvui.labelNoFmt(@src(), ownerName(s), .{}, .{
+        .padding = .{},
+        .font = dvui.Font.theme(.heading),
+        .color_text = .{ .color = theme.color(.control, .text) },
+    });
     if (lifted) |hit| return hit;
     return if (bw.clicked()) .clicked else .none;
 }
@@ -644,9 +689,15 @@ fn drawStoreSection(
     store: State.StoreCatalog,
     row: *?*dvui.BoxWidget,
     col: *usize,
+    query: *const core.fuzzy.Query,
 ) void {
-    const offers = store.uninstalled(f.arena);
-    if (offers.len == 0) return;
+    var offers: std.ArrayListUnmanaged(State.StoreOffer) = .empty;
+    for (store.uninstalled(f.arena)) |offer| {
+        const fields = [_][]const u8{ offer.title, offer.id };
+        if (core.fuzzy.scoreBest(&fields, query, .{}) == null) continue;
+        offers.append(f.arena, offer) catch break;
+    }
+    if (offers.items.len == 0) return;
 
     if (row.*) |r| {
         r.deinit();
@@ -660,7 +711,7 @@ fn drawStoreSection(
         .color_text = .{ .color = dvui.themeGet().color(.window, .text).opacity(0.6) },
     });
 
-    for (offers, 0..) |offer, i| {
+    for (offers.items, 0..) |offer, i| {
         if (col.* == 0) {
             if (row.*) |r| r.deinit();
             row.* = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = i + 10_000, .expand = .horizontal });

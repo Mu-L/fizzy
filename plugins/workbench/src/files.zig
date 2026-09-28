@@ -182,22 +182,7 @@ fn drawFilter(tree: *core.widgets.TreeWidget) ![]const u8 {
     _ = tree;
 
     // Right margin keeps the entry clear of the overlay scrollbar that draws over the pane's right edge.
-    var filter_hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .w = 10 } });
-    core.icon.icon(
-        @src(),
-        "FilterIcon",
-        icons.tvg.lucide.search,
-        .{ .stroke_color = .{ .color = dvui.themeGet().color(.window, .text) } },
-        .{ .gravity_y = 0.5, .padding = dvui.Rect.all(0) },
-    );
-    const filter_text_edit = dvui.textEntry(@src(), .{ .placeholder = "Filter..." }, .{
-        .expand = .horizontal,
-        .background = false,
-    });
-    const filter_text = filter_text_edit.getText();
-    _ = core.widgets.textEntryMenu(filter_text_edit);
-    filter_text_edit.deinit();
-    filter_hbox.deinit();
+    const filter_text = core.widgets.filterRow(@src(), "Filter...", .{ .margin = .{ .w = 10 } });
 
     // Closing the filter ends the session the path index was built for: the next one re-walks, so
     // files created or removed while the box was closed can't linger in the results.

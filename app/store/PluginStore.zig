@@ -1910,23 +1910,8 @@ fn draw(_: ?*anyopaque) anyerror!dvui.App.Result {
 
     try drawHeader();
 
-    // Filter row — same shape as the file tree (search icon + borderless text entry).
-    var filter_hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .y = 4 } });
-    core.icon.icon(
-        @src(),
-        "FilterIcon",
-        icons.tvg.lucide.search,
-        .{ .stroke_color = .{ .color = dvui.themeGet().color(.window, .text) } },
-        .{ .gravity_y = 0.5, .padding = dvui.Rect.all(0) },
-    );
-    const filter_edit = dvui.textEntry(@src(), .{ .placeholder = "Filter..." }, .{
-        .expand = .horizontal,
-        .background = false,
-    });
-    const filter_text = filter_edit.getText();
-    _ = core.widgets.textEntryMenu(filter_edit);
-    filter_edit.deinit();
-    filter_hbox.deinit();
+    // Filter row — the app's one filter control, the same as the file tree's.
+    const filter_text = core.widgets.filterRow(@src(), "Filter...", .{ .margin = .{ .y = 4 } });
     var query = fuzzy.Query.init(filter_text);
 
     const cat = if (catalog) |*c| c else return .ok;

@@ -166,6 +166,29 @@ pub fn menuItemLabel(
     return menuRow(src, label_str, .{ .submenu = init_opts.submenu, .id_extra = opts.id_extra orelse 0 });
 }
 
+/// The filter box every list in the app wears: a search glyph, then a borderless field with a
+/// field's Copy/Paste menu. One control, so the file tree, the settings, the plugin store and the
+/// region picker read as the same thing and cannot drift apart. Returns the text, which borrows
+/// the field's buffer — read it this frame.
+pub fn filterRow(src: std.builtin.SourceLocation, placeholder: []const u8, opts: dvui.Options) []const u8 {
+    var row = dvui.box(src, .{ .dir = .horizontal }, (dvui.Options{ .expand = .horizontal }).override(opts));
+    defer row.deinit();
+    icon_tex.icon(
+        @src(),
+        "FilterIcon",
+        icons.tvg.lucide.search,
+        .{ .stroke_color = .{ .color = dvui.themeGet().color(.window, .text) } },
+        .{ .gravity_y = 0.5, .padding = dvui.Rect.all(0) },
+    );
+    const entry = dvui.textEntry(@src(), .{ .placeholder = placeholder }, .{
+        .expand = .horizontal,
+        .background = false,
+    });
+    defer entry.deinit();
+    _ = textEntryMenu(entry);
+    return entry.getText();
+}
+
 /// A context menu's surface, opened at the point the pointer was pressed. Every right-click
 /// menu in the app goes through here: the file tree's rows, the docking widget's tabs, and
 /// whatever a plugin contributes into one — so "what a menu looks like" is answered once,

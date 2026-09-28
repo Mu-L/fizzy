@@ -335,26 +335,10 @@ pub fn draw() !void {
 /// one moves there, move it here too.
 const RowStyle = enum { root, category };
 
-/// Search row — deliberately the same shape as the file tree's filter (`workbench/src/files.zig`)
-/// so the two read as the same control.
+/// Search row — the app's one filter control (`core.widgets.filterRow`), so it reads as the same
+/// thing as the file tree's.
 fn drawSearchRow() []const u8 {
-    var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    defer hbox.deinit();
-
-    core.icon.icon(
-        @src(),
-        "SettingsSearchIcon",
-        icons.tvg.lucide.search,
-        .{ .stroke_color = .{ .color = dvui.themeGet().color(.window, .text) } },
-        .{ .gravity_y = 0.5, .padding = dvui.Rect.all(0) },
-    );
-    const entry = dvui.textEntry(@src(), .{ .placeholder = "Search settings..." }, .{
-        .expand = .horizontal,
-        .background = false,
-    });
-    defer entry.deinit();
-    _ = core.widgets.textEntryMenu(entry);
-    return entry.getText();
+    return core.widgets.filterRow(@src(), "Search settings...", .{});
 }
 
 fn drawBranch(
