@@ -371,6 +371,7 @@ pub fn init(
         for (saved) |r| {
             if (r.extent) |e| _ = editor.app.layout.setExtent(app.allocator, r.name, e);
             if (r.surfaces) |ids| editor.app.layout.assign(app.allocator, r.name, ids) catch continue;
+            if (r.order) |ids| editor.app.layout.setOrder(app.allocator, r.name, ids) catch {};
             if (r.shows) |s| editor.app.layout.setShows(app.allocator, r.name, switch (s) {
                 .one => .one,
                 .many => .many,
@@ -4040,6 +4041,14 @@ fn saveRegions(editor: *Editor) void {
                 .one => .one,
                 .many => .many,
             };
+        }
+    }
+    {
+        var it = editor.app.layout.orders.iterator();
+        while (it.next()) |e| {
+            const gop = by_name.getOrPut(gpa, e.key_ptr.*) catch continue;
+            if (!gop.found_existing) gop.value_ptr.* = .{ .name = e.key_ptr.* };
+            gop.value_ptr.order = e.value_ptr.*;
         }
     }
     fizzy.backend.saveRegions(editor.app.config_folder, by_name.values());

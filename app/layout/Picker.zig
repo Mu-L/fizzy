@@ -345,8 +345,9 @@ fn searchText(f: *Layout, s: *const sdk.Surface) []const u8 {
     return text.items;
 }
 
-/// How long a finger holds still on a card before it lifts rather than scrolls the list.
-const hold_to_lift_ns: i128 = 400 * std.time.ns_per_ms;
+/// How long a finger holds still on a card before it lifts rather than scrolls the list — the
+/// same hold as every other draggable thing in a scrolling list.
+const hold_to_lift_ns = core.widgets.Tabs.touch_hold_ns;
 
 /// A finger is down on the card `id` and has held there long enough to lift it.
 fn armedTouch(id: dvui.Id) bool {
@@ -487,7 +488,7 @@ fn card(f: *Layout, s: *const sdk.Surface, on: bool, id_extra: usize) Hit {
 /// hold it: the card is gone with the popup, so the drag is its own widget as
 /// far as dvui's mouse routing is concerned. One id for every such drag, in
 /// the base window, over the whole of it.
-fn looseCapture() dvui.CaptureMouse {
+pub fn looseCapture() dvui.CaptureMouse {
     return .{
         .id = dvui.Id.extendId(null, @src(), 0),
         .rect = dvui.windowRectPixels(),

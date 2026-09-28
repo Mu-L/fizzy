@@ -2781,6 +2781,145 @@ test "dragging a tab along a Multiple place's strip reorders its views" {
     try std.testing.expect(!editor.app.layout.view_drag.active());
 }
 
+// A place its keywords fill is reordered by an order, not an assignment: writing its list down
+// would freeze it, and a view registered later would never appear there.
+test "reordering a keyword place keeps an order, and later views still arrive" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitExtents(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    EndlessFrame.editor = editor;
+    defer EndlessFrame.editor = null;
+
+    try editor.app.host.registerSurface(.{ .id = "test.one", .title = "One", .keywords = &.{"slot"}, .draw = MultiProbe.one });
+    try editor.app.host.registerSurface(.{ .id = "test.two", .title = "Two", .keywords = &.{"slot"}, .draw = MultiProbe.two });
+    try dvui.testing.settle(EndlessFrame.frame);
+    editor.app.layout.setShows(editor.app.gpa, "Center", .many);
+    try dvui.testing.settle(EndlessFrame.frame);
+    var center: fizzy.Editor.Layout.Region = undefined;
+    for (editor.app.layout.regions.items) |r| {
+        if (std.mem.eql(u8, r.name, "Center")) center = r;
+    }
+    // The endless shape's Center takes `slot`: both views are here by keyword, nothing assigned.
+    try std.testing.expect(editor.app.layout.assignment("Center") == null);
+
+    const cw = dvui.currentWindow();
+    const y = center.bounds.y + (MultiProbe.one_top - center.bounds.y) / 2;
+    const x0 = center.bounds.x + 16;
+    _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = x0, .y = y } });
+    _ = try cw.addEventMouseButton(.left, .press);
+    _ = try dvui.testing.step(EndlessFrame.frame);
+    var x = x0;
+    while (x < x0 + 170) : (x += 10) {
+        _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = x, .y = y } });
+        _ = try dvui.testing.step(EndlessFrame.frame);
+    }
+    _ = try cw.addEventMouseButton(.left, .release);
+    try dvui.testing.settle(EndlessFrame.frame);
+
+    try std.testing.expect(editor.app.layout.assignment("Center") == null);
+    const order = editor.app.layout.order("Center") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("test.two", order[0]);
+    try std.testing.expectEqualStrings("test.one", order[1]);
+
+    // A view that arrives later still lands here, after the ones the user ordered.
+    const draw = struct {
+        fn f(_: ?*anyopaque) anyerror!dvui.App.Result {
+            return .ok;
+        }
+    }.f;
+    try editor.app.host.registerSurface(.{ .id = "test.three", .title = "Three", .keywords = &.{"slot"}, .draw = draw });
+    try dvui.testing.settle(EndlessFrame.frame);
+    for (editor.app.layout.regions.items) |r| {
+        if (std.mem.eql(u8, r.name, "Center")) center = r;
+    }
+    var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
+    const shown = layout.matchingIn(&center);
+    try std.testing.expectEqual(@as(usize, 3), shown.len);
+    try std.testing.expectEqualStrings("test.two", shown[0].id);
+    try std.testing.expectEqualStrings("test.one", shown[1].id);
+    try std.testing.expectEqualStrings("test.three", shown[2].id);
+}
+
+// A rail: a vertical chooser beside its place, drawn before the place is declared — the icon
+// rail's arrangement. The same reorder as a strip, along the other axis.
+const RailFrame = struct {
+    var editor: ?*fizzy.Editor = null;
+    var first_item: dvui.Rect.Physical = .{};
+
+    fn frame() anyerror!dvui.App.Result {
+        const e = editor.?;
+        var layout = fizzy.Editor.Layout.init(&e.app.host, &e.app.layout, e.app.gpa, dvui.currentWindow().arena());
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
+        defer row.deinit();
+        {
+            var rail = fizzy.Editor.Layout.Chooser.init(@src(), &layout, .{ .keywords = &.{"slot"} }, .{
+                .dir = .vertical,
+                .outer = .{ .expand = .vertical, .min_size_content = .{ .w = 40 } },
+            });
+            defer rail.deinit();
+            for (rail.views(), 0..) |view, i| {
+                var it = rail.item(@src(), view, .{});
+                defer it.deinit();
+                _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 30, .h = 30 }, .id_extra = i });
+                if (i == 0) first_item = it.data().rectScale().r;
+            }
+        }
+        const result = try endless.layout(null, &layout);
+        e.app.layout.publishRegions();
+        return result;
+    }
+};
+
+test "dragging an item down a vertical chooser reorders its place's views" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitExtents(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    RailFrame.editor = editor;
+    defer RailFrame.editor = null;
+
+    const draw = struct {
+        fn f(_: ?*anyopaque) anyerror!dvui.App.Result {
+            return .ok;
+        }
+    }.f;
+    try editor.app.host.registerSurface(.{ .id = "test.one", .title = "One", .keywords = &.{"slot"}, .draw = draw });
+    try editor.app.host.registerSurface(.{ .id = "test.two", .title = "Two", .keywords = &.{"slot"}, .draw = draw });
+    try dvui.testing.settle(RailFrame.frame);
+
+    const cw = dvui.currentWindow();
+    const start = RailFrame.first_item.center();
+    _ = try cw.addEventMouseMotion(.{ .pt = start });
+    _ = try cw.addEventMouseButton(.left, .press);
+    _ = try dvui.testing.step(RailFrame.frame);
+    var y = start.y;
+    // Down onto the slot after the second item, staying in the rail's column. The lifted item
+    // leaves the list while it floats, so that slot is where the second item was.
+    // `first_item` is read before its item lays out, so its height is not usable here.
+    while (y < start.y + 70) : (y += 6) {
+        _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = start.x, .y = y } });
+        _ = try dvui.testing.step(RailFrame.frame);
+    }
+    _ = try cw.addEventMouseButton(.left, .release);
+    try dvui.testing.settle(RailFrame.frame);
+
+    try std.testing.expect(!editor.app.layout.view_drag.active());
+    const order = editor.app.layout.order("Center") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("test.two", order[0]);
+    try std.testing.expectEqualStrings("test.one", order[1]);
+}
+
 test "dragging a tab off a Multiple place's strip starts the view drag with it" {
     var ctx = try shim.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);

@@ -60,6 +60,12 @@ selection: std.AutoHashMapUnmanaged(u64, []const u8) = .empty,
 /// Keys and every id are gpa-owned; surface ids are duplicated rather than borrowed so an
 /// assignment to a plugin that is not currently loaded survives until it is.
 assignments: std.StringHashMapUnmanaged([]const []const u8) = .empty,
+/// The order the user dragged a place's views into, by region name. Separate from `assignments`
+/// on purpose: an assignment says *which* views a place holds, and writing one down for a place
+/// its keywords fill would freeze it — a plugin installed later would never appear there. An
+/// order only sorts: views it names come first, in its order; the rest follow as they would
+/// have. Keys and ids gpa-owned, like `assignments`.
+orders: std.StringHashMapUnmanaged([]const []const u8) = .empty,
 /// User override of how many surfaces a place can show. Absent means the
 /// shape's `shows` (Sidebar/Panel are `.many`; a leftover leaf is `.one`).
 shows: std.StringHashMapUnmanaged(Region.Shows) = .empty,
@@ -317,6 +323,15 @@ pub fn renamePlace(self: *State, gpa: std.mem.Allocator, from: []const u8, to: [
         for (kv.value) |id| gpa.free(id);
         gpa.free(kv.value);
     }
+    if (self.orders.fetchRemove(to)) |kv| {
+        gpa.free(kv.key);
+        freeIds(gpa, kv.value);
+    }
+    if (self.orders.fetchRemove(from)) |kv| {
+        gpa.free(kv.key);
+        self.setOrder(gpa, to, kv.value) catch {};
+        freeIds(gpa, kv.value);
+    }
     if (self.shows.fetchRemove(from)) |kv| {
         gpa.free(kv.key);
         self.setShows(gpa, to, kv.value);
@@ -421,6 +436,47 @@ fn evictIdFromOthers(self: *State, gpa: std.mem.Allocator, keep: []const u8, id:
         }
         self.setAssignment(gpa, region, kept[0..k]) catch {};
     }
+}
+
+/// The order the user gave region `name`'s views, or null when they never reordered it.
+pub fn order(self: *const State, name: []const u8) ?[]const []const u8 {
+    return self.orders.get(name);
+}
+
+/// Remember `ids` as region `name`'s order (`orders`). Replaces any earlier one.
+pub fn setOrder(self: *State, gpa: std.mem.Allocator, name: []const u8, ids: []const []const u8) !void {
+    const owned = try gpa.alloc([]const u8, ids.len);
+    errdefer gpa.free(owned);
+    var n: usize = 0;
+    errdefer for (owned[0..n]) |id| gpa.free(id);
+    for (ids) |id| {
+        owned[n] = try gpa.dupe(u8, id);
+        n += 1;
+    }
+    const gop = try self.orders.getOrPut(gpa, name);
+    if (gop.found_existing) {
+        freeIds(gpa, gop.value_ptr.*);
+    } else {
+        gop.key_ptr.* = gpa.dupe(u8, name) catch |err| {
+            _ = self.orders.remove(name);
+            return err;
+        };
+    }
+    gop.value_ptr.* = owned;
+}
+
+fn freeIds(gpa: std.mem.Allocator, ids: []const []const u8) void {
+    for (ids) |id| gpa.free(id);
+    gpa.free(ids);
+}
+
+fn forgetOrders(self: *State, gpa: std.mem.Allocator) void {
+    var it = self.orders.iterator();
+    while (it.next()) |e| {
+        gpa.free(e.key_ptr.*);
+        freeIds(gpa, e.value_ptr.*);
+    }
+    self.orders.clearRetainingCapacity();
 }
 
 /// How this place shows surfaces: the user's choice, else the shape's default.
@@ -619,6 +675,7 @@ pub fn resetLayout(self: *State, gpa: std.mem.Allocator) void {
     }
     self.assignments.clearRetainingCapacity();
     forgetShows(self, gpa);
+    forgetOrders(self, gpa);
 
     self.splits.deinit(gpa);
     self.splits = .{};
@@ -684,6 +741,8 @@ pub fn deinitAssignments(self: *State, gpa: std.mem.Allocator) void {
     }
     self.assignments.deinit(gpa);
     deinitShows(self, gpa);
+    forgetOrders(self, gpa);
+    self.orders.deinit(gpa);
 }
 
 fn forgetShows(self: *State, gpa: std.mem.Allocator) void {

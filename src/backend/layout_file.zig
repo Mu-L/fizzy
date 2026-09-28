@@ -43,6 +43,9 @@ pub const SavedRegion = struct {
     from: ?[]const u8 = null,
     /// User override of Single vs Multiple. Null means the shape's default.
     shows: ?SavedShows = null,
+    /// The order the user dragged this place's views into. Sorts only — which views the place
+    /// holds is `surfaces` (or its keywords); views not named here follow in their usual order.
+    order: ?[]const []const u8 = null,
 };
 
 pub const SavedShows = enum { one, many };
@@ -162,34 +165,45 @@ pub fn loadRegions(gpa: std.mem.Allocator, dir: []const u8) []SavedRegion {
         const name = gpa.dupe(u8, r.name) catch continue;
         var surfaces: ?[]const []const u8 = null;
         if (r.surfaces) |ids| {
-            const owned = gpa.alloc([]const u8, ids.len) catch {
+            // Partial: drop the whole region rather than keep half a list.
+            surfaces = dupeIds(gpa, ids) orelse {
                 gpa.free(name);
                 continue;
             };
-            var m: usize = 0;
-            while (m < ids.len) : (m += 1) {
-                owned[m] = gpa.dupe(u8, ids[m]) catch break;
-            }
-            if (m < ids.len) { // partial: drop the whole region rather than keep half a list
-                for (owned[0..m]) |id| gpa.free(id);
-                gpa.free(owned);
-                gpa.free(name);
-                continue;
-            }
-            surfaces = owned;
         }
+        // An order that fails to copy is only a lost preference; the region keeps the rest.
+        const order: ?[]const []const u8 = if (r.order) |ids| dupeIds(gpa, ids) else null;
         const parent = if (r.parent) |p| gpa.dupe(u8, p) catch null else null;
         const from = if (r.from) |s| gpa.dupe(u8, s) catch null else null;
-        out[n] = .{ .name = name, .extent = r.extent, .surfaces = surfaces, .parent = parent, .from = from, .shows = r.shows };
+        out[n] = .{ .name = name, .extent = r.extent, .surfaces = surfaces, .parent = parent, .from = from, .shows = r.shows, .order = order };
         n += 1;
     }
     return out[0..n];
+}
+
+/// `ids`, every string copied into `gpa`; null when any copy fails (nothing is leaked).
+fn dupeIds(gpa: std.mem.Allocator, ids: []const []const u8) ?[]const []const u8 {
+    const owned = gpa.alloc([]const u8, ids.len) catch return null;
+    var m: usize = 0;
+    while (m < ids.len) : (m += 1) {
+        owned[m] = gpa.dupe(u8, ids[m]) catch break;
+    }
+    if (m < ids.len) {
+        for (owned[0..m]) |id| gpa.free(id);
+        gpa.free(owned);
+        return null;
+    }
+    return owned;
 }
 
 pub fn freeRegions(gpa: std.mem.Allocator, regions: []SavedRegion) void {
     for (regions) |r| {
         gpa.free(r.name);
         if (r.surfaces) |ids| {
+            for (ids) |id| gpa.free(id);
+            gpa.free(ids);
+        }
+        if (r.order) |ids| {
             for (ids) |id| gpa.free(id);
             gpa.free(ids);
         }

@@ -286,7 +286,8 @@ fn regionForKeywords(self: *Layout, keywords: []const []const u8) ?Region {
 /// registration order. Arena-allocated and valid for this frame only; returns an empty slice
 /// rather than erroring so a layout can always iterate.
 pub fn matching(self: *Layout, keywords: []const []const u8) []const *Surface {
-    return self.matchingWith(keywords, self.assignedFor(keywords), false);
+    const name = if (self.regionForKeywords(keywords)) |r| r.name else "";
+    return self.matchingWith(keywords, self.assignedFor(keywords), false, name);
 }
 
 /// `matching` for a specific region rather than a keyword group. The two differ only for a
@@ -300,17 +301,50 @@ pub fn matchingIn(self: *Layout, r: *const Region) []const *Surface {
     // A plugin kind slot (a document pane) only shows what it accepts. Output
     // dropped on the workbench canvas must not become a document tab. A shape
     // place (Main, Panel, a leftover Center) may hold anything the user put there.
-    return self.matchingWith(r.keywords, assigned, r.kind_slot);
+    return self.matchingWith(r.keywords, assigned, r.kind_slot, self.orderName(r));
 }
 
 /// `matchingIn` without the view-drag preview overlay. Drop, claim, and
 /// `visibleId` have to see the stored assignment, not the landing pose.
 pub fn matchingStored(self: *Layout, r: *const Region) []const *Surface {
     const assigned = if (r.by_name) self.state.assignment(r.name) else self.assignedStored(r.keywords);
-    return self.matchingWith(r.keywords, assigned, r.kind_slot);
+    return self.matchingWith(r.keywords, assigned, r.kind_slot, self.orderName(r));
 }
 
-fn matchingWith(self: *Layout, keywords: []const []const u8, assigned: ?[]const []const u8, require_fit: bool) []const *Surface {
+/// The name a place's order is kept under: its own, or for an unnamed keyword place (`tabs`),
+/// the declared region with its keywords.
+fn orderName(self: *Layout, r: *const Region) []const u8 {
+    if (r.name.len > 0) return r.name;
+    return if (self.regionForKeywords(r.keywords)) |d| d.name else "";
+}
+
+/// `items` with the views `State.order` names for `name` first, in that order, and the rest
+/// after in the order they came. An order never adds or drops a view — which views a place
+/// holds is its assignment's or its keywords' business.
+fn ordered(self: *Layout, name: []const u8, items: []*Surface) []*Surface {
+    if (name.len == 0) return items;
+    const order = self.state.order(name) orelse return items;
+    const out = self.arena.alloc(*Surface, items.len) catch return items;
+    var n: usize = 0;
+    for (order) |id| {
+        for (items) |s| if (std.mem.eql(u8, s.id, id)) {
+            out[n] = s;
+            n += 1;
+            break;
+        };
+    }
+    for (items) |s| {
+        const named = for (order) |id| {
+            if (std.mem.eql(u8, s.id, id)) break true;
+        } else false;
+        if (named) continue;
+        out[n] = s;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+fn matchingWith(self: *Layout, keywords: []const []const u8, assigned: ?[]const []const u8, require_fit: bool, order_name: []const u8) []const *Surface {
     var out: std.ArrayListUnmanaged(*Surface) = .empty;
     const a = self.arena;
     if (assigned) |ids| {
@@ -333,7 +367,8 @@ fn matchingWith(self: *Layout, keywords: []const []const u8, assigned: ?[]const 
         if (self.claimedElsewhere(keywords, s, mine)) continue;
         out.append(a, s) catch return out.items;
     }
-    return out.items;
+    // Keywords chose these, in registration order; the user may have dragged them into another.
+    return self.ordered(order_name, out.items);
 }
 
 /// Whether a surface exists right now as far as placement is concerned. Always, unless it is a
@@ -811,6 +846,7 @@ fn resetPack(b: *dvui.BoxWidget) void {
 // something an app author has to know about, and nothing may assume fizzy's own shape.
 
 pub const Region = @import("Region.zig");
+pub const Chooser = @import("Chooser.zig");
 /// Runtime subdivision of a place — see `State.splits`.
 pub const SplitTree = @import("SplitTree.zig");
 /// What a released view-drag does — see `app/layout/SPLITS.md`.
@@ -1103,88 +1139,18 @@ pub fn tabs(f: *Layout, keywords: []const []const u8) void {
     tabsIn(f, &place);
 }
 
-/// Tab strip for one place. `tabs` is this keyed by keywords; a by-name
-/// place (a minted split leaf) must not share another place's selection.
-///
-/// A tab dragged along the strip reorders the place's views. Dragged off it, the tab becomes the
-/// ordinary view drag — the one the corner chooser starts — so a tab can land on another place or
-/// split one, the same gesture everywhere.
+/// Tab strip for one place: a horizontal `Chooser` with the stock `label` look. `tabs` is this
+/// keyed by keywords; a by-name place (a minted split leaf) must not share another place's
+/// selection. Nothing is drawn for a place with one view or none — a single Output is just Output.
 pub fn tabsIn(f: *Layout, r: *const Region) void {
-    const surfaces = f.matchingIn(r);
-    if (surfaces.len <= 1) return;
-
-    // Per place, not one for the app: two Multiple places side by side each drag their own tabs.
-    // Kept in dvui's store under the place's box, so it lives as long as the place does.
-    const key = r.selectionKey();
-    const info = dvui.dataGetPtrDefault(null, dvui.parentGet().extendId(@src(), @truncate(key)), "_tabs", core.widgets.Tabs.TabInfo, .{});
-    // `drag_index` says which tab is floating *now*; the strip only ever sets it.
-    info.drag_index = null;
-
-    // A name per place, so one place's strip is not a drop target for another's tabs — moving a
-    // view between places is the view drag's job.
-    var name_buf: [64]u8 = undefined;
-    const drag_name = f.state.internName(f.gpa, std.fmt.bufPrint(&name_buf, "fizzy_tabs:{x}", .{key}) catch "fizzy_tabs");
-
-    var strip: core.widgets.Tabs = .init(@src(), info, .{ .drag_name = drag_name, .id_extra = @truncate(key) });
-    const strip_r = strip.outer.data().borderRectScale().r;
-
-    const cur = f.selectedIn(r);
-    for (surfaces, 0..) |s, i| {
-        const is_selected = if (cur) |sel| std.mem.eql(u8, sel.id, s.id) else false;
-        var t = strip.tab(@src(), i, is_selected);
-        defer t.deinit();
-
-        var title_buf: [64]u8 = undefined;
-        const title_upper = if (s.title.len <= title_buf.len)
-            std.ascii.upperString(&title_buf, s.title)
-        else
-            s.title;
-
-        dvui.label(@src(), "{s}", .{title_upper}, .{
-            .color_text = .{ .color = if (is_selected)
-                dvui.themeGet().color(.highlight, .fill)
-            else
-                dvui.themeGet().color(.control, .text) },
-            .font = dvui.Font.theme(.heading),
-            .padding = dvui.Rect.all(4),
-            .gravity_y = 0.5,
-        });
-
-        if (t.clicked()) f.selectIn(r, s.id);
+    if (f.matchingIn(r).len <= 1) return;
+    var strip = Chooser.init(@src(), f, r.*, .{});
+    defer strip.deinit();
+    for (strip.views()) |view| {
+        var it = strip.item(@src(), view, .{});
+        defer it.deinit();
+        Chooser.label(view, it.selected);
     }
-    strip.finalSlot(surfaces.len);
-    strip.deinit();
-
-    // Reordered within the strip: the place's list, in the new order, with the moved tab showing.
-    if (info.removed_index) |removed| if (info.insert_before_index) |before| {
-        info.removed_index = null;
-        info.insert_before_index = null;
-        if (removed < surfaces.len and r.name.len > 0) {
-            var ids = std.ArrayListUnmanaged([]const u8).initCapacity(f.arena, surfaces.len) catch return;
-            for (surfaces, 0..) |s, i| if (i != removed) ids.appendAssumeCapacity(s.id);
-            const at = if (removed < before) before - 1 else before;
-            ids.insert(f.arena, @min(at, ids.items.len), surfaces[removed].id) catch return;
-            f.state.assign(f.gpa, r.name, ids.items) catch {};
-            f.selectIn(r, surfaces[removed].id);
-            f.state.markDirty();
-            dvui.refresh(null, @src(), null);
-        }
-    };
-
-    // Dragged off the strip: hand the tab to the view drag. Past half a strip's height away,
-    // which a sideways reorder never reaches.
-    if (info.drag_index) |i| if (i < surfaces.len and r.name.len > 0 and !f.state.view_drag.active()) {
-        const p = dvui.currentWindow().mouse_pt;
-        const reach = strip_r.h * 0.5;
-        if (p.y < strip_r.y - reach or p.y > strip_r.y + strip_r.h + reach) {
-            info.* = .{};
-            dvui.dragEnd();
-            dvui.captureMouse(null, 0);
-            f.selectIn(r, surfaces[i].id);
-            ViewDrag.begin(f, r.name, r.bounds);
-            dvui.refresh(null, @src(), null);
-        }
-    };
 }
 
 /// A Multiple place: its strip, then the selected view in a box of its own beneath it.
