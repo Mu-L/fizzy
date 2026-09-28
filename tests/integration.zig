@@ -2003,6 +2003,76 @@ test "between equally good regions, the one declared first has the surface" {
     try std.testing.expectEqual(@as(usize, 0), layout.unplaced().len);
 }
 
+// Tab content is not a place's content: a document belongs in a slot made for documents (the
+// Workspace's panes), where it has a tab, splits, and is what Save and Undo act on. A plain place
+// neither shows it — not even from an assignment a layout saved before the rule — nor offers it.
+test "a document goes to a slot made for it, never a plain place" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+
+    const main = fizzy.sdk.keywords.ide.main;
+    const pane: []const []const u8 = &.{"main.document"};
+
+    const draw = struct {
+        fn f(_: ?*anyopaque) anyerror!dvui.App.Result {
+            return .ok;
+        }
+    }.f;
+    try editor.app.host.registerSurface(.{ .id = "test.doc", .title = "untitled.txt", .keywords = fizzy.sdk.document.keywords, .draw = draw });
+    try editor.app.host.registerSurface(.{ .id = "test.view", .title = "Workspace", .keywords = main, .draw = draw });
+
+    // No document slot in this shape (an app not using the Workspace): anything goes anywhere.
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Main", .keywords = main, .id = .extendId(null, @src(), 1) });
+    editor.app.layout.publishRegions();
+    var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
+    const doc = editor.app.host.surfaceById("test.doc").?;
+    const view = editor.app.host.surfaceById("test.view").?;
+    try std.testing.expect(!layout.slotted(doc));
+
+    // With one: the pane has the document, Main does not, whatever Main was assigned.
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Main", .keywords = main, .id = .extendId(null, @src(), 1) });
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Pane 0", .keywords = pane, .id = .extendId(null, @src(), 2), .by_name = true, .kind_slot = true });
+    editor.app.layout.publishRegions();
+    // Main holds the document (a stale entry); the pane was given nothing and goes by keywords.
+    // Assigning the pane too would evict the entry from Main and prove nothing.
+    try editor.app.layout.assign(editor.app.gpa, "Main", &.{ "test.view", "test.doc" });
+
+    layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
+    try std.testing.expect(layout.slotted(doc));
+    try std.testing.expect(!layout.slotted(view));
+
+    var main_region: ?fizzy.Editor.Layout.Region = null;
+    var pane_region: ?fizzy.Editor.Layout.Region = null;
+    for (editor.app.layout.regions.items) |r| {
+        if (std.mem.eql(u8, r.name, "Main")) main_region = r;
+        if (std.mem.eql(u8, r.name, "Pane 0")) pane_region = r;
+    }
+    const m = main_region orelse return error.TestExpectedEqual;
+    const p = pane_region orelse return error.TestExpectedEqual;
+
+    // Main offers the view and not the document; the pane the other way round.
+    try std.testing.expect(layout.offers(&m, view));
+    try std.testing.expect(!layout.offers(&m, doc));
+    try std.testing.expect(layout.offers(&p, doc));
+    try std.testing.expect(!layout.offers(&p, view));
+
+    // And draws accordingly: Main's stale entry neither shows the document nor claims it away
+    // from the pane, so it is drawn once, in the pane.
+    const in_main = layout.matchingIn(&m);
+    try std.testing.expectEqual(@as(usize, 1), in_main.len);
+    try std.testing.expectEqualStrings("test.view", in_main[0].id);
+    const in_pane = layout.matchingIn(&p);
+    try std.testing.expectEqual(@as(usize, 1), in_pane.len);
+    try std.testing.expectEqualStrings("test.doc", in_pane[0].id);
+}
+
 // The bottom panel's shape: Main, a split, then the panel — declared after its own split and
 // hiding itself when it has nothing to show. With every panel view toggled off, the split used to
 // stay behind as a handle with nothing after it, still draggable. A split is drawn by the region

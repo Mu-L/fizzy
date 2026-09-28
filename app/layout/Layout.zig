@@ -318,6 +318,9 @@ fn matchingWith(self: *Layout, keywords: []const []const u8, assigned: ?[]const 
             const s = self.host.surfaceById(id) orelse continue; // plugin not loaded right now
             if (s.hidden or !self.visibleNow(s)) continue;
             if (require_fit and !sdk.keywords.accepts(keywords, s.keywords)) continue;
+            // Already assigned somewhere plain (a layout saved before this rule) or not, a tab's
+            // content is not a place's: the slot made for it has it.
+            if (!require_fit and self.slotted(s)) continue;
             out.append(a, s) catch return out.items;
         }
         return out.items;
@@ -326,6 +329,7 @@ fn matchingWith(self: *Layout, keywords: []const []const u8, assigned: ?[]const 
         if (s.hidden or !self.visibleNow(s)) continue;
         const mine = sdk.keywords.strength(keywords, s.keywords);
         if (mine == .none) continue;
+        if (!require_fit and self.slotted(s)) continue;
         if (self.claimedElsewhere(keywords, s, mine)) continue;
         out.append(a, s) catch return out.items;
     }
@@ -355,7 +359,7 @@ fn plainMatchingIn(self: *Layout, r: *const Region) []const *Surface {
         for (ids) |id| {
             const s = self.host.surfaceById(id) orelse continue;
             if (s.hidden or s.takeover_when != null) continue;
-            if (r.kind_slot and !sdk.keywords.accepts(r.keywords, s.keywords)) continue;
+            if (!self.offers(r, s)) continue;
             out.append(a, s) catch return out.items;
         }
         return out.items;
@@ -364,10 +368,38 @@ fn plainMatchingIn(self: *Layout, r: *const Region) []const *Surface {
         if (s.hidden or s.takeover_when != null) continue;
         const mine = sdk.keywords.strength(r.keywords, s.keywords);
         if (mine == .none) continue;
+        if (!r.kind_slot and self.slotted(s)) continue;
         if (self.claimedElsewhere(r.keywords, s, mine)) continue;
         out.append(a, s) catch return out.items;
     }
     return out.items;
+}
+
+/// Whether a plugin has declared a place made for `s` — a region of its own (`host.region`) that
+/// accepts `s`'s kind. An open document is the case: the Workspace's panes accept `document`, and
+/// that is where a document lives, as a tab.
+///
+/// **Tab content is not a place's content.** A document drawn straight into Main or the sidebar
+/// would have no tab, no split, and no way for Save or Undo to find it — they act on the active
+/// document, and only a pane has one. So a plain place (Main, the sidebar, the panel, a split
+/// leaf) neither matches such a surface by keyword, nor shows it by assignment, nor takes it in a
+/// drop, and its picker does not offer it. An app with no such slot (one not using the Workspace)
+/// is unaffected: nothing is slotted, and every surface can go anywhere as before.
+pub fn slotted(self: *Layout, s: *const Surface) bool {
+    if (s.keywords.len == 0) return false;
+    var it = self.declaredRegions();
+    while (it.next()) |r| {
+        if (r.kind_slot and sdk.keywords.accepts(r.keywords, s.keywords)) return true;
+    }
+    return false;
+}
+
+/// Whether region `r` may show `s` at all. A plugin's slot takes only its kind; a plain place
+/// takes anything no slot was made for (`slotted`). The one rule matching, dropping and the
+/// picker share.
+pub fn offers(self: *Layout, r: *const Region, s: *const Surface) bool {
+    if (r.kind_slot) return s.keywords.len > 0 and sdk.keywords.accepts(r.keywords, s.keywords);
+    return !self.slotted(s);
 }
 
 /// Is `s` at home in some region other than the one with `keywords`?
@@ -377,7 +409,8 @@ fn plainMatchingIn(self: *Layout, r: *const Region) []const *Surface {
 /// one frame would be two widgets fighting over the same state. Where it lives, in order:
 ///
 ///   1. Where it is assigned. An assignment is a claim: Files dragged onto Main leaves the
-///      sidebar, though the sidebar's keywords still match it exactly.
+///      sidebar, though the sidebar's keywords still match it exactly. Only where the region
+///      could show it, though (`offers`): a document listed in a plain place claims nothing.
 ///   2. Otherwise the region that accepts it most specifically. A surface asking for
 ///      `main.document` is accepted by the main area too (`Fit.place`, so a plugin written for a
 ///      nested shape still appears in a flat one), but not while a document pane exists to take it.
@@ -393,9 +426,14 @@ fn claimedElsewhere(
     mine: sdk.keywords.Fit,
 ) bool {
     const want = sdk.keywords.groupKey(keywords);
+    // A plain place's assignment claims nothing a slot was made for (`slotted`): it cannot show
+    // it, and a stale entry there — a layout saved before that rule — would otherwise take a
+    // document away from its pane and leave it drawn nowhere.
+    const plain_cannot = self.slotted(s);
     var it = self.declaredRegions();
     while (it.next()) |r| {
         if (sdk.keywords.groupKey(r.keywords) == want) continue;
+        if (plain_cannot and !r.kind_slot) continue;
         if (self.state.assignment(r.name)) |ids| {
             for (ids) |id| if (std.mem.eql(u8, id, s.id)) return true;
         }

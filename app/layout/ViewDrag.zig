@@ -241,6 +241,8 @@ pub fn beginLoose(l: *Layout, id: []const u8, from: dvui.Rect.Physical, texture:
 fn mapTargets(l: *Layout, d: *ViewDrag) void {
     d.target_count = 0;
     const surface_kw = draggedKeywords(l);
+    // A tab's content goes to a slot made for it, never a plain place (`Layout.slotted`).
+    const slotted = if (l.host.surfaceById(d.moved_id)) |s| l.slotted(s) else false;
     // Last frame's registry: complete, where this frame's is still being
     // filled in around the click that started the drag.
     const places = if (l.state.regions.items.len > 0)
@@ -250,6 +252,7 @@ fn mapTargets(l: *Layout, d: *ViewDrag) void {
     for (places) |r| {
         if (d.target_count == max_targets) break;
         if (!accepts(r, surface_kw)) continue;
+        if (slotted and !r.kind_slot) continue;
         if (r.bounds.w <= 0 or r.bounds.h <= 0) continue;
         d.targets[d.target_count] = .{
             .name = l.state.internName(l.gpa, r.name),
@@ -852,6 +855,7 @@ pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) 
     if (regionNamed(l.state, dest)) |r| {
         const s = l.host.surfaceById(moved) orelse return;
         if (!accepts(r.*, s.keywords)) return;
+        if (!r.kind_slot and l.slotted(s)) return;
     }
     switch (plan) {
         .swap => swap(l, source, dest, moved),
