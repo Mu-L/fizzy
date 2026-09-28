@@ -370,21 +370,22 @@ fn plainMatchingIn(self: *Layout, r: *const Region) []const *Surface {
     return out.items;
 }
 
-/// Is some other region a *more specific* home for `s` than the region with `keywords`?
+/// Is `s` at home in some region other than the one with `keywords`?
 ///
-/// The rule sub-regions need. A surface asking for `main.document` is accepted by the main area
-/// too (`Fit.place` — the enclosing region takes a surface whose exact place this shape lacks),
-/// so without this it would draw twice: once in the document pane that was made for it and once
-/// behind that pane in the main area itself.
+/// **A surface is drawn in one place.** It has one `ctx` and one set of state behind it — a
+/// tree's selection, a scroll position, what has focus, the keys it answers — so two copies in
+/// one frame would be two widgets fighting over the same state. Where it lives, in order:
 ///
-/// **Only a strictly stronger claim wins.** Two regions that accept a surface equally both show
-/// it, which is the existing promise that the same surface in two places is a feature — an icon
-/// rail and the pane it chooses for. Breaking such a tie by declaration order would leave the
-/// loser mysteriously empty; an ambiguity the user can see is one they can resolve with the picker.
+///   1. Where it is assigned. An assignment is a claim: Files dragged onto Main leaves the
+///      sidebar, though the sidebar's keywords still match it exactly.
+///   2. Otherwise the region that accepts it most specifically. A surface asking for
+///      `main.document` is accepted by the main area too (`Fit.place`, so a plugin written for a
+///      nested shape still appears in a flat one), but not while a document pane exists to take it.
+///   3. Between equally good regions, the one the shape declares first. Deterministic, and never
+///      a loss: the surface is on screen in that region, and the picker moves it anywhere else.
 ///
-/// An assignment is a claim. Output dragged onto Main must leave the panel,
-/// even though the panel's keywords still match it exactly. Same-group
-/// places (rail and sidebar) share one assignment and are not "elsewhere".
+/// Regions with the same keywords are one place, not two, and share one list and one selection:
+/// an icon rail and the body it chooses for, which list the same surfaces and draw one.
 fn claimedElsewhere(
     self: *Layout,
     keywords: []const []const u8,
@@ -392,29 +393,80 @@ fn claimedElsewhere(
     mine: sdk.keywords.Fit,
 ) bool {
     const want = sdk.keywords.groupKey(keywords);
-    // This frame's regions once the shape has started declaring them — a region registers before
-    // it draws its contents, so by the time anything asks, every region declared *above* this one
-    // is present. Last frame's set fills in for the rest, which is the same trade `assignedFor`
-    // and `State.regionFor` make and for the same reason.
-    const declared = if (self.state.regions_building.items.len > 0)
-        self.state.regions_building.items
-    else
-        self.state.regions.items;
-    for (declared) |r| {
+    var it = self.declaredRegions();
+    while (it.next()) |r| {
         if (sdk.keywords.groupKey(r.keywords) == want) continue;
         if (self.state.assignment(r.name)) |ids| {
             for (ids) |id| if (std.mem.eql(u8, id, s.id)) return true;
         }
     }
-    if (mine == .exact) return false; // nothing outranks the exact word but an assignment
-    for (declared) |r| {
+    // Where this place falls in the shape's order, for rule 3. A place not declared (a chooser
+    // asking by keywords with no region of its own) breaks no ties.
+    const mine_at: ?usize = blk: {
+        var at = self.declaredRegions();
+        while (at.next()) |r| {
+            if (sdk.keywords.groupKey(r.keywords) == want) break :blk at.index - 1;
+        }
+        break :blk null;
+    };
+    it = self.declaredRegions();
+    while (it.next()) |r| {
+        const i = it.index - 1;
         if (sdk.keywords.groupKey(r.keywords) == want) continue;
         if (self.state.assignment(r.name) != null) continue;
         const theirs = sdk.keywords.strength(r.keywords, s.keywords);
         if (@intFromEnum(theirs) > @intFromEnum(mine)) return true;
+        if (theirs == mine and mine_at != null and i < mine_at.?) return true;
     }
     return false;
 }
+
+/// Every region of the shape, in the order it declares them: this frame's so far, then last
+/// frame's that this frame has not reached yet.
+///
+/// Both halves, not whichever is non-empty. A region is registered before it draws, so while the
+/// sidebar draws, the regions declared after it — Main among them — exist only in last frame's
+/// set. Reading this frame's alone missed every claim made further down the shape: Files
+/// dragged from the sidebar onto Main went on drawing in the sidebar too, until something else
+/// was picked there.
+fn declaredRegions(self: *Layout) DeclaredRegions {
+    return .{ .building = self.state.regions_building.items, .last = self.state.regions.items };
+}
+
+const DeclaredRegions = struct {
+    building: []const Region,
+    last: []const Region,
+    /// How many regions `next` has returned.
+    index: usize = 0,
+    b: usize = 0,
+    l: usize = 0,
+
+    fn next(self: *DeclaredRegions) ?*const Region {
+        if (self.b < self.building.len) {
+            self.b += 1;
+            self.index += 1;
+            return &self.building[self.b - 1];
+        }
+        while (self.l < self.last.len) {
+            const r = &self.last[self.l];
+            self.l += 1;
+            if (self.redeclared(r)) continue;
+            self.index += 1;
+            return r;
+        }
+        return null;
+    }
+
+    /// `r`, from last frame, already declared again this frame.
+    fn redeclared(self: *const DeclaredRegions, r: *const Region) bool {
+        for (self.building) |*b| {
+            if (r.id != .zero and b.id == r.id) return true;
+            if (std.mem.eql(u8, r.name, b.name) and
+                sdk.keywords.groupKey(r.keywords) == sdk.keywords.groupKey(b.keywords)) return true;
+        }
+        return false;
+    }
+};
 
 /// A surface by id, regardless of keywords — how an app places a plugin it ships with and
 /// therefore knows by name (fizzy does this for `workbench.panes`).

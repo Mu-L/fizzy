@@ -1869,10 +1869,10 @@ test "a plugin declares a region inside the one it was given" {
 // `main.document` — and without a rule the surface draws twice, once in the pane made for it and
 // once behind that pane.
 //
-// Only a *strictly* stronger claim wins, so the existing promise holds: two regions that accept a
-// surface equally both show it (an icon rail and the pane it chooses for), and an ambiguity the
-// user can see is one they can fix with the picker.
-test "the more specific region claims a surface, an equal one shares it" {
+// Regions with the same keywords are one place and share: an icon rail and the body it chooses
+// for list the same surfaces and draw one. Between different places that accept a surface
+// equally, the one declared first has it (see the test after this one).
+test "the more specific region claims a surface, and regions with the same keywords share it" {
     var ctx = try shim.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
@@ -1923,6 +1923,84 @@ test "the more specific region claims a surface, an equal one shares it" {
     try editor.app.layout.assign(editor.app.gpa, "Pane", &.{"test.doc"});
     try std.testing.expectEqual(@as(usize, 1), layout.matching(pane).len);
     try std.testing.expectEqual(@as(usize, 0), layout.matching(main).len);
+}
+
+// A region is declared before it draws, so while the sidebar draws, Main — declared after it —
+// exists only in last frame's set. The claim check read this frame's regions alone once any were
+// declared, so Files dragged onto Main went on drawing in the sidebar as well.
+test "a claim made further down the shape reaches the regions declared before it" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+
+    const main = fizzy.sdk.keywords.ide.main;
+    const sidebar = fizzy.sdk.keywords.ide.sidebar;
+
+    // Last frame: the sidebar, then Main.
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Sidebar", .keywords = sidebar, .id = .extendId(null, @src(), 1) });
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Main", .keywords = main, .id = .extendId(null, @src(), 2) });
+    editor.app.layout.publishRegions();
+
+    const draw = struct {
+        fn f(_: ?*anyopaque) anyerror!dvui.App.Result {
+            return .ok;
+        }
+    }.f;
+    try editor.app.host.registerSurface(.{ .id = "test.files", .title = "Files", .keywords = sidebar, .draw = draw });
+    try editor.app.host.registerSurface(.{ .id = "test.outline", .title = "Outline", .keywords = sidebar, .draw = draw });
+    try editor.app.layout.assign(editor.app.gpa, "Main", &.{"test.files"});
+
+    // This frame, as the sidebar draws: it is declared, Main is not yet.
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Sidebar", .keywords = sidebar, .id = .extendId(null, @src(), 1) });
+
+    var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
+    const in_sidebar = layout.matching(sidebar);
+    try std.testing.expectEqual(@as(usize, 1), in_sidebar.len);
+    try std.testing.expectEqualStrings("test.outline", in_sidebar[0].id);
+    const in_main = layout.matching(main);
+    try std.testing.expectEqual(@as(usize, 1), in_main.len);
+    try std.testing.expectEqualStrings("test.files", in_main[0].id);
+
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Main", .keywords = main, .id = .extendId(null, @src(), 2) });
+    editor.app.layout.publishRegions();
+}
+
+// Two regions in different keyword groups that accept a surface equally used to both draw it.
+// A surface is drawn in one place: the tie goes to the region the shape declares first.
+test "between equally good regions, the one declared first has the surface" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+
+    const left: []const []const u8 = &.{ "sidebar", "left" };
+    const right: []const []const u8 = &.{ "sidebar", "right" };
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Left", .keywords = left, .id = .extendId(null, @src(), 1) });
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Right", .keywords = right, .id = .extendId(null, @src(), 2) });
+    editor.app.layout.publishRegions();
+
+    const draw = struct {
+        fn f(_: ?*anyopaque) anyerror!dvui.App.Result {
+            return .ok;
+        }
+    }.f;
+    try editor.app.host.registerSurface(.{ .id = "test.files", .title = "Files", .keywords = &.{"sidebar"}, .draw = draw });
+
+    var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
+    try std.testing.expectEqual(@as(usize, 1), layout.matching(left).len);
+    try std.testing.expectEqual(@as(usize, 0), layout.matching(right).len);
+    // Placed, not lost.
+    try std.testing.expectEqual(@as(usize, 0), layout.unplaced().len);
 }
 
 // The bottom panel's shape: Main, a split, then the panel — declared after its own split and
