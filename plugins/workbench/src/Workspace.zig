@@ -44,6 +44,9 @@ canvas_rect_physical: ?dvui.Rect.Physical = null,
 /// The whole pane, tab strip included, as last drawn — what the host snapshots when this
 /// pane's last document closes.
 pane_rect_physical: ?dvui.Rect.Physical = null,
+/// The tab strip as last laid out — where a lifted tab can still be put back in a strip, before
+/// it becomes a view drag (`drawTabs`).
+strip_rect_physical: ?dvui.Rect.Physical = null,
 /// The pane as it looked just before its last document closed (the host's
 /// `FrameTarget.snapshot`), drawn while the emptied pane slides shut so it reads as the file
 /// closing rather than as a blank pane. Freed when the pane goes, or refills.
@@ -110,6 +113,11 @@ pub fn draw(self: *Workspace) !dvui.App.Result {
         .shows = .many,
         .key = self.grouping,
         .expand = .both,
+        // The app draws a dragged tab's drop zones and preview over this pane, as over any
+        // place; the drop itself is ours, since only we make panes. The grouping, not a pointer
+        // to this workspace: the map it lives in can grow between the draw and the drop.
+        .on_drop = paneDrop,
+        .drop_ctx = @ptrFromInt(@as(usize, @intCast(self.grouping + 1))),
     }) orelse return .ok;
     defer region.deinit();
 
@@ -169,6 +177,12 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
         .padding = dvui.Rect.all(0),
         .id_extra = @intCast(self.grouping),
     });
+    // The strip's full width across the pane, not just its tabs: a tab put back anywhere along
+    // it is still being reordered.
+    if (self.pane_rect_physical) |pr| {
+        const tr = tabs_box.data().borderRectScale().r;
+        self.strip_rect_physical = .{ .x = pr.x, .y = tr.y, .w = pr.w, .h = tr.h };
+    }
     defer {
         const id = tabs_box.data().id;
         tabs_box.deinit();
@@ -250,6 +264,14 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
             // Dragging a tab is arranging it, and a tab someone is placing is not on loan.
             if (doc_opt) |doc| runtime.host().setDocumentPreview(doc.id, false);
             hbox.data().options.color_fill = .{ .color = dvui.themeGet().color(.control, .fill) };
+            // Off every strip: no longer a reorder, a document on its way somewhere. Hand it to
+            // the app's view drag — the drop zones and live preview every place shows — and let
+            // `paneDrop` land it. Only a document: a loading placeholder has nothing to carry.
+            if (doc_opt != null and !overAnyStrip(dvui.currentWindow().mouse_pt)) {
+                runtime.workbench().dragging_surface = null;
+                dvui.dragEnd();
+                runtime.host().beginViewDrag(surface.id, reorderable.data().borderRectScale().r);
+            }
         }
         hbox.drawBackground();
 
@@ -578,50 +600,70 @@ pub fn liveTabCount(self: *Workspace) usize {
     return n;
 }
 
-/// The drop zone under a dragged tab: frosted glass tinted the highlight colour, like the
-/// dialogs' frost (`core.dialogs`, its blur and detail) — what is under the zone reads through,
-/// softened, rather than being hidden by a flat wash. With the dialogs' blur off, the flat wash.
-fn drawDropZone(data: *dvui.WidgetData, zone: dvui.Rect.Physical) void {
-    const s = data.rectScale().s;
-    const radius_phys = @min(zone.w, zone.h) / 8;
-    const highlight = dvui.themeGet().color(.highlight, .fill);
-    // `.round`, not `.all`: `.all` leaves the corner *kind* to the theme, which only a
-    // widget's options resolve — handed straight to the frost it drew square.
-    const frost = core.dialogs.dialogFrost() orelse {
-        zone.fill(dvui.CornerRect.Physical.round(radius_phys), .{ .color = .{ .color = highlight.opacity(0.5) } });
-        return;
-    };
-    core.widgets.BlurBackdrop.frostPane(data.id.update("drop_zone_frost"), zone, dvui.CornerRect.round(radius_phys / s), s, .{
-        .radius = frost.radius,
-        .tint = highlight.opacity(0.6),
-        .mix = 0.35,
-        .detail = frost.detail,
-    });
+/// Whether `p` is over some pane's tab strip, or near enough to it — within half a strip's
+/// height — that a lifted tab there is still being put back in a strip.
+fn overAnyStrip(p: dvui.Point.Physical) bool {
+    for (runtime.workbench().workspaces.values()) |*ws| {
+        const r = ws.strip_rect_physical orelse continue;
+        const reach = r.h * 0.5;
+        if (p.x >= r.x and p.x <= r.x + r.w and p.y >= r.y - reach and p.y <= r.y + r.h + reach) return true;
+    }
+    return false;
 }
 
-/// Where a lifted tab or a file-tree row can be dropped: the middle of this pane joins it; an
-/// edge opens a new pane on that side of it — the same reading the app's places use for a
-/// dragged view (`DockLayout.zoneAt`: edges split, the middle lands here).
+/// A document dropped on this pane through the app's view drag (`RegionSpec.on_drop`): the
+/// middle takes it as a tab, an edge opens a pane on that side with it. Taking it here takes it
+/// out of the pane it was in — an assignment lives in one place.
+pub fn paneDrop(ctx: ?*anyopaque, drop: sdk.RegionSpec.Drop) bool {
+    const grouping: u64 = @as(u64, @intFromPtr(ctx orelse return false)) - 1;
+    const wb = runtime.workbench();
+    const target = switch (drop.zone) {
+        .center => grouping,
+        .edge => |side| blk: {
+            const g = wb.newGroupingID();
+            wb.paneBeside(g, grouping, paneSide(side)) catch return false;
+            break :blk g;
+        },
+    };
+    for (wb.workspaces.values()) |*other| {
+        if (other.grouping != target) other.removeTab(drop.surface_id);
+    }
+    const pane = wb.pane(target) catch return false;
+    pane.addTab(drop.surface_id, true);
+    return true;
+}
+
+fn paneSide(side: sdk.RegionSpec.Drop.Side) core.widgets.DockLayout.Side {
+    return switch (side) {
+        .left => .left,
+        .right => .right,
+        .top => .top,
+        .bottom => .bottom,
+    };
+}
+
+/// A file-tree row dropped on this pane: the same zones and reading as a dragged view
+/// (`core.widgets.DropZones`) — the middle opens it here, an edge in a new pane on that side. A
+/// tab dragged between panes is not read here: off its strip it is the app's view drag.
 pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
     if (!dvui.dragName("tab_drag")) {
         runtime.workbench().clearFileTreeTabDragDropState();
         return;
     }
     const wb = runtime.workbench();
-    const from_tab: ?[]const u8 = wb.dragging_surface;
-    const from_tree: ?[]const u8 = wb.tab_drag_from_tree_path;
-    if (from_tab == null and from_tree == null) return;
+    const path = wb.tab_drag_from_tree_path orelse return;
 
-    const Zones = core.widgets.DockLayout;
-    const bounds = data.rectScale().r;
-    const band = 36.0 * data.rectScale().s;
+    const DZ = core.widgets.DropZones;
+    const rs = data.rectScale();
+    const bounds = rs.r;
+    const zones = DZ.rects(bounds, rs.s);
+    const mouse = dvui.currentWindow().mouse_pt;
+    // No picture of the pane to cut glass from, so the zones draw as plain glass.
+    if (bounds.contains(mouse)) DZ.draw(data.id, zones, DZ.at(zones, mouse), null, rs.s);
 
     for (dvui.events()) |*e| {
         if (!dvui.eventMatch(e, .{ .id = data.id, .r = bounds, .drag_name = "tab_drag" })) continue;
         if (e.evt != .mouse) continue;
-        const hit = Zones.zoneAt(bounds, e.evt.mouse.p, band) orelse continue;
-
-        if (e.evt.mouse.action == .position) drawDropZone(data, hit.rect);
         if (e.evt.mouse.action != .release or !e.evt.mouse.button.pointer()) continue;
 
         e.handle(@src(), data);
@@ -630,34 +672,33 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
         wb.dragging_surface = null;
         defer wb.clearFileTreeTabDragDropState();
 
-        const grouping = switch (hit.zone) {
-            .tab => self.grouping,
-            .split => |side| blk: {
+        const grouping = switch (DZ.at(zones, e.evt.mouse.p)) {
+            .center => self.grouping,
+            .edge => |side| blk: {
                 const g = wb.newGroupingID();
-                wb.paneBeside(g, self.grouping, side) catch continue;
+                wb.paneBeside(g, self.grouping, switch (side) {
+                    .left => .left,
+                    .right => .right,
+                    .top => .top,
+                    .bottom => .bottom,
+                }) catch continue;
                 break :blk g;
             },
         };
-        if (from_tab) |id| {
+        // Already open: it moves. Not yet: it loads into that pane and `rebuildWorkspaces`
+        // seats it when the load lands.
+        if (runtime.host().docFromPath(path)) |doc| {
+            const id = sdk.document.surfaceId(runtime.host().arena(), doc.owner.id, doc.owner.documentPath(doc)) catch continue;
             for (wb.workspaces.values()) |*other| other.removeTab(id);
             const pane = wb.pane(grouping) catch continue;
             pane.addTab(id, true);
-        } else if (from_tree) |path| {
-            // Already open: it moves. Not yet: it loads into that pane and `rebuildWorkspaces`
-            // seats it when the load lands.
-            if (runtime.host().docFromPath(path)) |doc| {
-                const id = sdk.document.surfaceId(runtime.host().arena(), doc.owner.id, doc.owner.documentPath(doc)) catch continue;
-                for (wb.workspaces.values()) |*other| other.removeTab(id);
-                const pane = wb.pane(grouping) catch continue;
-                pane.addTab(id, true);
-            } else {
-                const started = runtime.host().openFile(.{ .path = path, .grouping = grouping }) catch false;
-                // Nothing is coming (it was already loading elsewhere, or could not start): a
-                // pane opened for it has nothing to wait for.
-                if (!started) if (wb.workspaces.getPtr(grouping)) |p| {
-                    p.expecting = false;
-                };
-            }
+        } else {
+            const started = runtime.host().openFile(.{ .path = path, .grouping = grouping }) catch false;
+            // Nothing is coming (it was already loading elsewhere, or could not start): a
+            // pane opened for it has nothing to wait for.
+            if (!started) if (wb.workspaces.getPtr(grouping)) |p| {
+                p.expecting = false;
+            };
         }
     }
 }

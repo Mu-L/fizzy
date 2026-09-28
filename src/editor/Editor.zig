@@ -2120,6 +2120,7 @@ const fizzy_api_vtable: sdk.EditorAPI.VTable = .{
     .endRegion = fizzyEndRegion,
     .regionMatching = fizzyRegionMatching,
     .regionSelected = fizzyRegionSelected,
+    .beginViewDrag = fizzyBeginViewDrag,
     .regionSelect = fizzyRegionSelect,
     .assignSurfaces = fizzyAssignSurfaces,
     .assignedSurfaces = fizzyAssignedSurfaces,
@@ -4197,6 +4198,11 @@ fn fizzyRegionMatching(ctx: *anyopaque, token: sdk.RegionSpec.Token) []const *sd
 fn fizzyRegionSelected(ctx: *anyopaque, token: sdk.RegionSpec.Token) ?*sdk.Surface {
     const layout = fizzyCtx(ctx).app.frame_layout orelse return null;
     return layout.pluginRegionSelected(token);
+}
+
+fn fizzyBeginViewDrag(ctx: *anyopaque, id: []const u8, from: dvui.Rect.Physical) void {
+    const layout = fizzyCtx(ctx).app.frame_layout orelse return;
+    layout.beginViewDrag(id, from);
 }
 
 fn fizzyRegionSelect(ctx: *anyopaque, token: sdk.RegionSpec.Token, id: []const u8) void {

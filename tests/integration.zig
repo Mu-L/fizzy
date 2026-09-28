@@ -3408,6 +3408,136 @@ test "a shelf adds a view and a slot trades for it" {
     try std.testing.expectEqualStrings("test.files", layout.selected(side).?.id);
 }
 
+// A view dropped on a plugin's region is the plugin's to land (`RegionSpec.on_drop`): the app
+// drew the drag, the plugin makes the pane. The middle and each edge arrive as themselves.
+const DropProbe = struct {
+    var last: ?fizzy.sdk.RegionSpec.Drop = null;
+    var id_buf: [64]u8 = undefined;
+
+    fn onDrop(_: ?*anyopaque, drop: fizzy.sdk.RegionSpec.Drop) bool {
+        const n = @min(drop.surface_id.len, id_buf.len);
+        @memcpy(id_buf[0..n], drop.surface_id[0..n]);
+        last = .{ .surface_id = id_buf[0..n], .zone = drop.zone };
+        return true;
+    }
+};
+
+fn dropRegions(editor: *fizzy.Editor) void {
+    const pane: []const []const u8 = &.{"main.document"};
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Pane 0", .keywords = pane, .id = .extendId(null, @src(), 1), .by_name = true, .kind_slot = true, .shows = .many, .on_drop = DropProbe.onDrop });
+    editor.app.layout.registerRegion(editor.app.gpa, .{ .name = "Pane 1", .keywords = pane, .id = .extendId(null, @src(), 2), .by_name = true, .kind_slot = true, .shows = .many });
+    editor.app.layout.publishRegions();
+}
+
+test "a view dropped on a plugin's region goes to its on_drop, middle and edge alike" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+
+    const draw = struct {
+        fn f(_: ?*anyopaque) anyerror!dvui.App.Result {
+            return .ok;
+        }
+    }.f;
+    try editor.app.host.registerSurface(.{ .id = "test.doc", .title = "a.txt", .keywords = fizzy.sdk.document.keywords, .draw = draw });
+    dropRegions(editor);
+    try editor.app.layout.assign(editor.app.gpa, "Pane 1", &.{"test.doc"});
+
+    var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
+    const VD = fizzy.Editor.Layout.ViewDrag;
+
+    DropProbe.last = null;
+    VD.place(&layout, "Pane 1", "Pane 0", .{ .split = .right });
+    const edge = DropProbe.last orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("test.doc", edge.surface_id);
+    try std.testing.expect(edge.zone == .edge and edge.zone.edge == .right);
+
+    DropProbe.last = null;
+    VD.place(&layout, "Pane 1", "Pane 0", .swap);
+    const mid = DropProbe.last orelse return error.TestExpectedEqual;
+    try std.testing.expect(mid.zone == .center);
+
+    // The handler landed it (here, by recording it): the app did not also move it.
+    const still = editor.app.layout.assignment("Pane 1") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), still.len);
+}
+
+test "a region with no drop handler takes the middle by the app's default" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+
+    const draw = struct {
+        fn f(_: ?*anyopaque) anyerror!dvui.App.Result {
+            return .ok;
+        }
+    }.f;
+    try editor.app.host.registerSurface(.{ .id = "test.doc", .title = "a.txt", .keywords = fizzy.sdk.document.keywords, .draw = draw });
+    dropRegions(editor);
+    // A workbench pane always has an assignment, empty or not; without one it would go by its
+    // keywords, which two panes share.
+    try editor.app.layout.assign(editor.app.gpa, "Pane 1", &.{});
+    try editor.app.layout.assign(editor.app.gpa, "Pane 0", &.{"test.doc"});
+
+    var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
+    fizzy.Editor.Layout.ViewDrag.place(&layout, "Pane 0", "Pane 1", .swap);
+    const dest = editor.app.layout.assignment("Pane 1") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), dest.len);
+    try std.testing.expectEqualStrings("test.doc", dest[0]);
+    // An assignment lives in one place: it left the pane it came from.
+    const from = editor.app.layout.assignment("Pane 0") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), from.len);
+}
+
+test "while a loose drag's landing is previewed, the place holding the view lets it go" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+    defer editor.app.layout.view_drag = .{};
+
+    const draw = struct {
+        fn f(_: ?*anyopaque) anyerror!dvui.App.Result {
+            return .ok;
+        }
+    }.f;
+    try editor.app.host.registerSurface(.{ .id = "test.doc", .title = "a.txt", .keywords = fizzy.sdk.document.keywords, .draw = draw });
+    try editor.app.host.registerSurface(.{ .id = "test.other", .title = "b.txt", .keywords = fizzy.sdk.document.keywords, .draw = draw });
+    dropRegions(editor);
+    try editor.app.layout.assign(editor.app.gpa, "Pane 1", &.{ "test.doc", "test.other" });
+
+    var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
+    const VD = fizzy.Editor.Layout.ViewDrag;
+    var d = &editor.app.layout.view_drag;
+    d.name = VD.loose_source;
+    d.moved_id = "test.doc";
+    d.preview_name = "Pane 0";
+    d.preview_split = .right;
+    d.preview_t = 0.5;
+
+    const shown = VD.previewAssignment(&layout, "Pane 1") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), shown.len);
+    try std.testing.expectEqualStrings("test.other", shown[0]);
+
+    // No preview, no change: it is still where it was until the drop.
+    d.preview_t = 0;
+    try std.testing.expect(VD.previewAssignment(&layout, "Pane 1") == null);
+}
+
 // `core` is not a test root, so its widgets' pure rules are tested here.
 const DZ = fizzy.core.widgets.DropZones;
 

@@ -853,6 +853,7 @@ pub const SplitTree = @import("SplitTree.zig");
 pub const Drop = @import("Drop.zig");
 /// Carrying a view from one place to another — the gesture `Drop` decides for.
 pub const ViewDrag = @import("ViewDrag.zig");
+const Picker = @import("Picker.zig");
 /// The arrangement a shape starts from — see `Seed.zig`. `Layout.Seed` is the tree union.
 pub const Seed = @import("Seed.zig").Tree;
 /// Walker `Layout.tree` returns over a seed-backed dockspace.
@@ -936,6 +937,8 @@ pub fn beginPluginRegion(self: *Layout, spec: sdk.RegionSpec) ?sdk.RegionSpec.To
         .manual_contents = true,
         .by_name = true,
         .kind_slot = true,
+        .on_drop = spec.on_drop,
+        .drop_ctx = spec.drop_ctx,
     }, .{
         // Truncated because `id_extra` is a `usize`, which is 32 bits on wasm. A plugin's key is
         // an id or a hash, so the low bits are the ones carrying the distinction.
@@ -1137,6 +1140,20 @@ pub fn packSplitSized(
 pub fn tabs(f: *Layout, keywords: []const []const u8) void {
     const place: Region = .{ .keywords = keywords };
     tabsIn(f, &place);
+}
+
+/// Carry surface `id` in the view drag, lifted from `from` (its tab, its card, its rail icon)
+/// rather than out of a place: the drop zones and the preview follow the pointer over every
+/// place, and the release lands it (`RegionSpec.on_drop` for a plugin's region). What a plugin's
+/// `Host.beginViewDrag` reaches, and a chooser beside a shut place. Driven, like a card lifted
+/// out of the picker, by the picker's loose drag each frame.
+pub fn beginViewDrag(f: *Layout, id: []const u8, from: dvui.Rect.Physical) void {
+    if (f.state.view_drag.active()) return;
+    ViewDrag.beginLoose(f, id, from, null);
+    if (!f.state.view_drag.active()) return;
+    f.state.picker.lifted = true;
+    dvui.captureMouseCustom(Picker.looseCapture(), dvui.currentWindow().event_num);
+    dvui.refresh(null, @src(), null);
 }
 
 /// Tab strip for one place: a horizontal `Chooser` with the stock `label` look. `tabs` is this

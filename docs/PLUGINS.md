@@ -592,6 +592,19 @@ Outside a region's draw, `host.assignSurfaces(name, ids)` / `assignedSurfaces(na
 the picker uses — a tab dragged to another pane is an assignment edit, and session restore is
 the assignment list read back.
 
+**Dragging a view onto a region is the app's gesture, everywhere.** While a view is dragged,
+the region under the pointer shows its drop zones (the middle and each edge,
+`core.widgets.DropZones`) and a live preview of the drop; a plugin's region gets the same. Two
+pieces let a plugin take part:
+
+- `host.beginViewDrag(surface_id, from_rect)` hands something of yours to that drag — the
+  workbench calls it when a document tab is dragged off its tab strip.
+- `RegionSpec.on_drop` (with `drop_ctx`) is asked what a drop on your region does:
+  `Drop{ .surface_id, .zone = .center | .{ .edge = side } }`. Return true when you handled it.
+  Unhandled, the middle takes the view by the app's default (added to what the region shows)
+  and an edge does nothing — the app cannot split a region you laid out, so a new pane beside
+  yours is yours to make (the workbench's `paneDrop`).
+
 ### 3.2 The `Plugin` vtable — the universal editor protocol
 
 `Plugin.vtable` is generic: every field is an optional fn pointer taking the plugin's opaque

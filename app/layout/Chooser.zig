@@ -42,7 +42,6 @@ const sdk = @import("fizzy_sdk");
 const Layout = @import("Layout.zig");
 const Region = @import("Region.zig");
 const ViewDrag = @import("ViewDrag.zig");
-const Picker = @import("Picker.zig");
 
 const Chooser = @This();
 
@@ -254,12 +253,7 @@ pub fn deinit(self: *Chooser) void {
                     // Out of a shut place (a rail beside a closed sidebar): the place is not
                     // drawing to drive a drag, and cannot be dropped on. Carry the view loose,
                     // as a card lifted out of the picker is.
-                    const from = if (i < self.drawn_rects.items.len) self.drawn_rects.items[i] else b;
-                    ViewDrag.beginLoose(f, id, from, null);
-                    if (f.state.view_drag.active()) {
-                        f.state.picker.lifted = true;
-                        dvui.captureMouseCustom(Picker.looseCapture(), dvui.currentWindow().event_num);
-                    }
+                    f.beginViewDrag(id, if (i < self.drawn_rects.items.len) self.drawn_rects.items[i] else b);
                 }
                 dvui.refresh(null, @src(), null);
             }

@@ -238,6 +238,11 @@ pub const VTable = struct {
     regionMatching: *const fn (ctx: *anyopaque, token: RegionSpec.Token) []const *Surface,
     /// The surface the region currently shows: the selection if it still exists, else the first.
     regionSelected: *const fn (ctx: *anyopaque, token: RegionSpec.Token) ?*Surface,
+    /// Start the app's view drag for surface `id`, from `from` (where its tab or card was): the
+    /// drag every region shares — the drop zones, the live preview, the drop (`RegionSpec.on_drop`
+    /// on a plugin's region). Call it when something of the plugin's is dragged off the place it
+    /// lives, as a document tab off its strip.
+    beginViewDrag: *const fn (ctx: *anyopaque, id: []const u8, from: dvui.Rect.Physical) void,
     regionSelect: *const fn (ctx: *anyopaque, token: RegionSpec.Token, id: []const u8) void,
     /// Set what a region shows, by the name it is declared under — the same list the picker
     /// writes. `null` returns the region to its keywords. By name rather than by token so a
@@ -531,6 +536,10 @@ pub fn regionMatching(self: EditorAPI, token: RegionSpec.Token) []const *Surface
 
 pub fn regionSelected(self: EditorAPI, token: RegionSpec.Token) ?*Surface {
     return self.vtable.regionSelected(self.ctx, token);
+}
+
+pub fn beginViewDrag(self: EditorAPI, id: []const u8, from: dvui.Rect.Physical) void {
+    self.vtable.beginViewDrag(self.ctx, id, from);
 }
 
 pub fn regionSelect(self: EditorAPI, token: RegionSpec.Token, id: []const u8) void {

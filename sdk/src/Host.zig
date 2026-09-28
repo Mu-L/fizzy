@@ -473,6 +473,11 @@ pub fn region(self: *Host, spec: RegionSpec) ?Region {
     return .{ .host = self, .token = token };
 }
 
+/// Start the app's view drag for surface `id`, from `from` — see `EditorAPI.beginViewDrag`.
+pub fn beginViewDrag(self: *Host, id: []const u8, from: dvui.Rect.Physical) void {
+    if (self.fizzy_api) |a| a.beginViewDrag(id, from);
+}
+
 /// Set what the region named `region_name` shows — the same list the picker writes; `null` hands
 /// it back to its keywords. Addressed by name so a plugin can write to a region it is not
 /// drawing this instant: another pane a tab was dropped on, a pane that does not exist yet, or

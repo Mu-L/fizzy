@@ -69,6 +69,9 @@ dir: dvui.enums.Direction = .vertical,
 size: dvui.Size = .{},
 /// This frame's border in physical pixels, for hit-testing a view drag.
 bounds: dvui.Rect.Physical = .{},
+/// What a view dropped here does, for a plugin's region — `sdk.RegionSpec.on_drop`.
+on_drop: ?*const fn (ctx: ?*anyopaque, drop: sdk.RegionSpec.Drop) bool = null,
+drop_ctx: ?*anyopaque = null,
 
 /// The key this region's selection lives under in the host — see `Layout.selectedIn`.
 pub fn selectionKey(self: *const Region) u64 {
@@ -274,6 +277,9 @@ pub const InitOptions = struct {
     by_name: bool = false,
     /// See `Region.kind_slot`.
     kind_slot: bool = false,
+    /// See `Region.on_drop`.
+    on_drop: ?*const fn (ctx: ?*anyopaque, drop: sdk.RegionSpec.Drop) bool = null,
+    drop_ctx: ?*anyopaque = null,
     /// Make this region's extent along its parent's axis draggable by the `split` after it. The
     /// starting extent comes from `min_size_content` in the `dvui.Options`; the user's drag
     /// replaces it and persists.
@@ -379,6 +385,8 @@ pub fn init(self: *Layout, src: std.builtin.SourceLocation, init_opts: InitOptio
             .kind_slot = init_opts.kind_slot,
             .forget_when_empty = init_opts.forget_when_empty,
             .dir = init_opts.dir,
+            .on_drop = init_opts.on_drop,
+            .drop_ctx = init_opts.drop_ctx,
         });
         return .{};
     }
@@ -515,6 +523,8 @@ pub fn init(self: *Layout, src: std.builtin.SourceLocation, init_opts: InitOptio
         .kind_slot = init_opts.kind_slot,
         .forget_when_empty = init_opts.forget_when_empty,
         .dir = init_opts.dir,
+        .on_drop = init_opts.on_drop,
+        .drop_ctx = init_opts.drop_ctx,
     });
 
     // A previewed split is laid out, not drawn over: the place really pulls

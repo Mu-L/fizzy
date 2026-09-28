@@ -39,6 +39,22 @@ const RegionSpec = @This();
 /// say it, and there must be exactly one definition of what it means.
 pub const Shows = enum { one, many };
 
+/// A view dropped on this region: which surface, and on which of the region's drop zones (the
+/// middle, or an edge). See `on_drop`.
+pub const Drop = struct {
+    /// The dropped surface's id, as registered.
+    surface_id: []const u8,
+    zone: Zone,
+
+    pub const Zone = union(enum) {
+        /// Into the region itself.
+        center,
+        /// On that edge: a new place beside this one.
+        edge: Side,
+    };
+    pub const Side = enum { left, right, top, bottom };
+};
+
 /// The app's handle to an open plugin region. Opaque: it indexes a stack the app owns, and its
 /// only valid use is the `deinit` that closes it, in the frame that opened it.
 pub const Token = enum(u32) { _ };
@@ -65,6 +81,15 @@ hide_when_empty: bool = false,
 expand: dvui.Options.Expand = .both,
 /// A minimum along the parent's axis, in points. Zero means "take what is left".
 min_extent: f32 = 0,
+/// What a view dropped on this region does. The app draws the drag — the drop zones, the live
+/// preview — the same over every region; only the drop itself is asked here, because a drop on
+/// an edge makes a new place beside this one, and only the plugin makes its places.
+///
+/// Return true when handled. False (or no handler) leaves the app's default: the middle adds the
+/// view to what the region shows; an edge does nothing, the app having no way to split a region
+/// a plugin laid out. Called with `drop_ctx`, outside any draw.
+on_drop: ?*const fn (ctx: ?*anyopaque, drop: Drop) bool = null,
+drop_ctx: ?*anyopaque = null,
 
 test {
     std.testing.refAllDecls(@This());

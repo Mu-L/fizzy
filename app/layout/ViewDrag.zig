@@ -407,8 +407,11 @@ pub fn tick(l: *Layout) void {
     var hover_split: ?SplitTree.Side = null;
     if (targetAt(l, mouse, d.name)) |dest| {
         const kind = kindAt(l.state, dest, mouse, scale);
-        // Null plan: the middle of your own place, which is not a hover.
-        if (Drop.plan(kind, std.mem.eql(u8, dest, d.name)) != null) {
+        // Null plan: the middle of your own place, which is not a hover. A view carried loose
+        // has no place of its own, but the middle of a shelf already holding it is the same
+        // thing — a drop there changes nothing (`swap`), so there is nothing to preview.
+        const own = std.mem.eql(u8, dest, d.name) or (kind == .swap and d.loose() and shelfHolds(l, dest, d.moved_id));
+        if (Drop.plan(kind, own) != null) {
             hover_name = dest;
             hover_split = switch (kind) {
                 .swap => null,
@@ -444,6 +447,14 @@ pub fn tick(l: *Layout) void {
     }
 
     dvui.refresh(null, @src(), null);
+}
+
+/// `name` shows several views and `id` is one of them.
+fn shelfHolds(l: *Layout, name: []const u8, id: []const u8) bool {
+    const r = regionNamed(l.state, name) orelse return false;
+    if (r.shows != .many) return false;
+    for (holding(l, name)) |x| if (std.mem.eql(u8, x, id)) return true;
+    return false;
 }
 
 fn aim(l: *Layout, d: *ViewDrag, name: []const u8, split: ?SplitTree.Side, t: f32) void {
@@ -501,9 +512,23 @@ pub fn swapping(l: *Layout) bool {
 /// the other's view for real. Null leaves the stored assignment alone —
 /// which is what the release itself, and `visibleId`, must always see.
 pub fn previewAssignment(l: *Layout, name: []const u8) ?[]const []const u8 {
-    if (!swapping(l)) return null;
     if (l.state.view_drag.capturing) return null;
     var d = &l.state.view_drag;
+    // A view carried loose (a tab dragged off its strip) was lifted out of no place, so no place
+    // stands empty for it — the one holding it would go on drawing it beside the preview of its
+    // landing, the same surface twice. While a landing is previewed, it leaves.
+    if (d.active() and d.loose() and d.preview_t > 0.001 and d.moved_id.len > 0 and
+        !(swapping(l) and std.mem.eql(u8, name, d.preview_name)))
+    {
+        const stored = l.state.assignment(name) orelse return null;
+        for (stored) |id| if (std.mem.eql(u8, id, d.moved_id)) {
+            var kept = std.ArrayListUnmanaged([]const u8).initCapacity(l.arena, stored.len) catch return null;
+            for (stored) |x| if (!std.mem.eql(u8, x, d.moved_id)) kept.appendAssumeCapacity(x);
+            return kept.items;
+        };
+        return null;
+    }
+    if (!swapping(l)) return null;
     if (std.mem.eql(u8, name, d.preview_name)) {
         if (d.moved_id.len == 0) return null;
         d.moved_ids[0] = d.moved_id;
@@ -895,6 +920,27 @@ pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) 
         const s = l.host.surfaceById(moved) orelse return;
         if (!accepts(r.*, s.keywords)) return;
         if (!r.kind_slot and l.slotted(s)) return;
+        // A plugin's region is asked first: it makes its own places, so a split of it is
+        // something only it can do (`RegionSpec.on_drop`).
+        if (r.on_drop) |on_drop| {
+            const zone: sdk.RegionSpec.Drop.Zone = switch (plan) {
+                .swap => .center,
+                .split => |sp| .{ .edge = switch (sp.landing) {
+                    .left => .left,
+                    .right => .right,
+                    .top => .top,
+                    .bottom => .bottom,
+                } },
+            };
+            if (on_drop(r.drop_ctx, .{ .surface_id = moved, .zone = zone })) {
+                l.state.markDirty();
+                dvui.refresh(null, @src(), null);
+                return;
+            }
+            // Unhandled: the middle falls through to the default below. A plugin's region
+            // cannot be split by the app, so an edge nobody handled is no drop.
+            if (plan == .split and r.kind_slot) return;
+        }
     }
     switch (plan) {
         .swap => swap(l, source, dest, moved),
@@ -941,6 +987,18 @@ fn movedFrom(l: *Layout, source: []const u8) ?[]const u8 {
 fn swap(l: *Layout, source: []const u8, dest: []const u8, moved: []const u8) void {
     const other_raw = visibleId(l, dest);
     const other = if (other_raw) |o| ownId(l.arena, o) else null;
+
+    // Dropped on a place that shows several and already holds it (a tab dropped back into its
+    // own strip's place): it is already there, so show it and leave the list alone — claiming
+    // it the way a one-view place does would shrink the place to it.
+    const dest_many = if (regionNamed(l.state, dest)) |r| r.shows == .many else false;
+    if (dest_many) {
+        for (holding(l, dest)) |id| if (std.mem.eql(u8, id, moved)) {
+            selectNamed(l, dest, moved);
+            if (!std.mem.eql(u8, source, dest)) takeOut(l, source, moved, null);
+            return;
+        };
+    }
 
     // Dropping a view onto a place that is already showing it: claim it here
     // and let the source go empty, rather than trading it with itself.
