@@ -1105,15 +1105,31 @@ pub fn tabs(f: *Layout, keywords: []const []const u8) void {
 
 /// Tab strip for one place. `tabs` is this keyed by keywords; a by-name
 /// place (a minted split leaf) must not share another place's selection.
+///
+/// A tab dragged along the strip reorders the place's views. Dragged off it, the tab becomes the
+/// ordinary view drag — the one the corner chooser starts — so a tab can land on another place or
+/// split one, the same gesture everywhere.
 pub fn tabsIn(f: *Layout, r: *const Region) void {
     const surfaces = f.matchingIn(r);
     if (surfaces.len <= 1) return;
 
-    var strip: core.widgets.Tabs = .init(@src(), &tab_info, .{ .drag_name = "fizzy_tab_strip" });
-    defer strip.deinit();
+    // Per place, not one for the app: two Multiple places side by side each drag their own tabs.
+    // Kept in dvui's store under the place's box, so it lives as long as the place does.
+    const key = r.selectionKey();
+    const info = dvui.dataGetPtrDefault(null, dvui.parentGet().extendId(@src(), @truncate(key)), "_tabs", core.widgets.Tabs.TabInfo, .{});
+    // `drag_index` says which tab is floating *now*; the strip only ever sets it.
+    info.drag_index = null;
 
+    // A name per place, so one place's strip is not a drop target for another's tabs — moving a
+    // view between places is the view drag's job.
+    var name_buf: [64]u8 = undefined;
+    const drag_name = f.state.internName(f.gpa, std.fmt.bufPrint(&name_buf, "fizzy_tabs:{x}", .{key}) catch "fizzy_tabs");
+
+    var strip: core.widgets.Tabs = .init(@src(), info, .{ .drag_name = drag_name, .id_extra = @truncate(key) });
+    const strip_r = strip.outer.data().borderRectScale().r;
+
+    const cur = f.selectedIn(r);
     for (surfaces, 0..) |s, i| {
-        const cur = f.selectedIn(r);
         const is_selected = if (cur) |sel| std.mem.eql(u8, sel.id, s.id) else false;
         var t = strip.tab(@src(), i, is_selected);
         defer t.deinit();
@@ -1136,8 +1152,58 @@ pub fn tabsIn(f: *Layout, r: *const Region) void {
 
         if (t.clicked()) f.selectIn(r, s.id);
     }
-
     strip.finalSlot(surfaces.len);
+    strip.deinit();
+
+    // Reordered within the strip: the place's list, in the new order, with the moved tab showing.
+    if (info.removed_index) |removed| if (info.insert_before_index) |before| {
+        info.removed_index = null;
+        info.insert_before_index = null;
+        if (removed < surfaces.len and r.name.len > 0) {
+            var ids = std.ArrayListUnmanaged([]const u8).initCapacity(f.arena, surfaces.len) catch return;
+            for (surfaces, 0..) |s, i| if (i != removed) ids.appendAssumeCapacity(s.id);
+            const at = if (removed < before) before - 1 else before;
+            ids.insert(f.arena, @min(at, ids.items.len), surfaces[removed].id) catch return;
+            f.state.assign(f.gpa, r.name, ids.items) catch {};
+            f.selectIn(r, surfaces[removed].id);
+            f.state.markDirty();
+            dvui.refresh(null, @src(), null);
+        }
+    };
+
+    // Dragged off the strip: hand the tab to the view drag. Past half a strip's height away,
+    // which a sideways reorder never reaches.
+    if (info.drag_index) |i| if (i < surfaces.len and r.name.len > 0 and !f.state.view_drag.active()) {
+        const p = dvui.currentWindow().mouse_pt;
+        const reach = strip_r.h * 0.5;
+        if (p.y < strip_r.y - reach or p.y > strip_r.y + strip_r.h + reach) {
+            info.* = .{};
+            dvui.dragEnd();
+            dvui.captureMouse(null, 0);
+            f.selectIn(r, surfaces[i].id);
+            ViewDrag.begin(f, r.name, r.bounds);
+            dvui.refresh(null, @src(), null);
+        }
+    };
+}
+
+/// A Multiple place: its strip, then the selected view in a box of its own beneath it.
+///
+/// The box is the point. The swap between views photographs and blurs *its parent*, and resets
+/// that parent's layout after the photograph as if the view were its only child. Drawn straight
+/// into the place alongside the strip, the blur ran over the strip too and the view laid out as
+/// though the strip were not there. In its own box the strip stays put and sharp, inside the
+/// place's card, and only what changed dissolves — the same as the bottom panel.
+pub fn tabbedIn(f: *Layout, r: *const Region) !dvui.App.Result {
+    f.tabsIn(r);
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .expand = .both,
+        .background = false,
+        .id_extra = @truncate(r.selectionKey()),
+    });
+    defer body.deinit();
+    const s = (if (r.by_name) f.selectedIn(r) else f.selected(r.keywords)) orelse return .ok;
+    return f.drawSwappedIn(r.selectionKey(), body, s, .none);
 }
 
 /// The plain tabbed region: a strip of tabs, then the selected surface beneath it. The
@@ -1148,14 +1214,9 @@ pub fn tabsIn(f: *Layout, r: *const Region) void {
 /// region it chooses for rather than above it (see `src/editor/layout.zig`), so it is not a region's content
 /// and wrapping it as one would only lose the action it returns.
 pub fn tabbed(_: ?*anyopaque, f: *Layout, keywords: []const []const u8) !dvui.App.Result {
-    f.tabs(keywords);
-    return f.drawSelected(keywords);
+    const place: Region = .{ .keywords = keywords };
+    return f.tabbedIn(&place);
 }
-
-/// Drag state for `tabStrip`. One strip per app in practice; a layout wanting two independent
-/// strips copies this recipe (see CLAUDE.md's shipped-shapes note) rather than fizzy growing a
-/// handle type for a case nothing has yet.
-var tab_info: core.widgets.Tabs.TabInfo = .{};
 
 
 /// A surface's draw, timed in the frame profiler under its owner (fizzy's own when it has none)

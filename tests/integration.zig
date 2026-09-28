@@ -2696,6 +2696,121 @@ test "a view-drag from a multi place moves only the visible surface" {
     try std.testing.expectEqualStrings("test.two", source[0]);
 }
 
+// A Multiple place draws its strip, then the selected view in a box of its own. Drawn into the
+// place beside the strip, the view was laid out as though the strip were not there, and the swap
+// blurred over the strip; the bottom panel had always kept them apart.
+const MultiProbe = struct {
+    var one_top: f32 = 0;
+    var two_top: f32 = 0;
+
+    fn one(_: ?*anyopaque) anyerror!dvui.App.Result {
+        one_top = dvui.parentGet().data().rectScale().r.y;
+        return .ok;
+    }
+    fn two(_: ?*anyopaque) anyerror!dvui.App.Result {
+        two_top = dvui.parentGet().data().rectScale().r.y;
+        return .ok;
+    }
+};
+
+fn multiCenter(editor: *fizzy.Editor) !fizzy.Editor.Layout.Region {
+    try editor.app.host.registerSurface(.{ .id = "test.one", .title = "One", .keywords = fizzy.sdk.keywords.ide.main, .draw = MultiProbe.one });
+    try editor.app.host.registerSurface(.{ .id = "test.two", .title = "Two", .keywords = fizzy.sdk.keywords.ide.main, .draw = MultiProbe.two });
+    try dvui.testing.settle(EndlessFrame.frame);
+    editor.app.layout.setShows(editor.app.gpa, "Center", .many);
+    try editor.app.layout.assign(editor.app.gpa, "Center", &.{ "test.one", "test.two" });
+    try dvui.testing.settle(EndlessFrame.frame);
+    for (editor.app.layout.regions.items) |r| {
+        if (std.mem.eql(u8, r.name, "Center")) return r;
+    }
+    return error.TestExpectedEqual;
+}
+
+test "a Multiple place draws its view beneath its tab strip, not over it" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitExtents(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    EndlessFrame.editor = editor;
+    defer EndlessFrame.editor = null;
+
+    const center = try multiCenter(editor);
+    // The first view is showing, and starts below the top of the place: the strip is above it.
+    try std.testing.expect(MultiProbe.one_top > center.bounds.y + 8);
+}
+
+test "dragging a tab along a Multiple place's strip reorders its views" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitExtents(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    EndlessFrame.editor = editor;
+    defer EndlessFrame.editor = null;
+
+    const center = try multiCenter(editor);
+    const cw = dvui.currentWindow();
+    // The strip is the band above the view.
+    const y = center.bounds.y + (MultiProbe.one_top - center.bounds.y) / 2;
+    const x0 = center.bounds.x + 16;
+    _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = x0, .y = y } });
+    _ = try cw.addEventMouseButton(.left, .press);
+    _ = try dvui.testing.step(EndlessFrame.frame);
+    // Past the second tab, still on the strip (it is only as wide as its tabs).
+    var x = x0;
+    while (x < x0 + 170) : (x += 10) {
+        _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = x, .y = y } });
+        _ = try dvui.testing.step(EndlessFrame.frame);
+    }
+    _ = try cw.addEventMouseButton(.left, .release);
+    try dvui.testing.settle(EndlessFrame.frame);
+
+    const order = editor.app.layout.assignment("Center") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 2), order.len);
+    try std.testing.expectEqualStrings("test.two", order[0]);
+    try std.testing.expectEqualStrings("test.one", order[1]);
+    try std.testing.expect(!editor.app.layout.view_drag.active());
+}
+
+test "dragging a tab off a Multiple place's strip starts the view drag with it" {
+    var ctx = try shim.init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    const editor = ctx.editor;
+    editor.app.gpa = std.testing.allocator;
+    defer editor.app.layout.regions.deinit(editor.app.gpa);
+    defer editor.app.layout.regions_building.deinit(editor.app.gpa);
+    defer editor.app.layout.deinitExtents(editor.app.gpa);
+    defer editor.app.layout.deinitAssignments(editor.app.gpa);
+    defer editor.app.layout.deinitQualified(editor.app.gpa);
+    defer editor.app.layout.view_drag.discard();
+    EndlessFrame.editor = editor;
+    defer EndlessFrame.editor = null;
+
+    const center = try multiCenter(editor);
+    const cw = dvui.currentWindow();
+    const y = center.bounds.y + (MultiProbe.one_top - center.bounds.y) / 2;
+    const x = center.bounds.x + 16;
+    _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = x, .y = y } });
+    _ = try cw.addEventMouseButton(.left, .press);
+    _ = try dvui.testing.step(EndlessFrame.frame);
+    var dy: f32 = 0;
+    while (dy < 200 and !editor.app.layout.view_drag.active()) : (dy += 20) {
+        _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = x, .y = y + dy } });
+        _ = try dvui.testing.step(EndlessFrame.frame);
+    }
+    try std.testing.expect(editor.app.layout.view_drag.active());
+    try std.testing.expectEqualStrings("test.one", editor.app.layout.view_drag.moved_id);
+}
+
 test "a view-drag can split its own place" {
     var ctx = try shim.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);

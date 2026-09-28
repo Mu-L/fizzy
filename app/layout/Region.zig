@@ -895,7 +895,7 @@ fn drawContents(self: *Layout, opts: InitOptions, keywords: []const []const u8) 
     };
     // Multiple is a place setting: the chooser is the place's, not something
     // each surface or the shape has to draw.
-    if (shows == .many) self.tabsIn(&place);
+    if (shows == .many) return self.tabbedIn(&place);
     if (opts.by_name) return self.drawSelectedIn(&place);
     return self.drawSelected(keywords);
 }
