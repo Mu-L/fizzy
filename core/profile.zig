@@ -288,6 +288,10 @@ const publish_key = "_profiler";
 /// Null when there is none, or it was built with another layout.
 pub fn current() ?*Profiler {
     if (is_host) return &host_profiler;
+    // A plugin's copy finds the host's through the window, so outside one — a hook called
+    // between frames, or from a test with no window at all — there is nothing to record into.
+    // Asking dvui's store then is a panic, not a miss.
+    if (dvui.current_window == null) return null;
     const addr = dvui.dataGet(null, publish_id, publish_key, usize) orelse return null;
     const p: *Profiler = @ptrFromInt(addr);
     return if (p.abi == abi) p else null;
