@@ -27,11 +27,19 @@ Everything else follows from that sentence, including the case that is easy to g
 |---|---|---|---|
 | Middle of a *slot* (shows one) | the dest's view | — | the dragged view *(they trade)* |
 | Middle of a *shelf* (shows many) | nothing back | — | the dragged view, added *(the rest stay)* |
+| Middle of the *other half of its split*, carrying its last view | — | — | *(they join: one place, both views, as tabs)* |
 | Edge of another place | untouched | that edge | the dragged view |
 | Edge of its own place | that edge | the **opposite** edge | empty |
 | Middle of its own place | — | — | *(nothing happens)* |
 
-The third row is the one worth stating out loud. Dropping a view on its own right edge splits
+The join row is the undo of a split, reached the same way the split was: by carrying a view.
+Only the two halves of one split join, and only when the view is the last one its place holds —
+carried out of a place that keeps others it is just moving, and the middle means what it means
+anywhere else. The split's origin is the half that stays, whichever way the drag went, since the
+half a split minted is the one the tree can drop; it shows both views as tabs, because it now
+holds two. Two places the shape declared are never a pair: neither may go.
+
+The own-edge row is the one worth stating out loud. Dropping a view on its own right edge splits
 that place and the view must finish on the right — so the *empty* leaf is what opens on the
 left. Minting on the right instead would push the view to the left and the split would feel
 mirrored.
@@ -50,28 +58,34 @@ drop zones and the release both read the same geometry (`Drop.kindAt` over
 A drag is a question ("where does this go?"). The answer is shown as the options, all at once,
 and the view you are carrying — never as the view drawn in two places.
 
-- **The view is drawn once: as the card under the pointer.** The dragged surface is photographed
-  once, at lift, from the draw its place was doing anyway (never a second `drawContents` in the
-  same frame: that builds every widget under the place twice, and dvui reports a duplicate id for
-  each of them). The card blits that picture and never hides — it is the only thing saying what
-  is being carried.
-- **Its place stands empty.** Hatched, as an empty place always is, until the drop — the view is
-  in your hand, and a place still drawing it would say it had not moved.
+- **The app under a drag does not change.** The dragged surface is photographed once, at lift,
+  from the draw its place was doing anyway (never a second `drawContents` in the same frame: that
+  builds every widget under the place twice, and dvui reports a duplicate id for each of them),
+  and a card of it rides the pointer. The place goes on drawing its view underneath: the drop
+  zones are what changes, over a window that stays put.
 - **Every place it could land shows its drop zones.** All five of them — the middle and each
   edge — on every such place at once, so every option in the window is in view before you move
   toward any of them. They are the dialogs' frosted glass, the app's surface rounding, an even gap
   around each, and a faint icon saying what a drop there does: a pane opening on that side, or
-  the middle's trade (one view) or join (several). The one under the pointer lights.
+  the middle's trade (one view), add (several) or join (the other half of a split). The one
+  under the pointer lights. The middle of the place the view came from is bare glass: dropping
+  there does nothing.
+- **A join shows the place it leaves.** Aimed at, the two halves' zones step back and one lit
+  pane of the same glass lies across both — the single place the drop will make, the divider
+  between them gone under it.
 - **Nothing is previewed in place.** No place poses the view as if it had landed, and none pulls
   back to make room: one copy of a view is easier to read than two, and the layout that answers
   the drop moves after it, with the easing every split and swap already has.
-- **The zones come and go softly.** They fade in as the drag starts and out as it ends, by
-  growing and shrinking the frost itself — never its opacity, since a frost replaces what it
-  covers and a half-opaque one would show a see-through window's content through it.
+- **The zones come and go as a change of mode.** They spread out from where the view was picked
+  up — the place under the pointer first, each farther one a little later — and each grows into
+  its rect as its glass frosts over, eased in and out, its icon arriving once the glass is mostly
+  there. Going, the same backwards and quicker, out of the way of what the drop does. Never by
+  opacity: a frost replaces what it covers, and a half-opaque one would show a see-through
+  window's content through it.
 - **A drag does not change the map it is read against.** The places, and where they are, are
-  photographed at lift, exactly like the view is. Places move during a drag — the source stands
-  empty, a place that hides when empty folds away — and a hit-test read against the live layout
-  would chase them. Frozen, it is a pure function of where the pointer is.
+  photographed at lift, exactly like the view is. A place can still move during a drag — a split
+  easing shut, a window resized — and a hit-test read against the live layout would chase it.
+  Frozen, it is a pure function of where the pointer is.
 
 ## Where the view goes when a place is split
 
@@ -108,8 +122,8 @@ A place merely *shut* keeps its sash: that is the handle you drag it back out by
 
 ## Edges and bands
 
-Near an edge is 36pt, or 28% of the shorter side, whichever is smaller. The fraction is what
-keeps a small pane usable: a fixed band on a 100pt place would leave no middle to aim at, and
+Near an edge is 64pt, or 22% of that side, whichever is smaller (`DropZones.band`). The
+fraction is what keeps a small pane usable: a fixed band on a 100pt place would leave no middle to aim at, and
 swapping would be unreachable exactly where precision is hardest.
 
 The place under the pointer is the *smallest* one containing it, so a document pane wins over
@@ -122,7 +136,9 @@ a log on the canvas lands on the main area instead of becoming a document tab.
 
 ## Removing a split
 
-A minted leaf can be emptied and removed; a shape-declared place can only be emptied. Removing
+Carry the last view of one half onto the middle of the other (a join, above), carry it anywhere
+else out of a minted half, or pick Remove. A minted leaf can be emptied and removed; a
+shape-declared place can only be emptied. Removing
 the last leaf collapses the branch and the origin becomes a whole place again, with its extent
 and assignment untouched throughout — a split and its undo are symmetric.
 

@@ -651,6 +651,13 @@ fn drawCaptured(self: *Layout, s: *Surface) !?dvui.App.Result {
     return try result;
 }
 
+/// What a view drag draws over every place at once: the pane across the two halves of a
+/// split a drop would join (`ViewDrag.drawJoin`). It spans places, so no one place can draw
+/// it; the application calls this after its shape has run, from the base window.
+pub fn drawDragOverlay(self: *Layout) void {
+    ViewDrag.drawJoin(self);
+}
+
 /// Snapshot every surface that drew nowhere this frame, by drawing each once offscreen at a
 /// fixed size. Only while the picker is collecting and only for surfaces still missing a
 /// snapshot, so a frame with nothing to do costs a lookup. The application calls this after

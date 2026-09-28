@@ -353,6 +353,36 @@ pub fn isMinted(self: *const State, name: []const u8) bool {
     return self.splits.canForget(name);
 }
 
+/// The two halves of one split — the pair a drop in the middle of one joins — as the place
+/// that stays and the one that closes; null for any other pair. The live dock tree when there is
+/// one: its two leaves under one split, a declared (pinned) leaf always the one kept and two
+/// declared leaves never a pair, since neither may go. Otherwise the split forest
+/// (`SplitTree.Forest.joinable`).
+pub fn joinable(self: *const State, a: []const u8, b: []const u8) ?SplitTree.Forest.Pair {
+    if (std.mem.eql(u8, a, b)) return null;
+    if (self.dock) |*d| {
+        const ia = d.findPanel(a) orelse return null;
+        const ib = d.findPanel(b) orelse return null;
+        if (ia == ib) return null;
+        const pa = d.findParent(ia) orelse return null;
+        const pb = d.findParent(ib) orelse return null;
+        if (pa.idx != pb.idx) return null;
+        const a_pinned = switch (d.nodes.items[ia]) {
+            .leaf => |l| l.pinned,
+            else => return null,
+        };
+        const b_pinned = switch (d.nodes.items[ib]) {
+            .leaf => |l| l.pinned,
+            else => return null,
+        };
+        if (a_pinned and b_pinned) return null;
+        // Neither declared: the first half stays, as the origin of a split does.
+        const keep_a = a_pinned or (!b_pinned and pa.side == .first);
+        return if (keep_a) .{ .keep = a, .drop = b } else .{ .keep = b, .drop = a };
+    }
+    return self.splits.joinable(a, b);
+}
+
 /// Called by `Region.init` as a shape declares one. Lands in the list being built, which
 /// `publishRegions` swaps into view when the shape finishes.
 pub fn registerRegion(self: *State, gpa: std.mem.Allocator, entry: Region) void {

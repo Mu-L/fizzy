@@ -2578,7 +2578,7 @@ test "removing a created place drops it from the tree" {
     try std.testing.expect((editor.app.layout.dock orelse return error.TestExpectedEqual).contains("Center"));
 }
 
-test "a view-drag places the visible surface and empties a last-surface source" {
+test "a split's last view dropped on the other half's middle joins the two into one place" {
     var ctx = try shim.init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
 
@@ -2598,40 +2598,36 @@ test "a view-drag places the visible surface and empties a last-surface source" 
             return .ok;
         }
     }.f;
-    try editor.app.host.registerSurface(.{
-        .id = "test.view",
-        .title = "View",
-        .keywords = fizzy.sdk.keywords.ide.main,
-        .draw = draw,
-    });
+    try editor.app.host.registerSurface(.{ .id = "test.view", .title = "View", .keywords = fizzy.sdk.keywords.ide.main, .draw = draw });
+    try editor.app.host.registerSurface(.{ .id = "test.other", .title = "Other", .keywords = fizzy.sdk.keywords.ide.main, .draw = draw });
 
     try dvui.testing.settle(EndlessFrame.frame);
     try editor.app.layout.assign(editor.app.gpa, "Center", &.{"test.view"});
+    const made = blk: {
+        var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
+        break :blk layout.splitOn("Center", .right) orelse return error.TestExpectedEqual;
+    };
+    const made_name = try std.testing.allocator.dupe(u8, made);
+    defer std.testing.allocator.free(made_name);
+    try editor.app.layout.assign(editor.app.gpa, made_name, &.{"test.other"});
+    try dvui.testing.settle(EndlessFrame.frame);
+    try std.testing.expect(editor.app.layout.joinable("Center", made_name) != null);
+
     {
         var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
-        try std.testing.expect(layout.splitOn("Center", .right) != null);
+        layout.placeVisible("Center", made_name, .swap);
     }
     try dvui.testing.settle(EndlessFrame.frame);
-    {
-        var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
-        layout.placeVisible("Center", "Center/r1", .swap);
-    }
     try dvui.testing.settle(EndlessFrame.frame);
 
-    const dest = editor.app.layout.assignment("Center/r1") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 1), dest.len);
-    try std.testing.expectEqualStrings("test.view", dest[0]);
-    const source = editor.app.layout.assignment("Center") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 0), source.len);
-
-    var dest_region: ?fizzy.Editor.Layout.Region = null;
-    for (editor.app.layout.regions.items) |r| {
-        if (std.mem.eql(u8, r.name, "Center/r1")) dest_region = r;
-    }
-    var layout = fizzy.Editor.Layout.init(&editor.app.host, &editor.app.layout, editor.app.gpa, dvui.currentWindow().arena());
-    const shown = layout.selectedIn(&(dest_region orelse return error.TestExpectedEqual));
-    try std.testing.expect(shown != null);
-    try std.testing.expectEqualStrings("test.view", shown.?.id);
+    // One place, holding both — the one dropped on first, the dragged one after — as tabs.
+    const joined = editor.app.layout.assignment("Center") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 2), joined.len);
+    try std.testing.expectEqualStrings("test.other", joined[0]);
+    try std.testing.expectEqualStrings("test.view", joined[1]);
+    try std.testing.expectEqual(fizzy.Editor.Layout.Region.Shows.many, editor.app.layout.showsOf("Center", .one));
+    // The half the split made is gone.
+    try std.testing.expect(!editor.app.layout.isMinted(made_name));
 }
 
 test "a view-drag from a multi place moves only the visible surface" {
@@ -2691,6 +2687,8 @@ test "a view-drag from a multi place moves only the visible surface" {
     const source = editor.app.layout.assignment("Center") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), source.len);
     try std.testing.expectEqualStrings("test.two", source[0]);
+    // Not a join: the place it left kept a view, so both halves stay.
+    try std.testing.expect(editor.app.layout.isMinted("Center/r1"));
 }
 
 // A Multiple place draws its strip, then the selected view in a box of its own. Drawn into the
@@ -3119,9 +3117,7 @@ test "a place a split made shuts itself when its last view is carried out" {
     }
     try dvui.testing.settle(EndlessFrame.frame);
 
-    // ViewDrag's shut-if-emptied path is still SplitTree-only (this brief does
-    // not move ViewDrag onto the seed tree). The view still lands; the minted
-    // leaf is not auto-collapsed.
+    // The two halves of the seed's split join: Center holds the view.
     const landed = editor.app.layout.assignment("Center") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), landed.len);
     try std.testing.expectEqualStrings("test.view", landed[0]);

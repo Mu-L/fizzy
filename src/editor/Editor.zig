@@ -3819,6 +3819,8 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             // A drag or a collapse moved a region: fizzy's answer to "remember that" is a
             // debounced write to `layout.zon`.
             if (layout.extents_changed) editor.markWindowRatiosDirty();
+            // Over every place: a drag's join spans two of them.
+            layout.drawDragOverlay();
             // The picker photographs surfaces that drew nowhere this frame, and floats above
             // everything the shape drew.
             layout.captureUnplaced();

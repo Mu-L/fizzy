@@ -9,16 +9,20 @@
 //!
 //! Two things are worth knowing before changing anything here:
 //!
-//! **The view is drawn once: as the card under the pointer.** The dragged
-//! surface is photographed once, at lift, and the card blits that picture.
-//! Its place stands empty (hatched) until the drop, and no place draws it as
-//! a preview of landing there — one view in two places at once was harder to
-//! read than a view that plainly travels. The layout moves after the drop,
-//! with the animations every split and swap already has.
+//! **The app under a drag does not change.** The dragged surface is
+//! photographed once, at lift, and a card of it rides the pointer; its place
+//! goes on drawing it, and no place poses it as a preview of landing there —
+//! one view shown in two places at once was harder to read than a card over
+//! a window that stays put. The layout moves after the drop, with the
+//! animations every split and swap already has.
 //!
 //! **Every place it could land shows its drop zones** (`drawZones`,
 //! `core.widgets.DropZones`), all five at once, so every option in the window
-//! is in view; the one under the pointer is the one a release takes.
+//! is in view; the one under the pointer is the one a release takes. They
+//! spread out from where the view was picked up, nearest place first. The
+//! middle of the other half of a split is a join (`drawJoin`): aimed at, the
+//! two places' zones step back for one pane across both — the place the drop
+//! leaves.
 const std = @import("std");
 const dvui = @import("dvui");
 const core = @import("core");
@@ -37,6 +41,8 @@ const ViewDrag = @This();
 name: []const u8 = "",
 /// Physical size of the source when the drag began — the card shrinks from it.
 from: dvui.Size.Physical = .{},
+/// Where the pointer was when the drag began: the drop zones spread out from here.
+start_pt: dvui.Point.Physical = .{},
 /// The lifted surface as it last drew. The floating card is this texture.
 texture: ?dvui.Texture = null,
 /// Where it was taken.
@@ -112,28 +118,31 @@ pub fn shotWanted(l: *Layout, is_source: bool) Shot {
     return .{ .card = is_source and d.texture == null };
 }
 
-/// Keep what the source's draw recorded as the card's picture.
+/// Keep what the source's draw recorded as the card's picture, and put it on the screen the
+/// draw was taken from — the place goes on showing its view under the drag.
 pub fn keepShot(l: *Layout, shot: Shot, pic: *dvui.Picture) void {
+    const d = &l.state.view_drag;
     if (shot.card) {
-        l.state.view_drag.takePicture(pic);
+        d.takePicture(pic);
+        if (d.texture) |tex| core.anim.blit(tex, null, d.texture_rect, 0, 1);
         return;
     }
     pic.stop();
 }
 
-/// Begin carrying the view out of `name`. The place keeps drawing until the
-/// pointer moves far enough for dvui to call it a drag.
+/// Begin carrying the view out of `name`. The place keeps drawing it throughout.
 pub fn begin(l: *Layout, name: []const u8, from: dvui.Rect.Physical) void {
     var d = &l.state.view_drag;
     d.name = l.state.internName(l.gpa, name);
     d.from = from.size();
     d.start_ns = dvui.currentWindow().frame_time_ns;
+    d.start_pt = dvui.currentWindow().mouse_pt;
     if (visibleId(l, name)) |id| d.moved_id = id;
     mapTargets(l, d);
 }
 
 /// Begin carrying surface `id` from the picker. There is no source place,
-/// so nothing stands empty and nothing is photographed: the float starts at
+/// so nothing is photographed: the float starts at
 /// the card that was grabbed and shows the picture the card showed, which
 /// the caller hands over (`State.stealSnapshot`) and the drag destroys.
 pub fn beginLoose(l: *Layout, id: []const u8, from: dvui.Rect.Physical, texture: ?dvui.Texture) void {
@@ -142,6 +151,7 @@ pub fn beginLoose(l: *Layout, id: []const u8, from: dvui.Rect.Physical, texture:
     d.name = loose_source;
     d.from = from.size();
     d.start_ns = dvui.currentWindow().frame_time_ns;
+    d.start_pt = dvui.currentWindow().mouse_pt;
     d.moved_id = s.id;
     d.texture = texture;
     d.texture_rect = from;
@@ -152,10 +162,9 @@ pub fn beginLoose(l: *Layout, id: []const u8, from: dvui.Rect.Physical, texture:
 
 /// Photograph the places, the way the card photographs the view.
 ///
-/// **A drag must not change the map it is being read against.** Places move
-/// under a drag — the one it came from stands empty, and a place that hides
-/// when empty folds away — and a hit-test read against the live layout would
-/// chase them. Frozen at lift, it is a pure function of where the pointer is,
+/// **A drag must not change the map it is being read against.** Places can
+/// move under a drag — a split easing shut, a window resized — and a hit-test
+/// read against the live layout would chase them. Frozen at lift, it is a pure function of where the pointer is,
 /// and the drag is as steady as your hand.
 fn mapTargets(l: *Layout, d: *ViewDrag) void {
     d.target_count = 0;
@@ -251,9 +260,9 @@ pub fn accepts(r: Region, surface_kw: []const []const u8) bool {
 
 pub fn placeBounds(state: *const Layout.State, name: []const u8) ?dvui.Rect.Physical {
     // Mid-drag, a place is where it was when the drag began — see
-    // `mapTargets`. Everything the gesture measures reads this, so the pane
-    // that slides open, the half the place pulls back to and the edge the
-    // pointer is being tested against are all cut from the same rect.
+    // `mapTargets`. Everything the gesture measures reads this, so the zones,
+    // the edge the pointer is tested against and the split a drop settles are
+    // all cut from the same rect.
     if (frozen(state, name)) |t| return t.bounds;
     for (state.regions_building.items) |r| {
         if (std.mem.eql(u8, r.name, name) and r.bounds.w > 0 and r.bounds.h > 0) return r.bounds;
@@ -306,7 +315,7 @@ pub fn tick(l: *Layout) void {
     dvui.refresh(null, @src(), null);
 }
 
-// ── Preview geometry ────────────────────────────────────────────────────────────────────────────
+// ── Easing ──────────────────────────────────────────────────────────────────────────────────────
 
 fn outCubic(t: f32) f32 {
     const u = 1 - t;
@@ -330,8 +339,10 @@ fn aimedAt(l: *Layout, name: []const u8) bool {
 pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
     // Every place the view could land shows all its zones for the whole drag, so every option
     // is in view at once; the one under the pointer lights. When the drag ends they fade out
-    // rather than vanish, for as long as they are still showing.
-    const target = isTarget(l, name);
+    // rather than vanish, for as long as they are still showing. The two halves of a join being
+    // aimed at step back for the one pane across both (`drawJoin`).
+    const joining = if (aimedJoin(l)) |j| std.mem.eql(u8, j.keep, name) or std.mem.eql(u8, j.drop, name) else false;
+    const target = isTarget(l, name) and !joining;
     if (!target and !DropZones.showing(key)) return;
     const aimed = aimedAt(l, name);
     const whole = placeBounds(l.state, name) orelse {
@@ -343,9 +354,71 @@ pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
     const prev_clip = dvui.clipGet();
     defer dvui.clipSet(prev_clip);
     dvui.clipSet(whole);
-    const hovered: ?DropZones.Zone = if (aimed) DropZones.at(zones, dvui.currentWindow().mouse_pt) else null;
-    const center: DropZones.Center = if (regionNamed(l.state, name)) |r| (if (r.shows == .many) .add else .replace) else .replace;
-    DropZones.draw(key, zones, hovered, scale, target, center);
+    const d = l.state.view_drag;
+    const center: DropZones.Center = if (std.mem.eql(u8, d.name, name))
+        .none
+    else if (joins(l, d.name, name))
+        .join
+    else if (regionNamed(l.state, name)) |r| (if (r.shows == .many) .add else .replace) else .replace;
+    DropZones.draw(key, zones, scale, .{
+        .hovered = if (aimed) DropZones.at(zones, dvui.currentWindow().mouse_pt) else null,
+        .target = target,
+        .center = center,
+        .appear_at_ns = d.start_ns + spreadDelay(d.start_pt, whole, scale),
+    });
+}
+
+/// How long after the lift a place's zones start to come in: the farther from where the view
+/// was picked up, the later, so the targets spread out across the window from the hand that
+/// started it. Capped, so the farthest place is never waited for.
+fn spreadDelay(from: dvui.Point.Physical, bounds: dvui.Rect.Physical, scale: f32) i128 {
+    const dx = @max(@max(bounds.x - from.x, 0), from.x - (bounds.x + bounds.w));
+    const dy = @max(@max(bounds.y - from.y, 0), from.y - (bounds.y + bounds.h));
+    const dist_pt = @sqrt(dx * dx + dy * dy) / @max(scale, 0.01);
+    const ms = @min(dist_pt / spread_pt_per_ms, spread_max_ms);
+    return @intFromFloat(ms * std.time.ns_per_ms);
+}
+
+/// Points a place's distance from the lift adds per millisecond of delay, and the most any
+/// place waits.
+const spread_pt_per_ms: f32 = 4;
+const spread_max_ms: f32 = 110;
+
+/// Whether dropping the view lifted from `source` in the middle of `dest` joins them: the two
+/// halves of one split (`State.joinable`), with the view the last thing `source` shows — a
+/// place of one, or a place of tabs down to this one. Carried out of a place that keeps other
+/// views, it is only moving, and the middle means what it means anywhere else.
+fn joins(l: *Layout, source: []const u8, dest: []const u8) bool {
+    if (source.len == 0 or dest.len == 0) return false;
+    if (l.state.joinable(source, dest) == null) return false;
+    const r = regionNamed(l.state, source) orelse return true;
+    return r.shows == .one or holding(l, source).len <= 1;
+}
+
+/// The join a release here would make, if the pointer is on the middle of the other half of
+/// the split the view was lifted from.
+fn aimedJoin(l: *Layout) ?SplitTree.Forest.Pair {
+    const d = l.state.view_drag;
+    if (!d.active() or d.loose()) return null;
+    const mouse = dvui.currentWindow().mouse_pt;
+    const dest = targetAt(l, mouse, d.name) orelse return null;
+    if (!joins(l, d.name, dest)) return null;
+    if (kindAt(l.state, dest, mouse, dvui.currentWindow().natural_scale) != .swap) return null;
+    return l.state.joinable(d.name, dest);
+}
+
+/// The join's pane: one lit sheet of the zones' glass across both halves of the split being
+/// joined, while it is aimed at, where each half showed its own zones. It is the one place the
+/// drop will leave, shown before it is made — the answer to "what does dropping here do" that a
+/// single zone's icon cannot give. Drawn after every place (the framework calls it once the
+/// shape has declared them all), so it lies over the zones stepping back beneath it.
+pub fn drawJoin(l: *Layout) void {
+    const key = dvui.Id.extendId(null, @src(), 0);
+    const scale = dvui.currentWindow().natural_scale;
+    const pair = aimedJoin(l) orelse return DropZones.drawJoin(key, null, scale);
+    const a = placeBounds(l.state, pair.keep) orelse return DropZones.drawJoin(key, null, scale);
+    const b = placeBounds(l.state, pair.drop) orelse return DropZones.drawJoin(key, null, scale);
+    DropZones.drawJoin(key, a.unionWith(b), scale);
 }
 
 /// Whether `name` is somewhere the dragged view could land — one of the places mapped at lift
@@ -452,7 +525,7 @@ pub fn apply(l: *Layout, source: []const u8, mouse: dvui.Point.Physical) void {
 /// come through here too, which is why it takes a `Drop.Kind` rather than a
 /// pointer position.
 pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) void {
-    const plan = Drop.plan(kind, std.mem.eql(u8, source, dest)) orelse return;
+    const plan = Drop.plan(kind, std.mem.eql(u8, source, dest), joins(l, source, dest)) orelse return;
     const moved = ownId(l.arena, movedFrom(l, source) orelse return) orelse return;
     if (regionNamed(l.state, dest)) |r| {
         const s = l.host.surfaceById(moved) orelse return;
@@ -462,7 +535,7 @@ pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) 
         // something only it can do (`RegionSpec.on_drop`).
         if (r.on_drop) |on_drop| {
             const zone: sdk.RegionSpec.Drop.Zone = switch (plan) {
-                .swap => .center,
+                .swap, .join => .center,
                 .split => |sp| .{ .edge = switch (sp.landing) {
                     .left => .left,
                     .right => .right,
@@ -482,6 +555,7 @@ pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) 
     }
     switch (plan) {
         .swap => swap(l, source, dest, moved),
+        .join => join(l, source, dest, moved),
         .split => |s| {
             const new = Region.splitOn(l, dest, s.mint) orelse return;
             // A self-split leaves the view in the origin, which `mint` has
@@ -555,6 +629,45 @@ fn swap(l: *Layout, source: []const u8, dest: []const u8, moved: []const u8) voi
     l.state.assign(l.gpa, dest, &.{moved}) catch {};
     selectNamed(l, dest, moved);
     takeOut(l, source, moved, other);
+}
+
+/// Make the two halves of a split one place again, holding the views of both: the place under
+/// the pointer's first, in its order, then the source's, the dragged one selected. The split's
+/// origin is what stays, whichever half the drag started in (`SplitTree.Forest.joinable`); it
+/// shows them as tabs, since it now holds more than one. The minted half slides shut and is
+/// dropped once it has (`shutIfEmptied`).
+fn join(l: *Layout, source: []const u8, dest: []const u8, moved: []const u8) void {
+    const pair = l.state.joinable(source, dest) orelse return swap(l, source, dest, moved);
+    var ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    for ([_][]const u8{ dest, source }) |name| {
+        for (shownIn(l, name)) |id| {
+            const own = ownId(l.arena, id) orelse continue;
+            if (!containsId(ids.items, own)) ids.append(l.arena, own) catch {};
+        }
+    }
+    if (!containsId(ids.items, moved)) ids.append(l.arena, moved) catch {};
+    l.state.setShows(l.gpa, pair.keep, .many);
+    l.state.assign(l.gpa, pair.keep, ids.items) catch {};
+    l.state.assign(l.gpa, pair.drop, &.{}) catch {};
+    selectNamed(l, pair.keep, moved);
+    shutIfEmptied(l, pair.drop);
+}
+
+/// What a place is showing, for a join to keep: every view a place of tabs holds, the one view
+/// a place of one does. A place of one matched by keywords "holds" every surface they match —
+/// the whole list it picks from — and joining must not turn that into a row of tabs.
+fn shownIn(l: *Layout, name: []const u8) []const []const u8 {
+    const many = if (regionNamed(l.state, name)) |r| r.shows == .many else false;
+    if (many) return holding(l, name);
+    const id = visibleId(l, name) orelse return &.{};
+    const out = l.arena.alloc([]const u8, 1) catch return &.{};
+    out[0] = id;
+    return out;
+}
+
+fn containsId(ids: []const []const u8, id: []const u8) bool {
+    for (ids) |x| if (std.mem.eql(u8, x, id)) return true;
+    return false;
 }
 
 /// What a place is holding: the list it was given, or the one its keywords
@@ -632,7 +745,7 @@ fn selectNamed(l: *Layout, name: []const u8, id: []const u8) void {
 /// is, and a user who empties it expects to be able to put something back. A
 /// minted leaf is not furniture: it was a container for the view that has
 /// just been carried out of it, and leaving a blank rectangle behind makes
-/// the user tidy up after their own drag. `canForget` is exactly that
+/// the user tidy up after their own drag. `State.isMinted` is exactly that
 /// distinction — a place the tree is allowed to drop.
 ///
 /// The leaf a split *mints* is empty on purpose and is never passed here: it
@@ -641,9 +754,14 @@ fn selectNamed(l: *Layout, name: []const u8, id: []const u8) void {
 /// Shut rather than deleted, so it slides closed on the curve it opened on;
 /// `Region.persistExtent` drops the leaf once the animation has finished.
 fn shutIfEmptied(l: *Layout, name: []const u8) void {
-    if (!l.state.splits.canForget(name)) return;
+    if (!l.state.isMinted(name)) return;
     if (l.state.assignment(name)) |ids| {
         if (ids.len > 0) return;
+    }
+    // A seed's dock tree closes its own leaves, easing the split shut over it.
+    if (l.state.dock) |*dock| {
+        if (dock.findPanel(name)) |idx| dock.closeLeaf(idx);
+        return;
     }
     const r = regionNamed(l.state, name) orelse return;
     if (r.id != .zero and Split.sizeOf(r.id) > 0) {

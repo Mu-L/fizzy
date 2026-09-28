@@ -562,14 +562,13 @@ pub fn init(self: *Layout, src: std.builtin.SourceLocation, init_opts: InitOptio
     // Photographed, when the drag needs the card's picture, from this very
     // draw and no other — see `drawContentsPhotographed`.
     if (!shut_now and keywords.len > 0 and !init_opts.manual_contents) {
-        // The view rides the pointer as its card, drawn once: its place stands
-        // empty (hatched, `cornerButton`) until the drop.
-        const on_screen = !dragging_this;
+        // The place keeps drawing its view while the card of it rides the pointer: the app
+        // under a drag does not change, the drop zones lie over it (`cornerButton`).
         const shot = ViewDrag.shotWanted(self, dragging_this);
 
         if (shot.any()) {
             try drawContentsPhotographed(self, init_opts, keywords, clip_to, shot);
-        } else if (on_screen) {
+        } else {
             _ = try drawContents(self, init_opts, keywords);
         }
     }
@@ -610,9 +609,8 @@ const corner_button_size: f32 = 22;
 /// does not sit on the surface. Empty is a hatch, not a ring: a ring on every vacant slot
 /// read as focus. A filled card still gets a rounded highlight when the pointer is near.
 ///
-/// Drag the button to lift the view. The place stays as a hole; a floating card follows the
-/// pointer (grab offset preserved). Hover a place's edge — including this one's — to
-/// preview a split sliding open; hover another place's middle to preview a swap.
+/// Drag the button to lift the view: a card of it follows the pointer (grab offset preserved)
+/// and every place it could land, this one included, shows its drop zones.
 fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, box: *dvui.BoxWidget) void {
     const rs = box.data().borderRectScale();
     const mouse = dvui.currentWindow().mouse_pt;
@@ -622,7 +620,7 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
     const over = self.state.view_drag.active() and rs.r.contains(mouse);
     // Null plan: the middle of the place the drag came from, which is not a
     // drop at all. Every other reading of the pointer lands somewhere.
-    const drop_here = over and Drop.plan(Drop.kindAt(rs.r, mouse, rs.s), dragging_this) != null;
+    const drop_here = over and Drop.plan(Drop.kindAt(rs.r, mouse, rs.s), dragging_this, false) != null;
     const near = mouse.x >= rs.r.x + rs.r.w - corner_reach * rs.s and mouse.x <= rs.r.x + rs.r.w and
         mouse.y >= rs.r.y and mouse.y <= rs.r.y + corner_reach * rs.s;
     const pressing = dvui.dataGet(null, box.data().id, "_chooser_press", bool) orelse false;
@@ -641,9 +639,7 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
     // square outline sitting on the rounded card.
     const corners = box.data().options.cornersGet().scale(rs.s, dvui.CornerRect.Physical);
     const theme = dvui.themeGet();
-    // The place the view was lifted out of stands empty while its view rides
-    // the pointer.
-    if (!filled or dragging_this) drawEmptyHatch(rs.r, rs.s);
+    if (!filled) drawEmptyHatch(rs.r, rs.s);
     // In the same front-to-back pass as the contents' chrome: the glass lies on them.
     ViewDrag.drawZones(self, opts.name, box.data().id);
     if (!drop_here and filled and !dragging_this and alpha > 0.01) {
@@ -792,13 +788,12 @@ pub fn drawEmptyHatch(bounds: dvui.Rect.Physical, scale: f32) void {
 }
 
 /// Draw this place's contents *once*, into a texture, and blit those same
-/// pixels back if the place is meant to be on screen.
+/// pixels back to the screen.
 ///
-/// The drag needs a still of the place — the lifted view for the floating
-/// card, the destination for the outgoing blur. A second `drawContents` in
-/// the same frame would build every widget under the place twice (dvui
-/// reports a duplicate id for each), so one draw serves both: the screen sees
-/// a photograph of itself, which is the same picture.
+/// The drag needs a still of the lifted view for the floating card. A second
+/// `drawContents` in the same frame would build every widget under the place
+/// twice (dvui reports a duplicate id for each), so one draw serves both: the
+/// screen sees a photograph of itself, which is the same picture.
 fn drawContentsPhotographed(
     self: *Layout,
     opts: InitOptions,
@@ -807,9 +802,11 @@ fn drawContentsPhotographed(
     shot: ViewDrag.Shot,
 ) !void {
     // No texture targets (web) or nothing to capture: the card goes without
-    // its picture (it draws as a plain card), and nothing else is lost — the
-    // place is standing empty while its view rides the pointer anyway.
-    var pic = core.anim.CrossFade.beginCapture(rect) orelse return;
+    // its picture (it draws as a plain card), and the place draws as usual.
+    var pic = core.anim.CrossFade.beginCapture(rect) orelse {
+        _ = try drawContents(self, opts, keywords);
+        return;
+    };
     const prev_clip = dvui.clip(rect);
     _ = try drawContents(self, opts, keywords);
     dvui.clipSet(prev_clip);

@@ -207,6 +207,44 @@ pub const Forest = struct {
         return null;
     }
 
+    /// Two places one split made — the two leaves of one branch — as the place a join keeps and
+    /// the one it closes. Null for any other pair: only a split's own two halves are one place
+    /// again when joined, so that is the only pair the middle of a place joins.
+    ///
+    /// The origin is kept, whichever way the join was dragged: it holds the shape's name (or its
+    /// parent split's), and closing the minted leaf is the one thing the tree can undo.
+    pub const Pair = struct { keep: []const u8, drop: []const u8 };
+
+    pub fn joinable(self: *const Forest, a: []const u8, b: []const u8) ?Pair {
+        if (std.mem.eql(u8, a, b)) return null;
+        var it = self.roots.valueIterator();
+        while (it.next()) |n| {
+            if (pairIn(n.*, a, b)) |p| return p;
+        }
+        return null;
+    }
+
+    fn pairIn(node: *Node, a: []const u8, b: []const u8) ?Pair {
+        switch (node.kind) {
+            .leaf => return null,
+            .branch => |br| {
+                const la = leafName(br.a.*);
+                const lb = leafName(br.b.*);
+                if (la != null and lb != null) {
+                    const x = la.?;
+                    const y = lb.?;
+                    const hit = (std.mem.eql(u8, x, a) and std.mem.eql(u8, y, b)) or
+                        (std.mem.eql(u8, x, b) and std.mem.eql(u8, y, a));
+                    if (hit) {
+                        const keep = if (std.mem.eql(u8, x, br.created)) y else x;
+                        return .{ .keep = keep, .drop = if (keep.ptr == x.ptr) y else x };
+                    }
+                }
+                return pairIn(br.a, a, b) orelse pairIn(br.b, a, b);
+            },
+        }
+    }
+
     /// A leaf minted by a split, not a shape-declared root. The picker can Remove these.
     pub fn canForget(self: *const Forest, name: []const u8) bool {
         return self.root(name) == null and self.findLeaf(name) != null;
@@ -356,6 +394,25 @@ test "canForget is only a minted leaf" {
     _ = f.split(gpa, internLiteral, "Center", .right, 80, "Center/r1").?;
     try std.testing.expect(!f.canForget("Center"));
     try std.testing.expect(f.canForget("Center/r1"));
+}
+
+test "only a split's own two halves join, and the origin is what stays" {
+    const gpa = std.testing.allocator;
+    var f: Forest = .{};
+    defer f.deinit(gpa);
+    _ = f.split(gpa, internLiteral, "Center", .right, 80, "Center/r1").?;
+    const p = f.joinable("Center/r1", "Center").?;
+    try std.testing.expectEqualStrings("Center", p.keep);
+    try std.testing.expectEqualStrings("Center/r1", p.drop);
+    try std.testing.expectEqualStrings("Center", f.joinable("Center", "Center/r1").?.keep);
+    try std.testing.expect(f.joinable("Center", "Center") == null);
+
+    // Split again: the new pair is the inner branch; the outer halves are no longer a pair.
+    _ = f.split(gpa, internLiteral, "Center/r1", .top, 40, "Center/r1/t1").?;
+    try std.testing.expect(f.joinable("Center", "Center/r1") == null);
+    const inner = f.joinable("Center/r1/t1", "Center/r1").?;
+    try std.testing.expectEqualStrings("Center/r1", inner.keep);
+    try std.testing.expectEqualStrings("Center/r1/t1", inner.drop);
 }
 
 test "collectLinks keeps a nested parent link" {

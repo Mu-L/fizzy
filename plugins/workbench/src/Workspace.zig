@@ -656,12 +656,12 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
     // Every pane shows its zones for the whole drag, the one under the pointer lit, as every
     // place does for a dragged view; when the drag ends they fade out.
     if (!dragging) {
-        if (DZ.showing(data.id)) DZ.draw(data.id, zones, null, rs.s, false, .add);
+        if (DZ.showing(data.id)) DZ.draw(data.id, zones, rs.s, .{ .target = false, .center = .add });
         return;
     }
     const path = wb.tab_drag_from_tree_path.?;
     const mouse = dvui.currentWindow().mouse_pt;
-    DZ.draw(data.id, zones, if (bounds.contains(mouse)) DZ.at(zones, mouse) else null, rs.s, true, .add);
+    DZ.draw(data.id, zones, rs.s, .{ .hovered = if (bounds.contains(mouse)) DZ.at(zones, mouse) else null, .center = .add });
 
     for (dvui.events()) |*e| {
         if (!dvui.eventMatch(e, .{ .id = data.id, .r = bounds, .drag_name = "tab_drag" })) continue;

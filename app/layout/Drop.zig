@@ -1,9 +1,10 @@
 //! What releasing a dragged view does, as a value.
 //!
 //! One rule: **the edge you release on is where the dragged view ends up.**
-//! The middle of another place is a trade. Everything else here follows from
-//! that sentence, and both the preview and the commit read this file — so what
-//! slides open under the pointer is what you get when you let go.
+//! The middle of another place is a trade — or, when the two places are the
+//! halves of one split, a join: they are one place again, holding both. Both
+//! the drop zones and the commit read this file, so what lights under the
+//! pointer is what you get when you let go.
 //!
 //! A split mints one empty leaf and keeps the origin. Which of the two the
 //! dragged view occupies is the only thing that differs between dropping on
@@ -33,11 +34,13 @@ pub const Kind = union(enum) {
     split: Side,
 };
 
-/// A resolved release: the same value drives the preview animation and the
-/// assignment that lands. Null from `plan` means the release does nothing.
+/// A resolved release: the same value the drop zones read, and the assignment
+/// that lands. Null from `plan` means the release does nothing.
 pub const Plan = union(enum) {
     /// Trade views with the place under the pointer.
     swap,
+    /// Close the split the two places are the halves of: one place, holding the views of both.
+    join,
     split: Split,
 
     pub const Split = struct {
@@ -69,11 +72,12 @@ pub fn kindAt(bounds: dvui.Rect.Physical, mouse: dvui.Point.Physical, scale: f32
 }
 
 /// What `kind` means when the place under the pointer is (`self_drop`) or is
-/// not the place the view was lifted from. Null when nothing should happen:
-/// the middle of your own place is not a trade with yourself.
-pub fn plan(kind: Kind, self_drop: bool) ?Plan {
+/// not the place the view was lifted from, and whether the two are the halves
+/// of one split (`halves`, `SplitTree.Forest.joinable`). Null when nothing
+/// should happen: the middle of your own place is not a trade with yourself.
+pub fn plan(kind: Kind, self_drop: bool, halves: bool) ?Plan {
     return switch (kind) {
-        .swap => if (self_drop) null else .swap,
+        .swap => if (self_drop) null else if (halves) .join else .swap,
         .split => |landing| .{ .split = .{
             .landing = landing,
             .mint = if (self_drop) SplitTree.opposite(landing) else landing,
@@ -98,14 +102,14 @@ test "a small place keeps a middle to aim at" {
 
 test "the dropped edge is where the view lands, on any place" {
     // Another place: the leaf opens under the pointer and takes the view.
-    const away = plan(.{ .split = .right }, false).?.split;
+    const away = plan(.{ .split = .right }, false, false).?.split;
     try std.testing.expectEqual(Side.right, away.landing);
     try std.testing.expectEqual(Side.right, away.mint);
     try std.testing.expect(away.fills_mint);
 
     // Your own place: the origin is already the view, so it stays under the
     // pointer and the empty leaf opens on the far side.
-    const own = plan(.{ .split = .right }, true).?.split;
+    const own = plan(.{ .split = .right }, true, false).?.split;
     try std.testing.expectEqual(Side.right, own.landing);
     try std.testing.expectEqual(Side.left, own.mint);
     try std.testing.expect(!own.fills_mint);
@@ -114,7 +118,7 @@ test "the dropped edge is where the view lands, on any place" {
 test "every edge lands where it was dropped" {
     for (std.meta.tags(Side)) |side| {
         for ([_]bool{ true, false }) |self_drop| {
-            const s = plan(.{ .split = side }, self_drop).?.split;
+            const s = plan(.{ .split = side }, self_drop, false).?.split;
             try std.testing.expectEqual(side, s.landing);
             // The view is on `landing` either way: it fills the minted leaf,
             // or the origin keeps it and the leaf went to the other side.
@@ -128,6 +132,12 @@ test "every edge lands where it was dropped" {
 }
 
 test "the middle of your own place does nothing" {
-    try std.testing.expect(plan(.swap, true) == null);
-    try std.testing.expectEqual(Plan.swap, plan(.swap, false).?);
+    try std.testing.expect(plan(.swap, true, false) == null);
+    try std.testing.expectEqual(Plan.swap, plan(.swap, false, false).?);
+}
+
+test "the middle of the other half of a split joins, and its edges still split" {
+    try std.testing.expectEqual(Plan.join, plan(.swap, false, true).?);
+    const s = plan(.{ .split = .left }, false, true).?.split;
+    try std.testing.expect(s.fills_mint);
 }
