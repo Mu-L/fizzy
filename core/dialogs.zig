@@ -92,6 +92,10 @@ pub fn dialogFrost() ?widgets.FloatingWindowWidget.Frost {
     if (s.blur < 1) return null;
     return .{
         .radius = s.blur,
+        // What is behind a dialog seldom moves while it is open; re-reading and re-blurring it
+        // every frame cost a frame's worth of GPU work that grew with the dialog. The glass still
+        // takes every frame while it forms or its geometry moves (`BlurBackdrop.frostPane`).
+        .refresh_ms = 100,
         .tint = s.chromeColor(),
         .mix = std.math.clamp(s.opacity, 0, 1),
         .lift = std.math.clamp(s.lift, 0, 1) * lift_max,

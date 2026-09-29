@@ -208,7 +208,9 @@ pub fn reselected(self: *const Chooser) ?[]const u8 {
 pub fn deinit(self: *Chooser) void {
     const f = self.layout;
     self.strip.finalSlot(self.drawn.items.len);
+    const strip_id = self.strip.outer.data().id;
     self.strip.deinit();
+    self.offerDrop(strip_id);
 
     // Reordered along the chooser.
     if (self.info.removed_index) |removed| if (self.info.insert_before_index) |before| {
@@ -259,6 +261,27 @@ pub fn deinit(self: *Chooser) void {
             }
         }
     };
+}
+
+/// While a view is carried, the chooser is somewhere it can go: into this chooser's place, as one
+/// of its views — a rail beside a sidebar as much as a strip inside a panel. It says so to the drag
+/// (`ViewDrag.offerChooser`), which lands a release over it there; and under the pointer it shows
+/// as one pane of the drop zones' glass across it, where the places' own zones step back. Not for
+/// the place the view came out of: dropping it back is no move.
+fn offerDrop(self: *Chooser, key: dvui.Id) void {
+    const f = self.layout;
+    const d = f.state.view_drag;
+    const name = placeName(f, &self.place);
+    var lit: ?dvui.Rect.Physical = null;
+    if (d.active()) if (name) |n| if (!std.mem.eql(u8, n, d.name)) {
+        ViewDrag.offerChooser(f, n, self.bounds);
+        if (self.bounds.contains(dvui.currentWindow().mouse_pt)) lit = self.bounds;
+    };
+    core.widgets.DropZones.drawSingle(key.update("_chooser_drop"), lit, dvui.currentWindow().natural_scale, .{
+        .inset = 2,
+        .icon = .add,
+        .radius = core.corners.scaled(core.corners.small),
+    });
 }
 
 const Anchor = union(enum) { before: []const u8, after: []const u8 };

@@ -59,14 +59,15 @@ content_opacity: f32 = 0.7,
 /// How much a modal dialog or the palette dims everything behind it, 0 (none) to 1.
 modal_dim: f32 = 0.0,
 
-/// How opaque a dialog's or the palette's own fill is over its frosted backdrop, 0 to 1.
-dialog_opacity: f32 = 0.5,
+/// How opaque a dialog's or the palette's own fill is over its frosted backdrop, 0 to 1. Low by
+/// default: the glass is mostly what is behind it.
+dialog_opacity: f32 = 0.1,
 
 /// Blur radius of the frosted backdrop under dialogs and the palette; 0 turns it off.
 dialog_blur: f32 = 30,
 
 /// How much lighter a dialog or the palette is than what is behind it, 0 to 1.
-dialog_lift: f32 = 0.3,
+dialog_lift: f32 = 0.05,
 
 /// How much of what is behind a dialog or the palette stays readable through its blur, 0 to 1.
 dialog_detail: f32 = 0.1,
@@ -74,7 +75,7 @@ dialog_detail: f32 = 0.1,
 /// How round the app's corners are, 0 (square) to 1 (twice as round); 0.5 is as designed.
 /// Published each frame through `core.corners`, which every radius scales by, and applied to the
 /// theme's own corner.
-corner_roundness: f32 = core.corners.default_roundness,
+corner_roundness: f32 = if (builtin.os.tag == .macos) 1.0 else core.corners.default_roundness,
 
 /// How far the bevelled edge of frosted glass — dialogs, menus, the palette, drop zones —
 /// refracts what is behind it, 0 (none) to 1; 0.5 is as designed.

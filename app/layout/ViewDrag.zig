@@ -51,6 +51,22 @@ moved_id: []const u8 = "",
 /// The places this drag can land on, and where they were, frozen at lift.
 targets: [max_targets]Target = undefined,
 target_count: usize = 0,
+/// Choosers a view can be dropped into — a rail, a tab strip — as they offered themselves while
+/// drawing (`offerChooser`): this frame's, and last frame's for a release handled before this
+/// frame's choosers have drawn.
+offers: [max_offers]Offer = undefined,
+offer_count: usize = 0,
+last_offers: [max_offers]Offer = undefined,
+last_offer_count: usize = 0,
+offer_frame: i128 = 0,
+
+/// A chooser that will take the dragged view into its place.
+pub const Offer = struct {
+    /// Interned place name.
+    name: []const u8,
+    bounds: dvui.Rect.Physical,
+};
+pub const max_offers = 16;
 
 /// One place the pointer can be read against.
 pub const Target = struct {
@@ -79,6 +95,36 @@ pub const loose_source = "\x00picker";
 /// A drag with no source place: the view came from the picker.
 pub fn loose(self: ViewDrag) bool {
     return std.mem.eql(u8, self.name, loose_source);
+}
+
+/// A chooser, drawing during a drag, offering itself as somewhere the view can go: into place
+/// `name`, as one of its views. Its place may sit elsewhere — a rail beside a sidebar — or the
+/// chooser inside it; either way over the chooser the drop is into the place, not a split of it.
+pub fn offerChooser(l: *Layout, name: []const u8, bounds: dvui.Rect.Physical) void {
+    const d = &l.state.view_drag;
+    if (!d.active()) return;
+    const now = dvui.currentWindow().frame_time_ns;
+    if (d.offer_frame != now) {
+        d.last_offers = d.offers;
+        d.last_offer_count = d.offer_count;
+        d.offer_count = 0;
+        d.offer_frame = now;
+    }
+    if (d.offer_count == max_offers) return;
+    d.offers[d.offer_count] = .{ .name = l.state.internName(l.gpa, name), .bounds = bounds };
+    d.offer_count += 1;
+}
+
+/// The chooser under `p`, if one offered itself this frame or the last.
+pub fn chooserAt(state: *const Layout.State, p: dvui.Point.Physical) ?Offer {
+    const d = &state.view_drag;
+    if (!d.active()) return null;
+    const now = dvui.currentWindow().frame_time_ns;
+    if (d.offer_frame == now) {
+        for (d.offers[0..d.offer_count]) |o| if (o.bounds.contains(p)) return o;
+    }
+    for (d.last_offers[0..d.last_offer_count]) |o| if (o.bounds.contains(p)) return o;
+    return null;
 }
 
 pub fn discard(self: *ViewDrag) void {
@@ -208,6 +254,8 @@ fn kindAt(state: *const Layout.State, dest: []const u8, mouse: dvui.Point.Physic
 /// pane beats the main area it sits in.
 pub fn targetAt(l: *Layout, mouse: dvui.Point.Physical, source: []const u8) ?[]const u8 {
     const state = l.state;
+    // Over a chooser, its place — as one of its views, never a split.
+    if (chooserAt(state, mouse)) |o| return o.name;
     // The source's own edge is a self-split, and it outranks any pane nested
     // inside it — otherwise a document filling the place always wins on area
     // and its own edges become unreachable.
@@ -329,7 +377,10 @@ pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
     // leaves for another, whose come in over it — for as long as they are still showing, so a
     // place left mid-fade finishes going. Aimed at a join, they step back for the one pane across
     // both halves (`drawJoin`).
-    const aimed = aimedAt(l, name);
+    // Over a chooser the drop is into its place, shown by the chooser (`Chooser`); the places'
+    // own zones step back.
+    const over_chooser = chooserAt(l.state, dvui.currentWindow().mouse_pt) != null;
+    const aimed = aimedAt(l, name) and !over_chooser;
     const target = aimed and isTarget(l, name) and aimedJoin(l) == null;
     if (!target and !DropZones.showing(key)) return;
     const whole = placeBounds(l.state, name) orelse {
@@ -371,6 +422,8 @@ fn aimedJoin(l: *Layout) ?SplitTree.Forest.Pair {
     const d = l.state.view_drag;
     if (!d.active() or d.loose()) return null;
     const mouse = dvui.currentWindow().mouse_pt;
+    // Over a chooser the drop is into its place, which the chooser shows.
+    if (chooserAt(l.state, mouse) != null) return null;
     const dest = targetAt(l, mouse, d.name) orelse return null;
     if (!joins(l, d.name, dest)) return null;
     if (kindAt(l.state, dest, mouse, dvui.currentWindow().natural_scale) != .swap) return null;
@@ -491,6 +544,10 @@ fn floatTarget(from: dvui.Size.Physical, scale: f32) dvui.Size.Physical {
 /// Release at `mouse`. Does nothing unless the pointer is somewhere a drop
 /// means something, so letting go over the window frame cancels.
 pub fn apply(l: *Layout, source: []const u8, mouse: dvui.Point.Physical) void {
+    if (chooserAt(l.state, mouse)) |o| {
+        place(l, source, o.name, .swap);
+        return;
+    }
     const dest = targetAt(l, mouse, source) orelse return;
     if (placeBounds(l.state, dest) == null) return;
     const scale = dvui.currentWindow().natural_scale;

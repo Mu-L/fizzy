@@ -32,8 +32,8 @@ const dvui = @import("dvui");
 /// pane's own face, which is subtler, and folded back on itself into a mirror line when pushed;
 /// reaching out only ever compresses, so it never folds at any strength. The frost has to have
 /// what lies out there in it: a caller captures `margin` beyond the pane.
-pub const refraction: f32 = 16;
-pub const falloff: f32 = 7;
+pub const refraction: f32 = 22;
+pub const falloff: f32 = 6;
 pub const softness: f32 = 10;
 
 /// Physical pixels a caller should capture beyond a pane for it to refract, at `look`.
@@ -43,7 +43,7 @@ pub fn margin(look: Look, scale: f32) f32 {
 }
 /// How much of the unblurred picture the rim shows at its very edge, 0…1: glass is clearer
 /// where it is thin and steep, frosted across its face.
-pub const clarity: f32 = 0.55;
+pub const clarity: f32 = 0.75;
 
 
 /// A pane's corner radii in physical pixels, in the order its rings run: top-left, bottom-left,
@@ -115,7 +115,7 @@ pub fn bends(look: Look) bool {
 }
 
 /// How many rings a pane's curve is drawn with.
-const ring_count = 14;
+const ring_count = 10;
 
 /// Where the rings of a pane sit, in physical pixels from the rim: each one a step of the same
 /// size down the drop's steepness (`e^(-s/falloff)` from 1 toward 0), which puts them close at
@@ -155,7 +155,7 @@ const broad_glow: f32 = 0.04;
 const line_width: f32 = 0.8;
 
 /// Segments in a corner's arc: enough that a corner reads as a curve, not a polygon.
-const arc_steps = 6;
+const arc_steps = 5;
 
 /// Physical pixels: the edge fades from solid to clear across one pixel, half inside the outline
 /// and half outside — dvui's own anti-aliasing of a rounded fill (`Path.fillConvexTriangles`,
@@ -252,7 +252,12 @@ fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.P
     if (amount <= 0.01) return;
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();
-    const rings = insets.len;
+    // Only as far in as the clear glass shows: it fades with the steepness squared, so past about
+    // two falloffs there is nothing of it left to draw.
+    const reach_in = falloff * scale * 2.2;
+    var rings: usize = 0;
+    while (rings < insets.len and (rings < 2 or insets[rings - 1] <= reach_in)) rings += 1;
+    const used = insets[0..rings];
     var b = dvui.Triangles.Builder.init(arena, per_ring * (rings + 1), per_ring * 6 * rings) catch return;
     defer b.deinit(arena);
     const pts = arena.alloc(dvui.Point.Physical, per_ring) catch return;
@@ -260,7 +265,7 @@ fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.P
     const reach_px = refraction * scale * look.lens * look.refraction;
     ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
     for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, reach_px, tex_bounds) });
-    for (insets) |d| {
+    for (used) |d| {
         ringPoints(pts, null, r, radii, d, arc_steps, 1, 1);
         for (pts) |p| {
             const steep = fieldAt(p, r, scale).steep;
@@ -310,6 +315,8 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
     }
     for (curve) |d| {
         if (d <= insets_buf[n_insets - 1] + 0.25) continue;
+        // Past about two falloffs the broad glow is gone and the lift is flat: the fan does.
+        if (d > falloff * scale * 2) break;
         insets_buf[n_insets] = d;
         n_insets += 1;
     }

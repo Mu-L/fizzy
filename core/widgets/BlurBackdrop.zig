@@ -929,7 +929,9 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
     const nat = dvui.windowRectScale().rectFromPhysical(captured);
     // A witness that changes with the geometry and, coarsely, with time.
     const tick: i128 = if (pane.refresh_ms == 0) now else @divTrunc(now, @as(i128, pane.refresh_ms) * std.time.ns_per_ms);
-    backdrop.init(nat, .{ captured, tick });
+    // The blur's radius too, so a pane forming — its blur growing from sharp — reads again every
+    // frame it changes, whatever its refresh.
+    backdrop.init(nat, .{ captured, tick, @round(radius) });
 
     job.* = .{
         .backdrop = backdrop,

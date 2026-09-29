@@ -218,36 +218,54 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
 /// last place it covered. Draw after every place has drawn (it lies over their zones as they go),
 /// keyed by one `id` for the whole window.
 pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
-    const JoinState = struct { shown: f32 = 0, last_ns: i128 = 0, rect: dvui.Rect.Physical = .{} };
-    const st = dvui.dataGetPtr(null, id, "_drop_join", JoinState) orelse blk: {
+    drawSingle(id, rect, scale, .{ .inset = gap, .icon = .join });
+}
+
+/// How `drawSingle` lays its pane down.
+pub const Single = struct {
+    /// Points in from the rect the pane sits.
+    inset: f32 = 0,
+    /// What the pane's icon says; null for none (a slot too small for one).
+    icon: ?Center = null,
+    /// Points: the pane's corner radius; null for the app's surface rounding.
+    radius: ?f32 = null,
+};
+
+/// One lit pane of the zones' glass over `rect`, coming in as it appears and going when `rect`
+/// goes null — over the last rect it covered — keyed by `id`. The one target a thing offers when
+/// it is not a place with edges to split: the join across two places, a chooser a view can be
+/// dropped into, the slot a dragged item will land in along a chooser.
+pub fn drawSingle(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32, opts: Single) void {
+    const SingleState = struct { shown: f32 = 0, last_ns: i128 = 0, rect: dvui.Rect.Physical = .{} };
+    const st = dvui.dataGetPtr(null, id, "_drop_single", SingleState) orelse blk: {
         if (rect == null) return;
-        break :blk dvui.dataGetPtrDefault(null, id, "_drop_join", JoinState, .{});
+        break :blk dvui.dataGetPtrDefault(null, id, "_drop_single", SingleState, .{});
     };
     const now = dvui.currentWindow().frame_time_ns;
-    // Where the zones were is kept until they have gone (`forget`), however long between frames:
-    // a drag held still asks for none, and treating the gap as a new visit replayed the entrance
-    // on the next twitch of the pointer.
+    // Kept until it has gone, however long between frames — see `draw`.
     if (st.last_ns == 0) st.last_ns = now;
     const dt_ms: f32 = @as(f32, @floatFromInt(now - st.last_ns)) / std.time.ns_per_ms;
     st.last_ns = now;
-    if (rect) |rr| st.rect = inset(rr, gap * scale, gap * scale);
+    if (rect) |rr| st.rect = inset(rr, opts.inset * scale, opts.inset * scale);
     const want: f32 = if (rect != null) 1 else 0;
     st.shown = step(st.shown, want, dt_ms, motion.durationMs(if (want > st.shown) appear_ms else vanish_ms));
     const moving = st.shown != want;
     const g = frost(st.shown);
     if (g > 0.01 and st.rect.w >= 1 and st.rect.h >= 1) {
+        const k = 0.85 + 0.15 * grow(st.shown);
+        const radius = if (opts.radius) |r| r * scale else surfaceRadius(scale);
         const pane: Pane = .{
-            .r = scaleAbout(st.rect, 0.85 + 0.15 * grow(st.shown), 0.85 + 0.15 * grow(st.shown)),
+            .r = scaleAbout(st.rect, k, k),
             .lit = 1,
-            .radii = liquid_glass.uniform(surfaceRadius(scale)),
+            .radii = liquid_glass.uniform(radius),
         };
         glass(id, &.{pane}, st.rect, g, scale);
-        drawIcon(pane.r, .{ .name = "drop_zone_join", .tvg = icons.tvg.lucide.@"squares-unite" }, g, 1, scale);
+        if (opts.icon) |icon| drawIcon(pane.r, iconFor(.center, icon), g, 1, scale);
     }
     if (moving) {
         dvui.refresh(null, @src(), id);
     } else if (rect == null) {
-        dvui.dataRemove(null, id, "_drop_join");
+        dvui.dataRemove(null, id, "_drop_single");
     }
 }
 

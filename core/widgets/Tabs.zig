@@ -26,6 +26,8 @@
 //! ```
 const std = @import("std");
 const dvui = @import("dvui");
+const DropZones = @import("DropZones.zig");
+const corners = @import("../corners.zig");
 
 const Tabs = @This();
 
@@ -66,6 +68,8 @@ outer: *dvui.BoxWidget,
 scroll_area: ?*dvui.ScrollAreaWidget,
 reorder: *dvui.ReorderWidget,
 inner: *dvui.BoxWidget,
+/// Where a dragged item would land this frame, for the slot's glass (`deinit`).
+slot: ?dvui.RectScale = null,
 
 pub fn init(src: std.builtin.SourceLocation, info: *TabInfo, opts: Options) Tabs {
     const vertical = opts.dir == .vertical;
@@ -212,7 +216,8 @@ pub const Tab = struct {
 };
 
 pub fn tab(self: *Tabs, src: std.builtin.SourceLocation, index: usize, selected: bool) Tab {
-    const reorderable = self.reorder.reorderable(src, .{}, .{
+    // dvui's own slot is a square of the focus colour; the strip draws its own (`deinit`).
+    const reorderable = self.reorder.reorderable(src, .{ .draw_target = false }, .{
         .expand = if (self.opts.dir == .vertical) .horizontal else .vertical,
         .id_extra = index,
         .padding = dvui.Rect.all(0),
@@ -220,6 +225,7 @@ pub fn tab(self: *Tabs, src: std.builtin.SourceLocation, index: usize, selected:
         .border = .all(0),
     });
 
+    if (reorderable.targetRectScale()) |rs| self.slot = rs;
     const floating = reorderable.floating();
     if (floating) self.info.drag_index = index;
     if (reorderable.removed()) {
@@ -235,6 +241,7 @@ pub fn tab(self: *Tabs, src: std.builtin.SourceLocation, index: usize, selected:
         .border = dvui.Rect.all(0),
         .background = floating,
         .color_fill = .{ .color = if (floating) dvui.themeGet().color(.control, .fill) else .transparent },
+        .corners = corners.all(corners.small),
         .id_extra = index,
         .padding = .{ .x = 2, .y = 2, .w = 2, .h = 2 },
         .margin = dvui.Rect.all(0),
@@ -250,12 +257,23 @@ pub fn tab(self: *Tabs, src: std.builtin.SourceLocation, index: usize, selected:
 /// The trailing drop slot, so a tab can be dragged past the last one. `count` is the number of
 /// tabs drawn, which is the index a drop past the end inserts at.
 pub fn finalSlot(self: *Tabs, count: usize) void {
-    if (self.reorder.finalSlot()) {
-        self.info.insert_before_index = count;
-    }
+    // `ReorderWidget.finalSlot`, with its target drawn by the strip rather than as dvui's square.
+    if (!self.reorder.needFinalSlot()) return;
+    var r = self.reorder.reorderable(@src(), .{ .last_slot = true, .draw_target = false }, .{});
+    defer r.deinit();
+    if (r.targetRectScale()) |rs| self.slot = rs;
+    if (r.insertBefore()) self.info.insert_before_index = count;
 }
 
 pub fn deinit(self: *Tabs) void {
+    // The slot a dragged item will land in: a pane of the drop zones' glass, rounded, moving
+    // with it along the strip and going when the drag does — the same target every drop shows.
+    const slot_key = self.outer.data().id.update("_tabs_slot");
+    const scale = if (self.slot) |rs| rs.s else dvui.currentWindow().natural_scale;
+    DropZones.drawSingle(slot_key, if (self.slot) |rs| rs.r else null, scale, .{
+        .inset = 1,
+        .radius = corners.scaled(corners.small),
+    });
     self.inner.deinit();
     self.reorder.deinit();
     if (self.scroll_area) |sa| {
