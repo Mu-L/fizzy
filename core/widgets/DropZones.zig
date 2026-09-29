@@ -25,6 +25,9 @@ const widgets = @import("../widgets.zig");
 const BlurBackdrop = @import("BlurBackdrop.zig");
 const icons = @import("icons");
 const icon_tex = @import("../gfx/icon.zig");
+const motion = @import("../motion.zig");
+const liquid_glass = @import("../gfx/liquid_glass.zig");
+const Wave = liquid_glass.Wave;
 
 pub const Side = enum { left, right, top, bottom };
 
@@ -179,7 +182,7 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
 
     const want_shown: f32 = if (look.target) 1 else 0;
     if (st.shown == 0 and want_shown > 0) st.born_ns = now;
-    st.shown = step(st.shown, want_shown, dt_ms, if (want_shown > st.shown) appear_ms else vanish_ms);
+    st.shown = step(st.shown, want_shown, dt_ms, motion.durationMs(if (want_shown > st.shown) appear_ms else vanish_ms));
     var moving = st.shown != want_shown;
     const mouse = dvui.currentWindow().mouse_pt;
     for (all, 0..) |z, i| {
@@ -189,11 +192,12 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
             st.pulse_ns[i] = now;
             st.pulse_at[i] = mouse;
         }
-        st.lit[i] = approach(st.lit[i], want_lit, dt_ms, light_ms);
+        st.lit[i] = approach(st.lit[i], want_lit, dt_ms, motion.durationMs(light_ms));
         if (st.lit[i] != want_lit) moving = true;
     }
 
     const g = frost(st.shown);
+    const ripple = motion.playful();
     if (g > 0.01) {
         const e = grow(st.shown);
         var panes: [all.len]Pane = undefined;
@@ -203,8 +207,8 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
                 .r = entering(full, z, e),
                 .lit = st.lit[i],
                 .waves = .{
-                    .{ .origin = arrivalOrigin(full, z), .start_ns = st.born_ns },
-                    .{ .origin = st.pulse_at[i], .start_ns = st.pulse_ns[i] },
+                    .{ .origin = arrivalOrigin(full, z), .start_ns = st.born_ns, .amount = ripple },
+                    .{ .origin = st.pulse_at[i], .start_ns = st.pulse_ns[i], .amount = ripple },
                 },
             };
             if (panes[i].waves[0].live(now) or panes[i].waves[1].live(now)) moving = true;
@@ -241,14 +245,14 @@ pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
     if (rect) |rr| st.rect = inset(rr, gap * scale, gap * scale);
     const want: f32 = if (rect != null) 1 else 0;
     if (st.shown == 0 and want > 0) st.born_ns = now;
-    st.shown = step(st.shown, want, dt_ms, if (want > st.shown) appear_ms else vanish_ms);
+    st.shown = step(st.shown, want, dt_ms, motion.durationMs(if (want > st.shown) appear_ms else vanish_ms));
     var moving = st.shown != want;
     const g = frost(st.shown);
     if (g > 0.01 and st.rect.w >= 1 and st.rect.h >= 1) {
         const pane: Pane = .{
             .r = entering(st.rect, .center, 0.85 + 0.15 * grow(st.shown)),
             .lit = 1,
-            .waves = .{ .{ .origin = st.rect.center(), .start_ns = st.born_ns }, .{} },
+            .waves = .{ .{ .origin = st.rect.center(), .start_ns = st.born_ns, .amount = motion.playful() }, .{} },
         };
         if (pane.waves[0].live(now)) moving = true;
         glass(id, &.{pane}, g, scale);
@@ -263,22 +267,17 @@ pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
 
 // ── Coming and going ────────────────────────────────────────────────────────────────────────────
 
-/// How big a zone is at progress `t`: out-back, so it overshoots a little and settles — the
-/// bounce. Read backwards on the way out, the same curve swells a touch and then goes.
-pub fn grow(t: f32) f32 {
-    const u = std.math.clamp(t, 0, 1);
-    const c1: f32 = 1.70158;
-    const c3 = c1 + 1;
-    const v = u - 1;
-    return @max(0, 1 + c3 * v * v * v + c1 * v * v);
+/// How big a zone is at progress `t`: arriving, at the app's motion level (`motion.enter`) — a
+/// clean overshoot at minimal, a jiggle at playful, plain at the low end. Read backwards on the
+/// way out, the same curve swells a touch and then goes.
+fn grow(t: f32) f32 {
+    return @max(0, motion.enter(t));
 }
 
-/// How much frost a zone has at progress `t`: ahead of its size, so the glass is glass before
-/// it has finished arriving.
+/// How much frost a zone has at progress `t`: ahead of its size, so the glass is glass before it
+/// has finished arriving.
 fn frost(t: f32) f32 {
-    const u = std.math.clamp(t, 0, 1);
-    const v = 1 - u;
-    return 1 - v * v * v;
+    return motion.fade(t);
 }
 
 /// A zone at size `e`: an edge band grown out of its own edge — its outer side fixed, its depth
@@ -324,53 +323,7 @@ const Pane = struct {
     waves: [2]Wave = .{ .{}, .{} },
 };
 
-/// A ripple through the glass: a ring running out from `origin`, a couple of crests deep, dying
-/// away. Like the sprite shelf's water it moves what the glass shows, not the glass: a crest bends
-/// the blur under it outward along the ring, so the frost wobbles as the wave goes by.
-const Wave = struct {
-    origin: dvui.Point.Physical = .{},
-    /// Zero: no wave.
-    start_ns: i128 = 0,
 
-    /// Points: the distance between crests, and how far the glass bends at the first.
-    const wavelength: f32 = 34;
-    const depth: f32 = 5;
-    /// Points per millisecond the ring runs out at, and how quickly it dies away.
-    const speed: f32 = 0.85;
-    const decay_ms: f32 = 240;
-    const life_ms: f32 = 900;
-
-    fn age(self: Wave, now: i128) f32 {
-        return @as(f32, @floatFromInt(now - self.start_ns)) / std.time.ns_per_ms;
-    }
-
-    fn live(self: Wave, now: i128) bool {
-        if (self.start_ns == 0) return false;
-        const t = self.age(now);
-        return t >= 0 and t < life_ms;
-    }
-
-    /// How far, in physical pixels and along the ring, the glass at `p` is bent right now.
-    fn bend(self: Wave, p: dvui.Point.Physical, now: i128, scale: f32) dvui.Point.Physical {
-        if (!self.live(now)) return .{};
-        const t = self.age(now);
-        const dx = p.x - self.origin.x;
-        const dy = p.y - self.origin.y;
-        const d = @sqrt(dx * dx + dy * dy);
-        if (d < 0.5) return .{};
-        const lambda = wavelength * scale;
-        const behind = speed * scale * t - d;
-        if (behind < 0) return .{};
-        const crest = @sin(behind / lambda * std.math.tau) * @exp(-behind / lambda);
-        const a = depth * scale * @exp(-t / decay_ms) * crest;
-        return .{ .x = dx / d * a, .y = dy / d * a };
-    }
-};
-
-/// Points: how wide the lens band at a pane's rim is, and how far in it reaches for what it shows
-/// at the very edge — the pane magnifies what is under its border, the way a thick glass edge does.
-const lens_band: f32 = 16;
-const lens_reach: f32 = 9;
 
 /// The frost under `panes` at strength `g`: one read of the frame and one blur for all of them,
 /// laid down as a bent mesh each, tinted and lifted like the dialogs' glass, the lit ones
@@ -398,6 +351,7 @@ fn glass(id: dvui.Id, panes: []const Pane, g: f32, scale: f32) void {
         .scale = scale,
         .now = dvui.currentWindow().frame_time_ns,
         .strength = g,
+        .lens = motion.liquid(),
     };
     for (panes) |pane| {
         if (pane.r.w < 1 or pane.r.h < 1) continue;
@@ -445,6 +399,8 @@ const LayerJob = struct {
     scale: f32 = 1,
     now: i128 = 0,
     strength: f32 = 1,
+    /// 0…1: the rim's lens and its light (`motion.liquid`).
+    lens: f32 = 1,
     panes: [all.len]Pane = undefined,
     count: usize = 0,
 
@@ -458,179 +414,19 @@ const LayerJob = struct {
         // As `frostPane` composes it: the frost at `1 - mix` of itself, then the tint and the
         // lift added over it.
         const frost_mod: dvui.Color = if (self.pane.tint != null) dvui.Color.white.opacity(1 - mix) else .white;
-        for (self.panes[0..self.count]) |pane| {
-            self.drawMesh(tex, pane, frost_mod);
+        for (self.panes[0..self.count]) |*pane| {
+            liquid_glass.drawPane(tex, self.bounds, pane.r, self.radius, self.scale, frost_mod, .{
+                .lens = self.lens,
+                .waves = &pane.waves,
+                .now = self.now,
+            });
             if (self.pane.tint) |tint| BlurBackdrop.addTint(pane.r, self.corners, self.scale, tint, mix);
             const lift = std.math.clamp(self.pane.lift + lit_lift * pane.lit * self.strength, 0, 1);
             BlurBackdrop.addTint(pane.r, self.corners, self.scale, .white, lift);
-            self.drawRim(pane);
+            liquid_glass.drawRim(pane.r, self.corners, self.scale, self.strength * (0.10 + 0.14 * pane.lit) * self.lens);
         }
-    }
-
-    /// The pane as rings of vertices from its rim in to its centre, each sampling the blur a
-    /// little off where it sits: the lens band near the rim, and whatever ripple is passing.
-    fn drawMesh(self: *const LayerJob, tex: dvui.Texture, pane: Pane, mod: dvui.Color) void {
-        const r = pane.r;
-        const half = @min(r.w, r.h) / 2;
-        if (half < 1) return;
-        const s = self.scale;
-        // Insets of each ring from the rim, in physical pixels: close together through the lens
-        // band, then spread out to the middle so a ripple has vertices to move.
-        var insets_buf: [16]f32 = undefined;
-        var rings: usize = 0;
-        for ([_]f32{ 0, 1.5, 4, 8, 13 }) |d| {
-            const px = d * s;
-            if (px < half * 0.95) {
-                insets_buf[rings] = px;
-                rings += 1;
-            }
-        }
-        for ([_]f32{ 0.25, 0.45, 0.65, 0.82, 0.95 }) |f| {
-            const px = half * f;
-            if (px > insets_buf[rings - 1] + 2 * s) {
-                insets_buf[rings] = px;
-                rings += 1;
-            }
-        }
-        const insets = insets_buf[0..rings];
-
-        // One ring's worth of points: each corner an arc, each straight side cut into steps so
-        // a ripple along it has somewhere to show.
-        const arc_steps = 6;
-        const step_px = 22 * s;
-        const side_x: usize = @intFromFloat(@max(1, @ceil(@max(0, r.w - 2 * self.radius) / step_px)));
-        const side_y: usize = @intFromFloat(@max(1, @ceil(@max(0, r.h - 2 * self.radius) / step_px)));
-        const per_ring = 4 * (arc_steps + 1) + 2 * (side_x - 1) + 2 * (side_y - 1);
-
-        const arena = dvui.currentWindow().arena();
-        // Rings, the anti-aliasing fringe outside the rim, and the centre.
-        const vtx_count = per_ring * (rings + 1) + 1;
-        const idx_count = per_ring * 6 * rings + per_ring * 3;
-        var b = dvui.Triangles.Builder.init(arena, vtx_count, idx_count) catch return;
-        defer b.deinit(arena);
-
-        const col = dvui.Color.PMA.fromColor(mod);
-        const clear = dvui.Color.PMA.fromColor(.transparent);
-        const ring_pts = arena.alloc(dvui.Point.Physical, per_ring) catch return;
-
-        // The fringe: the rim pushed out half a pixel, clear, so the edge is smooth.
-        ringPoints(ring_pts, r, self.radius, -0.5 * s, arc_steps, side_x, side_y);
-        for (ring_pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = self.uvAt(p, 0, pane) });
-        for (insets) |d| {
-            ringPoints(ring_pts, r, self.radius, d, arc_steps, side_x, side_y);
-            for (ring_pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = self.uvAt(p, d, pane) });
-        }
-        const c = r.center();
-        b.appendVertex(.{ .pos = c, .col = col, .uv = self.uvAt(c, half, pane) });
-
-        // Quads between neighbouring rings, the fringe included, then a fan to the centre, all
-        // wound the way dvui winds a path's fill.
-        const n: u32 = @intCast(per_ring);
-        var k: u32 = 0;
-        while (k < rings) : (k += 1) {
-            const outer = k * n;
-            const inner = (k + 1) * n;
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                const j = (i + 1) % n;
-                b.appendTriangles(&.{
-                    @intCast(outer + i), @intCast(outer + j), @intCast(inner + i),
-                    @intCast(outer + j), @intCast(inner + j), @intCast(inner + i),
-                });
-            }
-        }
-        const last = rings * n;
-        const center_idx: u32 = @intCast(vtx_count - 1);
-        var i: u32 = 0;
-        while (i < n) : (i += 1) {
-            b.appendTriangles(&.{ @intCast(center_idx), @intCast(last + i), @intCast(last + (i + 1) % n) });
-        }
-        const tris = b.build_unowned();
-        dvui.renderTriangles(tris, tex) catch {};
-    }
-
-    /// Where in the blur the glass at `p` shows: the point itself, reached in toward the middle
-    /// through the lens band (`inset_px` from the rim), and moved by any ripple going by.
-    fn uvAt(self: *const LayerJob, p: dvui.Point.Physical, inset_px: f32, pane: Pane) @Vector(2, f32) {
-        const s = self.scale;
-        var q = p;
-        const band_px = lens_band * s;
-        if (inset_px < band_px) {
-            const k = 1 - inset_px / band_px;
-            const reach = lens_reach * s * k * k;
-            const c = pane.r.center();
-            const dx = c.x - p.x;
-            const dy = c.y - p.y;
-            const d = @sqrt(dx * dx + dy * dy);
-            if (d > 0.5) {
-                q.x += dx / d * reach;
-                q.y += dy / d * reach;
-            }
-        }
-        for (pane.waves) |w| {
-            const off = w.bend(p, self.now, s);
-            q.x -= off.x;
-            q.y -= off.y;
-        }
-        const bd = self.bounds;
-        return .{
-            std.math.clamp((q.x - bd.x) / bd.w, 0, 1),
-            std.math.clamp((q.y - bd.y) / bd.h, 0, 1),
-        };
-    }
-
-    /// A hairline of light around the pane's edge, brighter lit — where a thick glass catches it.
-    fn drawRim(self: *const LayerJob, pane: Pane) void {
-        const s = self.scale;
-        const a = self.strength * (0.10 + 0.14 * pane.lit);
-        if (a <= 0.01) return;
-        var path: dvui.Path.Builder = .init(dvui.currentWindow().arena());
-        defer path.deinit();
-        path.addRect(pane.r.insetAll(0.5 * s), self.corners.scale(s, dvui.CornerRect.Physical));
-        path.build().stroke(.{ .color = .{ .color = dvui.Color.white.opacity(a) }, .thickness = @max(1, s), .closed = true });
     }
 };
-
-/// The points of one ring: `r`'s rounded outline pushed in by `d` (out, when negative), from the
-/// top-left corner down the left side, along the bottom, up the right and back along the top —
-/// the order dvui's own paths run (`Path.Builder.addRect`).
-pub fn ringPoints(out: []dvui.Point.Physical, r: dvui.Rect.Physical, radius: f32, d: f32, comptime arc_steps: usize, side_x: usize, side_y: usize) void {
-    const x0 = r.x + d;
-    const y0 = r.y + d;
-    const x1 = r.x + r.w - d;
-    const y1 = r.y + r.h - d;
-    const rad = std.math.clamp(radius - d, 0.01, @max(0.01, @min(x1 - x0, y1 - y0) / 2));
-    const pi = std.math.pi;
-    var n: usize = 0;
-    const Corner = struct { cx: f32, cy: f32, a0: f32, a1: f32 };
-    const corners = [_]Corner{
-        .{ .cx = x0 + rad, .cy = y0 + rad, .a0 = 1.5 * pi, .a1 = pi },
-        .{ .cx = x0 + rad, .cy = y1 - rad, .a0 = pi, .a1 = 0.5 * pi },
-        .{ .cx = x1 - rad, .cy = y1 - rad, .a0 = 0.5 * pi, .a1 = 0 },
-        .{ .cx = x1 - rad, .cy = y0 + rad, .a0 = 2 * pi, .a1 = 1.5 * pi },
-    };
-    for (corners, 0..) |c, ci| {
-        var k: usize = 0;
-        while (k <= arc_steps) : (k += 1) {
-            const t = @as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(arc_steps));
-            const a = c.a0 + (c.a1 - c.a0) * t;
-            out[n] = .{ .x = c.cx + rad * @cos(a), .y = c.cy + rad * @sin(a) };
-            n += 1;
-        }
-        // The straight run to the next corner, cut into steps.
-        const next = corners[(ci + 1) % corners.len];
-        const from = out[n - 1];
-        const to: dvui.Point.Physical = .{ .x = next.cx + rad * @cos(next.a0), .y = next.cy + rad * @sin(next.a0) };
-        const steps = if (ci % 2 == 0) side_y else side_x;
-        var k2: usize = 1;
-        while (k2 < steps) : (k2 += 1) {
-            const t = @as(f32, @floatFromInt(k2)) / @as(f32, @floatFromInt(steps));
-            out[n] = .{ .x = from.x + (to.x - from.x) * t, .y = from.y + (to.y - from.y) * t };
-            n += 1;
-        }
-    }
-    std.debug.assert(n == out.len);
-}
 
 /// A zone's icon, over its glass (queued after it, so drawn after it). Faint until lit, and in
 /// only once the glass is mostly there; blended toward the glass rather than made translucent,
@@ -670,8 +466,9 @@ fn iconFor(z: Zone, center: Center) Glyph {
     };
 }
 
-/// `v` moved toward `target` at a constant rate: all the way in `dur_ms`.
+/// `v` moved toward `target` at a constant rate: all the way in `dur_ms`, at once in none.
 fn step(v: f32, target: f32, dt_ms: f32, dur_ms: f32) f32 {
+    if (dur_ms <= 0) return target;
     if (dt_ms <= 0) return v;
     const d = dt_ms / dur_ms;
     return if (target > v) @min(target, v + d) else @max(target, v - d);
@@ -690,6 +487,7 @@ pub fn forget(id: dvui.Id) void {
 
 /// `v` eased toward `target` over `dt_ms`, with time constant `tau_ms`.
 fn approach(v: f32, target: f32, dt_ms: f32, tau_ms: f32) f32 {
+    if (tau_ms <= 0) return target;
     if (dt_ms <= 0) return v;
     const k = 1 - @exp(-dt_ms / tau_ms);
     const next = v + (target - v) * k;

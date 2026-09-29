@@ -1195,6 +1195,37 @@ that suits a disk is a spent API quota on a cloud mount.
 through `core.vfs.Mem` in a few dozen lines. The design and its remaining edges are in
 `docs/CLOUD_FS_PLAN.md`.
 
+### 3.13 Motion — `core.motion`
+
+The user picks how the app moves with one setting, **Motion**, from 0 to 1: 0 is off (nothing
+animates), low values are plain even motion, 0.5 — *minimal*, the default — overshoots a touch
+and settles and gives frosted glass a lens at its edges, and 1 — *playful* — springs, jiggles and
+ripples. A system request for reduced motion turns it off. The host publishes the level into the
+shared dvui window each frame, so a plugin's copy of `core` reads the same value, and sets dvui's
+own `reduce_motion` in the plugin's image too.
+
+A plugin that wants to move like the app asks `core.motion` by *intent* rather than naming a curve:
+
+```zig
+const motion = core.motion;
+dvui.animation(id, "open", .{ .start_val = 0, .end_val = 1, .end_time = motion.duration(300_000), .easing = motion.enter });
+```
+
+| Ask | For |
+|---|---|
+| `motion.enter` | something arriving — opening, appearing, growing into place |
+| `motion.exit` | something leaving — `enter` run backwards |
+| `motion.settle` | something moving to a new place or size — slides, resizes, reorders |
+| `motion.fade` | opacity; never overshoots |
+| `motion.duration(us)` / `durationMs(ms)` | a duration at this level: zero when off |
+| `motion.off()` | jump straight to the end — for motion stepped by hand |
+| `motion.playful()` | 0…1: how much ripple, jiggle, anything there to delight |
+| `motion.liquid()` | 0…1: how much frosted glass bends (`core.liquid_glass`) |
+
+The curves are plain `fn (f32) f32`, so they go wherever a `dvui.easing` function went. Frosted
+panes drawn through `BlurBackdrop.frostPane` (dialogs, menus, popovers) and the drop zones already
+follow the setting.
+
 ## 4. Two plugins working together (`pixi` + `workbench`)
 
 **The crucial property: they do not import each other.** They collaborate entirely through the

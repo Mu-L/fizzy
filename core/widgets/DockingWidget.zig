@@ -18,6 +18,7 @@
 //! node indices (and thus `split_ratio` pointers) valid for the whole frame.
 const std = @import("std");
 const dvui = @import("dvui");
+const motion = @import("../motion.zig");
 const icon_tex = @import("../gfx/icon.zig");
 
 const Options = dvui.Options;
@@ -535,13 +536,13 @@ fn leaveSplit(self: *Dockspace, frame: *StackFrame) void {
 /// eases out with no overshoot: a shrink that went past its mark would briefly hide what it is
 /// shrinking to show.
 fn slideEasing(sp: Layout.Node.Split, from: f32, to: f32) *const fn (f32) f32 {
-    const fit = sp.fit orelse return dvui.easing.outCubic;
-    if (sp.closing != null) return dvui.easing.outCubic;
+    const fit = sp.fit orelse return motion.settle;
+    if (sp.closing != null) return motion.settle;
     const growing = switch (fit.child) {
         .first => to > from,
         .second => to < from,
     };
-    return if (growing) dvui.easing.outBack else dvui.easing.outCubic;
+    return if (growing) motion.enter else motion.settle;
 }
 
 /// The split has shut over `going`: collapse it. State is keyed by identity, so the kept child's

@@ -168,7 +168,7 @@ pub fn draw(self: *Workspace) !dvui.App.Result {
 fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surface, selected: ?*sdk.Surface) void {
     defer self.processTabsDrag(region, tabs);
 
-    var tabs_anim = dvui.animate(@src(), .{ .duration = 500_000, .kind = .vertical, .easing = dvui.easing.outBack }, .{});
+    var tabs_anim = dvui.animate(@src(), .{ .duration = 500_000, .kind = .vertical, .easing = core.motion.enter }, .{});
     defer tabs_anim.deinit();
 
     var tabs_box = dvui.box(@src(), .{ .dir = .horizontal }, .{

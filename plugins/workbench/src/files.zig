@@ -865,7 +865,7 @@ pub fn recurseFiles(root_directory: []const u8, root_label: []const u8, outer_tr
                 const branch = tree.branch(@src(), .{
                     .expanded = expanded,
                     .animation_duration = 450_000,
-                    .animation_easing = dvui.easing.outBack,
+                    .animation_easing = core.motion.enter,
                     .process_events = !editing,
                     .can_accept_children = entry.kind == .directory,
                     // Everything else in the tree can move; the folder they all live in can't.

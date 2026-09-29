@@ -1,5 +1,6 @@
 const std = @import("std");
 const dvui = @import("dvui");
+const motion = @import("../motion.zig");
 
 /// True when a primary-button release in `r` used shift/ctrl/cmd (selection modifiers).
 fn pointerReleaseInRectHasSelectionModifier(r: dvui.Rect.Physical) bool {
@@ -349,7 +350,7 @@ pub const Branch = struct {
         // If animation duration is greater than 0, the expander will animate accordingly
         animation_duration: i32 = 100_000,
 
-        animation_easing: *const dvui.easing.EasingFn = dvui.easing.outQuad,
+        animation_easing: *const dvui.easing.EasingFn = motion.settle,
 
         process_events: bool = true,
     };
@@ -683,7 +684,7 @@ pub const Branch = struct {
 
         if (clicked or self.init_options.expanded != self.expanded) {
             if (self.expanded) {
-                self.anim.?.init_opts.easing = dvui.easing.outQuad;
+                self.anim.?.init_opts.easing = motion.settle;
                 self.anim.?.init_opts.duration = @divTrunc(self.init_options.animation_duration, 2);
                 self.anim.?.startEnd();
             } else {

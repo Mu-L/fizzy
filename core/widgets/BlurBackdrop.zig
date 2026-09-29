@@ -30,6 +30,8 @@
 
 const std = @import("std");
 const dvui = @import("dvui");
+const motion = @import("../motion.zig");
+const liquid_glass = @import("../gfx/liquid_glass.zig");
 
 const Rect = dvui.Rect;
 const Size = dvui.Size;
@@ -896,6 +898,13 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
     const tick: i128 = if (pane.refresh_ms == 0) dvui.currentWindow().frame_time_ns else @divTrunc(dvui.currentWindow().frame_time_ns, @as(i128, pane.refresh_ms) * std.time.ns_per_ms);
     backdrop.init(nat, .{ rect, tick });
 
+    // When the pane first came up: a playful pane settles like a drop of water as it opens.
+    // Per id, so it lives exactly as long as the pane is drawn and a reopened one ripples anew.
+    const now = dvui.currentWindow().frame_time_ns;
+    const born = dvui.dataGetPtrDefault(null, id, "_frost_born", i128, now);
+    const wave: liquid_glass.Wave = .{ .origin = rect.center(), .start_ns = born.*, .amount = motion.playful() };
+    if (wave.live(now)) dvui.refresh(null, @src(), id);
+
     job.* = .{
         .backdrop = backdrop,
         .corners = corners,
@@ -904,6 +913,9 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
         .tint = pane.tint,
         .mix = std.math.clamp(pane.mix, 0, 1),
         .lift = std.math.clamp(pane.lift, 0, 1),
+        .lens = motion.liquid(),
+        .wave = wave,
+        .now = now,
     };
     dvui.deferRender(job, FrostJob.draw);
 }
@@ -918,6 +930,11 @@ const FrostJob = struct {
     tint: ?dvui.Color = null,
     mix: f32 = 0,
     lift: f32 = 0,
+    /// 0…1: how much the glass bends at its rim, and lights it (`motion.liquid`).
+    lens: f32 = 0,
+    /// The ripple it opened with (`motion.playful`).
+    wave: liquid_glass.Wave = .{},
+    now: i128 = 0,
 
     fn draw(ctx: ?*anyopaque) void {
         const self: *FrostJob = @ptrCast(@alignCast(ctx orelse return));
@@ -925,13 +942,33 @@ const FrostJob = struct {
         defer prof.end();
         // The capture, now that everything below this pane is on the target.
         self.backdrop.deinit();
-        const tint = self.tint orelse {
-            self.backdrop.drawRounded(self.corners, self.scale);
+        const weight: f32 = if (self.tint != null) 1 - self.mix else 1;
+        self.drawFrost(weight);
+        if (self.tint) |tint| {
+            addTint(self.rect, self.corners, self.scale, tint, self.mix);
+            addTint(self.rect, self.corners, self.scale, .white, self.lift);
+        }
+        liquid_glass.drawRim(self.rect, self.finalCorners(), self.scale, 0.10 * self.lens);
+    }
+
+    /// The frost at `weight` of itself: bent like glass when the motion level asks for it (a
+    /// lens at the rim, the ripple it opened with), a flat rect when nothing bends.
+    fn drawFrost(self: *const FrostJob, weight: f32) void {
+        const waves = [_]liquid_glass.Wave{self.wave};
+        const look: liquid_glass.Look = .{ .lens = self.lens, .waves = &waves, .now = self.now };
+        const tex = self.backdrop.small orelse return;
+        if (!liquid_glass.bends(look)) {
+            self.backdrop.drawRoundedScaled(self.corners, self.scale, weight);
             return;
-        };
-        self.backdrop.drawRoundedScaled(self.corners, self.scale, 1 - self.mix);
-        addTint(self.rect, self.corners, self.scale, tint, self.mix);
-        addTint(self.rect, self.corners, self.scale, .white, self.lift);
+        }
+        const corners = self.finalCorners();
+        liquid_glass.drawPane(tex, self.backdrop.rect, self.rect, corners.tl.radius() * self.scale, self.scale, dvui.Color.white.opacity(weight), look);
+    }
+
+    /// The pane's corners as drawn: a theme corner resolved to the theme's own.
+    fn finalCorners(self: *const FrostJob) dvui.CornerRect {
+        const theme = dvui.themeGet();
+        return self.corners.finalize(&theme);
     }
 };
 

@@ -2138,7 +2138,7 @@ fn cardAnimator(src: std.builtin.SourceLocation, entry: StoreEntry, index: usize
     return dvui.animate(src, .{
         .kind = .horizontal,
         .duration = 200_000 + 40_000 * @as(i32, @intCast(stagger)),
-        .easing = dvui.easing.outBack,
+        .easing = core.motion.enter,
     }, .{
         .id_extra = hashId(entry.id),
         .expand = .horizontal,

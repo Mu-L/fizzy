@@ -1,5 +1,6 @@
 const std = @import("std");
 const dvui = @import("dvui");
+const motion = @import("../motion.zig");
 
 const Event = dvui.Event;
 const BlurBackdrop = @import("BlurBackdrop.zig");
@@ -252,7 +253,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                     .end_val = close_rect.w,
                     .start_time = start_time,
                     .end_time = a.end_time,
-                    .easing = dvui.easing.inBack,
+                    .easing = motion.exit,
                 });
             } else {
                 self.wd.rect.w = a.value();
@@ -262,7 +263,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                 .start_val = self.wd.rect.w,
                 .end_val = close_rect.w,
                 .end_time = 400_000,
-                .easing = dvui.easing.inBack,
+                .easing = motion.exit,
             });
         }
 
@@ -278,7 +279,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                     .end_val = close_rect.h,
                     .start_time = start_time,
                     .end_time = a.end_time,
-                    .easing = dvui.easing.inBack,
+                    .easing = motion.exit,
                 });
             } else {
                 self.wd.rect.h = a.value();
@@ -288,7 +289,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                 .start_val = self.wd.rect.h,
                 .end_val = close_rect.h,
                 .end_time = 400_000,
-                .easing = dvui.easing.inBack,
+                .easing = motion.exit,
             });
         }
 
@@ -304,7 +305,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                     .end_val = close_rect.x,
                     .start_time = start_time,
                     .end_time = a.end_time,
-                    .easing = dvui.easing.inBack,
+                    .easing = motion.exit,
                 });
             } else {
                 self.wd.rect.x = a.value();
@@ -314,7 +315,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                 .start_val = self.wd.rect.x,
                 .end_val = close_rect.x,
                 .end_time = 400_000,
-                .easing = dvui.easing.inBack,
+                .easing = motion.exit,
             });
         }
 
@@ -330,7 +331,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                     .end_val = close_rect.y,
                     .start_time = start_time,
                     .end_time = a.end_time,
-                    .easing = dvui.easing.inBack,
+                    .easing = motion.exit,
                 });
             } else {
                 self.wd.rect.y = a.value();
@@ -340,7 +341,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                 .start_val = self.wd.rect.y,
                 .end_val = close_rect.y,
                 .end_time = 400_000,
-                .easing = dvui.easing.inBack,
+                .easing = motion.exit,
             });
         }
     }
@@ -376,7 +377,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                             .start_val = self.wd.rect.w,
                             .end_val = ms.w,
                             .end_time = 300_000,
-                            .easing = dvui.easing.outBack,
+                            .easing = motion.enter,
                         });
                     }
                 } else {
@@ -384,7 +385,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                         .start_val = self.wd.rect.w,
                         .end_val = ms.w,
                         .end_time = 300_000,
-                        .easing = dvui.easing.outBack,
+                        .easing = motion.enter,
                     });
                 }
             }
@@ -397,7 +398,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                             .start_val = self.wd.rect.h,
                             .end_val = ms.h,
                             .end_time = 300_000,
-                            .easing = dvui.easing.outBack,
+                            .easing = motion.enter,
                         });
                     }
                 } else {
@@ -405,7 +406,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                         .start_val = self.wd.rect.h,
                         .end_val = ms.h,
                         .end_time = 300_000,
-                        .easing = dvui.easing.outBack,
+                        .easing = motion.enter,
                     });
                 }
             }
@@ -531,7 +532,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
             //
             // Re-aim safe: this is the easing curve's own progress, independent of the endpoints
             // the fly-to rewrites mid-flight.
-            const travelled = std.math.clamp(dvui.easing.inBack(std.math.clamp(frac, 0, 1)), 0, 1);
+            const travelled = std.math.clamp(motion.exit(std.math.clamp(frac, 0, 1)), 0, 1);
             // Opaque for the first half of the travel, then an ease-in that puts most of the
             // opacity loss in the final moments and lands on zero exactly at the destination.
             const t = std.math.clamp((travelled - 0.55) / 0.45, 0, 1);

@@ -9,6 +9,7 @@
 //! like the app's — see `core.widgets` for the divide.
 const std = @import("std");
 const dvui = @import("dvui");
+const motion = @import("motion.zig");
 const icon_tex = @import("gfx/icon.zig");
 const builtin = @import("builtin");
 const icons = @import("icons");
@@ -223,7 +224,7 @@ pub fn tooltipFade(wd: *dvui.WidgetData, duration_us: i32) f32 {
     // Not shown last frame (or ever): a new showing.
     if (last == null or now - last.? > 100 * std.time.ns_per_ms) {
         _ = dvui.currentWindow().animations.remove(wd.id.update("_tooltip_fade"));
-        dvui.animation(wd.id, "_tooltip_fade", .{ .start_val = 0, .end_val = 1, .end_time = duration_us, .easing = dvui.easing.outCubic });
+        dvui.animation(wd.id, "_tooltip_fade", .{ .start_val = 0, .end_val = 1, .end_time = duration_us, .easing = motion.fade });
     }
     return if (dvui.animationGet(wd.id, "_tooltip_fade")) |a| std.math.clamp(a.value(), 0, 1) else 1;
 }

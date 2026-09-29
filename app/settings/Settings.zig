@@ -71,6 +71,11 @@ dialog_lift: f32 = 0.3,
 /// How much of what is behind a dialog or the palette stays readable through its blur, 0 to 1.
 dialog_detail: f32 = 0.1,
 
+/// How the interface moves, 0 to 1: 0 is off (nothing animates), low is plain even motion, 0.5 is
+/// minimal (a clean overshoot, glass with a lens at its edges), 1 is playful (springs, jiggle,
+/// ripples). Published each frame through `core.motion`, which every animation reads.
+motion: f32 = core.motion.default_level,
+
 /// Canvas zoom/pan control scheme shared by the image viewer, pixi, and any other
 /// `CanvasWidget` consumer. `auto` picks mouse vs trackpad from `dvui.mouseType()`.
 input_scheme: InputScheme = .auto,

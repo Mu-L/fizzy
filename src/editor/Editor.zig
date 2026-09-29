@@ -3114,6 +3114,7 @@ pub fn reconcileExternalSettingsChange(editor: *Editor) void {
     editor.app.settings.dialog_blur = parsed.dialog_blur;
     editor.app.settings.dialog_lift = parsed.dialog_lift;
     editor.app.settings.dialog_detail = parsed.dialog_detail;
+    editor.app.settings.motion = parsed.motion;
     editor.app.settings.input_scheme = parsed.input_scheme;
     editor.app.settings.plugin_update_mode = parsed.plugin_update_mode;
 
@@ -3423,6 +3424,8 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             .has_chrome = true,
         });
     }
+    // How things move this frame, for every animation here and in every plugin (`core.motion`).
+    fizzy.core.motion.publish(editor.app.settings.motion, dvui.currentWindow().backend.prefersReducedMotion());
     if (comptime builtin.target.cpu.arch == .wasm32) {
         // Plugins the page has finished linking since last frame register now.
         PluginLoader.pump();

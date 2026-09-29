@@ -167,6 +167,16 @@ pub const groups = [_]Group{
                 .keywords = "dialog palette light bright glass frost lift",
                 .draw = drawDialogLift,
             },
+            .{
+                .label = "Motion",
+                .key = "motion",
+                .description = "How the interface moves. 0 is off — nothing animates. Low is " ++
+                    "plain, even motion; the middle, Minimal, overshoots a touch and settles " ++
+                    "and gives frosted glass a lens at its edges; toward Playful things spring, " ++
+                    "jiggle and ripple. A system request for reduced motion turns it off.",
+                .keywords = "animation motion reduce reduced accessibility bounce spring playful minimal ripple glass",
+                .draw = drawMotion,
+            },
         },
     },
     .{
@@ -423,6 +433,46 @@ fn drawDialogLift() void {
     }, .{ .expand = .horizontal })) {
         fizzy.editor().markSettingsDirty();
         dvui.refresh(null, @src(), null);
+    }
+}
+
+fn drawMotion() void {
+    const settings = &fizzy.editor().app.settings;
+    if (dvui.sliderEntry(@src(), "{d:0.01}", .{
+        .value = &settings.motion,
+        .interval = 0.01,
+        .max = 1.0,
+        .min = 0.0,
+    }, .{ .expand = .horizontal })) {
+        fizzy.editor().markSettingsDirty();
+        dvui.refresh(null, @src(), null);
+    }
+    // The three names along the slider's length, the one it is nearest lit.
+    var row = dvui.overlay(@src(), .{ .expand = .horizontal });
+    defer row.deinit();
+    const names = [_][]const u8{ "Off", "Minimal", "Playful" };
+    const at = [_]f32{ 0, 0.5, 1 };
+    const system_off = dvui.currentWindow().backend.prefersReducedMotion();
+    const v: f32 = if (system_off) 0 else settings.motion;
+    var nearest: usize = 0;
+    for (at, 0..) |a, i| {
+        if (@abs(v - a) < @abs(v - at[nearest])) nearest = i;
+    }
+    const text = dvui.themeGet().color(.control, .text);
+    for (names, at, 0..) |name, a, i| {
+        dvui.labelNoFmt(@src(), name, .{}, .{
+            .id_extra = i,
+            .gravity_x = a,
+            .font = dvui.Font.theme(.body).larger(-1),
+            .color_text = .{ .color = if (i == nearest) text else text.opacity(0.45) },
+            .padding = .{},
+        });
+    }
+    if (system_off) {
+        dvui.labelNoFmt(@src(), "Off: the system asks for reduced motion.", .{}, .{
+            .font = dvui.Font.theme(.body).larger(-1),
+            .color_text = .{ .color = text.opacity(0.6) },
+        });
     }
 }
 

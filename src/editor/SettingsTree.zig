@@ -360,7 +360,7 @@ fn drawBranch(
     const b = tree.branch(@src(), .{
         .expanded = want_open,
         .animation_duration = 450_000,
-        .animation_easing = dvui.easing.outBack,
+        .animation_easing = core.motion.enter,
     }, .{
         .id_extra = id_extra,
         .expand = .horizontal,

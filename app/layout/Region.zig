@@ -745,7 +745,7 @@ fn chooserFade(id: dvui.Id, want: f32) f32 {
                 .start_val = v,
                 .end_val = want,
                 .end_time = chooser_fade_ms * std.time.us_per_ms,
-                .easing = dvui.easing.outQuad,
+                .easing = core.motion.fade,
             });
         }
         dvui.dataSet(null, id, shown_key, v);
@@ -757,7 +757,7 @@ fn chooserFade(id: dvui.Id, want: f32) f32 {
             .start_val = shown,
             .end_val = want,
             .end_time = chooser_fade_ms * std.time.us_per_ms,
-            .easing = dvui.easing.outQuad,
+            .easing = core.motion.fade,
         });
         dvui.refresh(null, @src(), id);
         return shown;

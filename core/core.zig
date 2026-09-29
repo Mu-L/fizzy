@@ -45,6 +45,10 @@ pub const darwin_spawn = @import("darwin_spawn.zig");
 pub const widgets = @import("widgets.zig");
 /// Reveals, cross-fades and transitions — the animation any region or pane swap runs through.
 pub const anim = @import("anim.zig");
+/// How things move: the one motion setting every animation reads (off, minimal, playful).
+pub const motion = @import("motion.zig");
+/// Frosted glass that bends what it shows — lens at the rim, ripples through it.
+pub const liquid_glass = @import("gfx/liquid_glass.zig");
 /// The dialog framework, its window chrome, and the toasts and spinners that share it.
 pub const dialogs = @import("dialogs.zig");
 /// Drawing helpers with no widget of their own: highlighted labels, menu rows, edge shadows.

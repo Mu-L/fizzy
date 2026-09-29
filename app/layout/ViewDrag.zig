@@ -311,13 +311,6 @@ pub fn tick(l: *Layout) void {
     dvui.refresh(null, @src(), null);
 }
 
-// ── Easing ──────────────────────────────────────────────────────────────────────────────────────
-
-fn outCubic(t: f32) f32 {
-    const u = 1 - t;
-    return 1 - u * u * u;
-}
-
 // ── Painting ────────────────────────────────────────────────────────────────────────────────────
 
 /// Whether the pointer is over `name` as the place a release would land on.
@@ -423,9 +416,10 @@ pub fn drawFloat(l: *Layout) void {
     if (!d.active()) return;
     const mouse = dvui.currentWindow().mouse_pt;
     const now = dvui.currentWindow().frame_time_ns;
-    const dur: f64 = 220 * @as(f64, std.time.ns_per_ms);
+    // The lift is a move to a new size, at the app's motion level: instant when motion is off.
+    const dur: f64 = core.motion.durationMs(220) * @as(f64, std.time.ns_per_ms);
     const elapsed: f64 = @floatFromInt(now - d.start_ns);
-    const t = outCubic(@floatCast(std.math.clamp(elapsed / dur, 0, 1)));
+    const t = if (dur <= 0) 1 else core.motion.settle(@floatCast(std.math.clamp(elapsed / dur, 0, 1)));
 
     // Shrink from the place's own size to a card, keeping the grab point
     // under the pointer, so the view appears to be picked up rather than

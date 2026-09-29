@@ -182,7 +182,7 @@ fn drawCollapseButton(explorer: *Explorer, editor: *fizzy.Editor) void {
             .start_val = 0.0,
             .end_val = 1.0,
             .end_time = 450_000,
-            .easing = dvui.easing.outBack,
+            .easing = fizzy.core.motion.enter,
         });
     }
 

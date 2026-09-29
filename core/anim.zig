@@ -10,6 +10,7 @@
 //! the same code — see `core.widgets` for the divide.
 const std = @import("std");
 const dvui = @import("dvui");
+const motion = @import("motion.zig");
 const builtin = @import("builtin");
 const icons = @import("icons");
 const platform = @import("platform.zig");
@@ -45,7 +46,7 @@ pub const slide = struct {
     }
 
     pub fn easing(opening: bool) *const dvui.easing.EasingFn {
-        return if (opening) dvui.easing.outBack else dvui.easing.outQuint;
+        return if (opening) motion.enter else motion.settle;
     }
 };
 
@@ -309,7 +310,7 @@ test "a held swap parks where the eased clock is at the hold" {
 }
 
 /// The app's swap curve — every `transition` unless it asks for another.
-pub const swap_easing = dvui.easing.outCubic;
+pub const swap_easing = motion.fade;
 
 /// Which edges of a place a swap's blur bleeds across (`TransitionOptions.bleed`).
 pub const Bleed = packed struct {

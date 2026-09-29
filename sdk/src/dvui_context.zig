@@ -31,7 +31,11 @@ pub fn inject(
         }
     }
     if (debug) |d| dvui.debug = d.*;
-    if (window != null) applyDragThreshold();
+    if (window != null) {
+        applyDragThreshold();
+        // This image's dvui animates, or does not, as the host's does (`core.motion.publish`).
+        @import("core").motion.apply();
+    }
 }
 
 /// How far a finger may drift and still tap (natural px). dvui's 3 is a mouse's slop: a

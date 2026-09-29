@@ -3586,10 +3586,10 @@ test "drop zones: a small place keeps a middle to aim at" {
     try std.testing.expect(DZ.at(r, .{ .x = 60, .y = 45 }).eql(.center));
 }
 
-test "drop zones: the rings of a pane run the way dvui's paths do" {
+test "liquid glass: the rings of a pane run the way dvui's paths do" {
     const r: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
     var pts: [4 * 7 + 2 * (8 - 1) + 2 * (4 - 1)]dvui.Point.Physical = undefined;
-    DZ.ringPoints(&pts, r, 8, 0, 6, 8, 4);
+    fizzy.core.liquid_glass.ringPoints(&pts, r, 8, 0, 6, 8, 4);
     // Shoelace: the sign of dvui's own rect path (top-left, bottom-left, bottom-right,
     // top-right), which is negative in these coordinates.
     var area: f32 = 0;
@@ -3603,11 +3603,41 @@ test "drop zones: the rings of a pane run the way dvui's paths do" {
     try std.testing.expectApproxEqAbs(@as(f32, 0), pts[0].y, 0.01);
 }
 
-test "drop zones: a zone bounces past its size and settles on it" {
-    try std.testing.expectEqual(@as(f32, 0), DZ.grow(0));
-    try std.testing.expectApproxEqAbs(@as(f32, 1), DZ.grow(1), 1e-5);
+fn peakOf(comptime f: fn (f32, f32) f32, lv: f32) f32 {
     var peak: f32 = 0;
     var t: f32 = 0;
-    while (t <= 1) : (t += 0.01) peak = @max(peak, DZ.grow(t));
-    try std.testing.expect(peak > 1.05);
+    while (t <= 1) : (t += 0.005) peak = @max(peak, f(lv, t));
+    return peak;
+}
+
+test "motion: every curve starts at 0 and lands on 1, at every level" {
+    const M = fizzy.core.motion;
+    var lv: f32 = 0;
+    while (lv <= 1.0001) : (lv += 0.125) {
+        try std.testing.expectApproxEqAbs(@as(f32, 0), M.enterAt(lv, 0), 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 1), M.enterAt(lv, 1), 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 0), M.settleAt(lv, 0), 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 1), M.settleAt(lv, 1), 1e-4);
+    }
+}
+
+test "motion: plain at the low end, a clean overshoot at minimal, a jiggle at playful" {
+    const M = fizzy.core.motion;
+    // Just above off: linear, nothing overshoots.
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3), M.enterAt(0.001, 0.3), 0.01);
+    try std.testing.expect(peakOf(M.enterAt, 0.001) <= 1.001);
+    try std.testing.expect(peakOf(M.settleAt, 0.001) <= 1.001);
+    // Minimal: arrivals overshoot a touch; moves only decelerate.
+    const minimal = peakOf(M.enterAt, 0.5);
+    try std.testing.expect(minimal > 1.05 and minimal < 1.15);
+    try std.testing.expect(peakOf(M.settleAt, 0.5) <= 1.001);
+    // Playful: a bigger overshoot, and the spring dips back under before it settles.
+    try std.testing.expect(peakOf(M.enterAt, 1) > minimal);
+    var dips = false;
+    var t: f32 = 0.6;
+    while (t < 1) : (t += 0.01) {
+        if (M.enterAt(1, t) < 0.999) dips = true;
+    }
+    try std.testing.expect(dips);
+    try std.testing.expect(peakOf(M.settleAt, 1) > 1.01);
 }
