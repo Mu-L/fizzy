@@ -397,7 +397,7 @@ fn drawRow(
 fn drawOwnerDropdown(row: Row, ri: usize) void {
     const editor = fizzy.editor();
 
-    var dropdown: dvui.DropdownWidget = undefined;
+    var dropdown: core.widgets.DropdownWidget = undefined;
     dropdown.init(@src(), .{}, .{
         .id_extra = ri,
         .expand = .horizontal,

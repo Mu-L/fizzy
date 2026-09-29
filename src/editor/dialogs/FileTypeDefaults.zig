@@ -294,7 +294,7 @@ fn confirm() void {
 fn drawOwnerDropdown(row: *Row, ri: usize) void {
     const selected = row.choices[row.selected];
 
-    var dropdown: dvui.DropdownWidget = undefined;
+    var dropdown: fizzy.core.widgets.DropdownWidget = undefined;
     dropdown.init(@src(), .{ .selected_index = row.selected }, .{
         .id_extra = ri,
         .expand = .horizontal,
@@ -325,7 +325,7 @@ fn drawOwnerDropdown(row: *Row, ri: usize) void {
 /// `DropdownWidget.addChoiceLabel` with a dim right-aligned tag — "Built-in" or "Plugin" — so the
 /// list reads as two groups without inventing a non-selectable heading row the widget has no API
 /// for. Returns true when this entry was chosen.
-fn addOwnerChoice(dropdown: *dvui.DropdownWidget, choice: Choice) bool {
+fn addOwnerChoice(dropdown: *fizzy.core.widgets.DropdownWidget, choice: Choice) bool {
     var mi = dropdown.addChoice();
     defer mi.deinit();
 

@@ -154,8 +154,16 @@ const broad_glow: f32 = 0.04;
 /// Points: how quickly the rim line fades inward — about a point wide.
 const line_width: f32 = 0.8;
 
-/// Segments in a corner's arc: enough that a corner reads as a curve, not a polygon.
-const arc_steps = 5;
+/// Segments in a corner's arc, for a pane with corner radii `radii` (physical): about one per
+/// `arc_segment` pixels of curve — a small corner a handful, a circle (four corners of half its
+/// size) enough that it is round, not a polygon of a couple of dozen sides.
+fn arcSteps(radii: Radii) usize {
+    var r: f32 = 0;
+    for (radii) |v| r = @max(r, v);
+    const curve = r * std.math.pi / 2;
+    return @intFromFloat(std.math.clamp(@ceil(curve / arc_segment), 3, 32));
+}
+const arc_segment: f32 = 6;
 
 /// Physical pixels: the edge fades from solid to clear across one pixel, half inside the outline
 /// and half outside — dvui's own anti-aliasing of a rounded fill (`Path.fillConvexTriangles`,
@@ -199,6 +207,7 @@ pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.
     if (half < 1 or tex_bounds.w < 1 or tex_bounds.h < 1) return;
     var insets_buf: [ring_count + 1]f32 = undefined;
     const insets = ringInsets(&insets_buf, scale, half * 0.9);
+    const arc_steps = arcSteps(radii);
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();
     const col = dvui.Color.PMA.fromColor(mod);
@@ -250,6 +259,7 @@ fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.P
     // With the refraction setting, up to as designed: a flat edge is a clear one no more.
     const amount = clarity * look.lens * @min(1, look.refraction) * @as(f32, @floatFromInt(mod.a)) / 255;
     if (amount <= 0.01) return;
+    const arc_steps = arcSteps(radii);
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();
     // Only as far in as the clear glass shows: it fades with the steepness squared, so past about
@@ -321,6 +331,7 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
         n_insets += 1;
     }
     const insets = insets_buf[0..n_insets];
+    const arc_steps = arcSteps(radii);
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();
     const rings = insets.len;
@@ -385,7 +396,7 @@ fn appendFan(b: *dvui.Triangles.Builder, per_ring: usize, ring: usize, center: u
 /// down the left side, along the bottom, up the right and back along the top: the order dvui's
 /// own paths run (`Path.Builder.addRect`). `normals`, when given, gets each point's outward unit
 /// normal: straight out from its corner's centre on an arc, square to its side on a side.
-pub fn ringPoints(out: []dvui.Point.Physical, normals: ?[]dvui.Point.Physical, r: dvui.Rect.Physical, radii: Radii, d: f32, comptime steps_per_arc: usize, side_x: usize, side_y: usize) void {
+pub fn ringPoints(out: []dvui.Point.Physical, normals: ?[]dvui.Point.Physical, r: dvui.Rect.Physical, radii: Radii, d: f32, steps_per_arc: usize, side_x: usize, side_y: usize) void {
     const x0 = r.x + d;
     const y0 = r.y + d;
     const x1 = r.x + r.w - d;

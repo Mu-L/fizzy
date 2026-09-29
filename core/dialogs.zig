@@ -224,18 +224,23 @@ fn tooltipSurfaceWith(wd: *dvui.WidgetData, frost_fade: f32, paint_fade: f32) vo
     const t = std.math.clamp(frost_fade, 0, 1);
     const p = std.math.clamp(paint_fade, 0, 1);
     const brs = wd.borderRectScale();
+    // It grows out of where the pointer was when it began to show, on the curve it forms by, and
+    // what it holds is cut to it as it grows — the tooltip opens from the thing it is about, as a
+    // menu slides open from what opened it.
+    const r = tooltipGrown(wd, brs.r, t);
+    dvui.clipSet(dvui.clipGet().intersect(r));
     const phys_corners = tooltipCorners().scale(brs.s, dvui.CornerRect.Physical);
     const bs = surfaceShadow();
-    const prect = brs.r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
+    const prect = r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
     prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha * p) }, .fade = brs.s * bs.fade });
     const f = dialogFrost() orelse {
-        brs.r.fill(phys_corners, .{ .color = .{ .color = dialogFill().opacity(p) } });
+        r.fill(phys_corners, .{ .color = .{ .color = dialogFill().opacity(p) } });
         return;
     };
     // Under a couple of pixels of blur there is nothing to see yet, and too little for the blur
     // to make a pass at all.
     if (f.radius * t < 2) return;
-    widgets.BlurBackdrop.frostPane(wd.id, brs.r, tooltipCorners(), brs.s, .{
+    widgets.BlurBackdrop.frostPane(wd.id, r, tooltipCorners(), brs.s, .{
         .radius = f.radius,
         .refresh_ms = f.refresh_ms,
         .tint = f.tint,
@@ -245,6 +250,30 @@ fn tooltipSurfaceWith(wd: *dvui.WidgetData, frost_fade: f32, paint_fade: f32) vo
         // Forms on the tooltip's own fade.
         .form = t,
     });
+}
+
+/// `full` — a shown tooltip's rect — `t` of the way grown out of the point the pointer was at
+/// when this showing began (held inside the tooltip, so it grows from its nearest edge when the
+/// pointer is beside it). A showing begins when the tooltip is drawn after a pause.
+fn tooltipGrown(wd: *dvui.WidgetData, full: dvui.Rect.Physical, t: f32) dvui.Rect.Physical {
+    const now = dvui.currentWindow().frame_time_ns;
+    const last = dvui.dataGet(null, wd.id, "_tooltip_grown_ns", i128);
+    dvui.dataSet(null, wd.id, "_tooltip_grown_ns", now);
+    if (last == null or now - last.? > 100 * std.time.ns_per_ms or dvui.dataGet(null, wd.id, "_tooltip_origin", dvui.Point.Physical) == null) {
+        dvui.dataSet(null, wd.id, "_tooltip_origin", dvui.currentWindow().mouse_pt);
+    }
+    const at = dvui.dataGet(null, wd.id, "_tooltip_origin", dvui.Point.Physical) orelse full.center();
+    const o: dvui.Point.Physical = .{
+        .x = std.math.clamp(at.x, full.x, full.x + full.w),
+        .y = std.math.clamp(at.y, full.y, full.y + full.h),
+    };
+    const k = @max(0, motion.enterFull(t));
+    return .{
+        .x = o.x + (full.x - o.x) * k,
+        .y = o.y + (full.y - o.y) * k,
+        .w = full.w * k,
+        .h = full.h * k,
+    };
 }
 
 /// How far a tooltip has faded in this showing, 0…1 over `duration_us` (eased). A showing starts

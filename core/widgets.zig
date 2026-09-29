@@ -45,6 +45,8 @@ pub const MenuWidget = @import("widgets/menu/Menu.zig");
 pub const MenuItemWidget = @import("widgets/menu/MenuItem.zig");
 pub const FloatingMenuWidget = @import("widgets/menu/FloatingMenu.zig");
 pub const PopupWidget = @import("widgets/menu/Popup.zig");
+/// A dropdown whose list is the menus' frosted surface — use this, not `dvui.DropdownWidget`.
+pub const DropdownWidget = @import("widgets/Dropdown.zig");
 
 /// `dvui.menu` / `dvui.menuItem` / `dvui.floatingMenu`, over the copies above.
 pub fn menu(src: std.builtin.SourceLocation, dir: dvui.enums.Direction, opts: dvui.Options) *MenuWidget {

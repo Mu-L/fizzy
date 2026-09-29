@@ -76,7 +76,7 @@ pub fn drawField(schema: *const settings.SettingsSchema, field: settings.Setting
         },
         .enumeration => |enum_kind| {
             const choices = enum_kind.choices;
-            var dropdown: dvui.DropdownWidget = undefined;
+            var dropdown: core.widgets.DropdownWidget = undefined;
             dropdown.init(@src(), .{}, .{
                 .id_extra = id_extra,
                 .expand = .horizontal,
@@ -177,7 +177,7 @@ fn drawIntChoices(schema: *const settings.SettingsSchema, field: settings.Settin
     const value = schema.value;
     const current = access.getInt(value, field_index);
 
-    var dropdown: dvui.DropdownWidget = undefined;
+    var dropdown: core.widgets.DropdownWidget = undefined;
     dropdown.init(@src(), .{}, .{
         .id_extra = id_extra,
         .expand = .horizontal,

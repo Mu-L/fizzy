@@ -309,7 +309,7 @@ pub const groups = [_]Group{
 // ---- Appearance -------------------------------------------------------------------------
 
 fn drawTheme() void {
-    var dropdown: dvui.DropdownWidget = undefined;
+    var dropdown: core.widgets.DropdownWidget = undefined;
     dropdown.init(@src(), .{}, .{
         .expand = .horizontal,
         .corners = dvui.CornerRect.all(1000),
@@ -573,7 +573,7 @@ fn drawHoldMenuDuration() void {
 }
 
 fn drawInputScheme() void {
-    var dropdown: dvui.DropdownWidget = undefined;
+    var dropdown: core.widgets.DropdownWidget = undefined;
     dropdown.init(@src(), .{}, .{
         .expand = .horizontal,
         .corners = dvui.CornerRect.all(1000),
@@ -619,7 +619,7 @@ fn drawInputScheme() void {
 /// the plugin's own card in the Plugins tab (`PluginStore`), not a row here — there is one of
 /// those per installed plugin, and the tree is fizzy's own settings.
 fn drawPluginUpdateMode() void {
-    var dropdown: dvui.DropdownWidget = undefined;
+    var dropdown: core.widgets.DropdownWidget = undefined;
     dropdown.init(@src(), .{}, .{
         .expand = .horizontal,
         .corners = dvui.CornerRect.all(1000),
