@@ -157,8 +157,15 @@ pub const Look = struct {
     center: Center = .replace,
 };
 
-/// White added over a lit zone's glass, on top of the dialogs' own lift.
+/// How much a lit zone's glass changes, as dvui changes a hovered fill (`Theme.adjustColorForState`,
+/// ±10% by `dark`): lighter over a dark theme, darker over a light one — a pale zone brightening
+/// on a pale theme barely shows.
 const lit_lift: f32 = 0.10;
+
+/// The colour a lit zone's glass moves toward: white in a dark theme, black in a light one.
+fn litToward() dvui.Color {
+    return if (dvui.themeGet().dark) .white else .black;
+}
 /// Points: an icon's size.
 const icon_size: f32 = 18;
 
@@ -396,7 +403,7 @@ fn glass(id: dvui.Id, panes: []const Pane, area: dvui.Rect.Physical, g: f32, sca
         const fill = dialogs.dialogFill();
         for (panes) |pane| {
             if (pane.r.w < 1 or pane.r.h < 1) continue;
-            const c = fill.lerp(.white, lit_lift * pane.lit);
+            const c = fill.lerp(litToward(), lit_lift * pane.lit);
             pane.r.fill(cornersOf(pane.radii, 1).scale(1, dvui.CornerRect.Physical), .{ .color = .{ .color = c.opacity(@as(f32, @floatFromInt(c.a)) / 255 * g) }, .fade = 1.0 });
         }
         return;
@@ -484,8 +491,16 @@ const LayerJob = struct {
             if (self.pane.tint) |tint| BlurBackdrop.addTint(pane.r, cornersOf(pane.radii, self.scale), self.scale, tint, mix);
             // The lift and the rim's light, in one pass after the tint so they stay white; a lit
             // zone is brighter and catches more.
-            const lift = std.math.clamp(self.pane.lift + lit_lift * pane.lit * self.strength, 0, 1);
+            // Lit, the glass goes the way dvui takes a hovered fill: lighter in a dark theme (more
+            // lift), darker in a light one (a shade over it once the light is on).
+            const dark = dvui.themeGet().dark;
+            const hover = lit_lift * pane.lit * self.strength;
+            const lift = std.math.clamp(self.pane.lift + (if (dark) hover else 0), 0, 1);
             if (light) |l| liquid_glass.drawLift(l, pane.r, pane.radii, self.scale, lift, self.strength * self.lens * pane.lens * @min(1, self.pane.refraction) * (1 + 0.6 * pane.lit));
+            if (!dark and hover > 0.002) {
+                const corners = cornersOf(pane.radii, self.scale).scale(self.scale, dvui.CornerRect.Physical);
+                pane.r.fill(corners, .{ .color = .{ .color = dvui.Color.black.opacity(hover) }, .fade = 1.0 });
+            }
         }
     }
 };

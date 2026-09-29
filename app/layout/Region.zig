@@ -711,6 +711,10 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
             dvui.dataRemove(null, box.data().id, "_chooser_press");
             dvui.captureMouse(null, e.num);
             dvui.dragEnd();
+            // Whatever the release did — landed, or nothing (its own middle, off every place) —
+            // the frame after it is different: the card is gone and the zones start to go. A
+            // drag held still asks for no frames of its own, so this one has to be asked for.
+            dvui.refresh(null, @src(), null);
         }
     }
 
