@@ -76,6 +76,10 @@ dialog_detail: f32 = 0.1,
 /// ripples). Published each frame through `core.motion`, which every animation reads.
 motion: f32 = core.motion.default_level,
 
+/// How fast the interface moves, 0 (slow) to 1 (fast): half as fast to twice as fast as written,
+/// 0.5 as written. Never stops motion — that is `motion` at 0.
+motion_speed: f32 = core.motion.default_speed,
+
 /// Canvas zoom/pan control scheme shared by the image viewer, pixi, and any other
 /// `CanvasWidget` consumer. `auto` picks mouse vs trackpad from `dvui.mouseType()`.
 input_scheme: InputScheme = .auto,

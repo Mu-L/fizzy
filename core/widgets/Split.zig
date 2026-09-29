@@ -6,6 +6,7 @@
 //! event-routing rules rather than layout logic. It depends on nothing but dvui.
 const std = @import("std");
 const dvui = @import("dvui");
+const motion = @import("../motion.zig");
 const icon_tex = @import("../gfx/icon.zig");
 const icons = @import("icons");
 const anim = @import("../anim.zig");
@@ -291,7 +292,7 @@ pub fn easedKey(id: dvui.Id, target: f32, anim_key: []const u8, shown_key: []con
         dvui.animation(id, anim_key, .{
             .start_val = shown,
             .end_val = target,
-            .end_time = anim.slide.ms(opening) * std.time.us_per_ms,
+            .end_time = motion.duration(anim.slide.ms(opening) * std.time.us_per_ms),
             .easing = anim.slide.easing(opening),
         });
         dvui.dataSet(null, id, shown_key, shown);

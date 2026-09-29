@@ -504,7 +504,7 @@ fn leaveSplit(self: *Dockspace, frame: *StackFrame) void {
         self.animating = true;
         if (@abs(a.end_val - target) > 0.0005) {
             // Retargeted mid-slide (a leaf emptied while opening): continue from where it is.
-            dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = ease_us, .easing = slideEasing(sp, frame.shown.*, target) });
+            dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = motion.duration(ease_us), .easing = slideEasing(sp, frame.shown.*, target) });
         } else {
             // Clamped: a spring's overshoot must not carry a pane past the split's ends, nor a
             // fitted child past the most it may take (`fit.max`) — the bounce happens inside
@@ -523,7 +523,7 @@ fn leaveSplit(self: *Dockspace, frame: *StackFrame) void {
         }
         dvui.refresh(null, @src(), self.data().id);
     } else if (@abs(frame.shown.* - target) > 0.0005) {
-        dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = ease_us, .easing = slideEasing(sp, frame.shown.*, target) });
+        dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = motion.duration(ease_us), .easing = slideEasing(sp, frame.shown.*, target) });
         dvui.refresh(null, @src(), self.data().id);
     } else if (sp.closing != null) {
         self.finishClose(frame.node);
@@ -587,7 +587,7 @@ fn enterNode(self: *Dockspace, node: Layout.NodeIndex, cell: ?Rect) ?Panel {
                 if (sp.opening) |c| {
                     ptr.* = shutRatio(c);
                     layout.nodes.items[node].split.opening = null;
-                    dvui.animation(self.data().id, self.animKey(node), .{ .start_val = ptr.*, .end_val = target, .end_time = ease_us, .easing = dvui.easing.outCubic });
+                    dvui.animation(self.data().id, self.animKey(node), .{ .start_val = ptr.*, .end_val = target, .end_time = motion.duration(ease_us), .easing = motion.settle });
                     dvui.refresh(null, @src(), self.data().id);
                 }
                 break :blk ptr;

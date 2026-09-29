@@ -308,7 +308,6 @@ pub fn tick(l: *Layout) void {
     if (d.moved_id.len == 0) {
         if (visibleId(l, d.name)) |id| d.moved_id = id;
     }
-    dvui.refresh(null, @src(), null);
 }
 
 // ── Painting ────────────────────────────────────────────────────────────────────────────────────
@@ -459,13 +458,18 @@ pub fn drawFloat(l: *Layout) void {
     if (d.texture) |tex| {
         core.anim.blit(tex, null, dest, 0, 1);
     } else {
-        dvui.label(@src(), "view", .{}, .{
+        // Nothing photographed it — a document tab, lifted off its strip — so the card says what
+        // it is carrying by name.
+        const title = if (l.host.surfaceById(d.moved_id)) |s| s.title else "view";
+        dvui.labelNoFmt(@src(), title, .{}, .{
             .gravity_x = 0.5,
             .gravity_y = 0.5,
             .color_text = .{ .color = theme.color(.control, .text) },
         });
     }
-    dvui.refresh(null, @src(), null);
+    // Frames only while the card is still shrinking into the hand: after that it moves when the
+    // pointer does, and the pointer moving is a frame anyway.
+    if (elapsed < dur) dvui.refresh(null, @src(), null);
 }
 
 fn floatTarget(from: dvui.Size.Physical, scale: f32) dvui.Size.Physical {

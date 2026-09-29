@@ -675,7 +675,7 @@ pub const Branch = struct {
         self.anim = dvui.animate(
             @src(),
             .{
-                .duration = self.init_options.animation_duration,
+                .duration = motion.duration(self.init_options.animation_duration),
                 .easing = self.init_options.animation_easing,
                 .kind = if (self.init_options.animation_duration > 0) .vertical else .none,
             },
@@ -685,7 +685,7 @@ pub const Branch = struct {
         if (clicked or self.init_options.expanded != self.expanded) {
             if (self.expanded) {
                 self.anim.?.init_opts.easing = motion.settle;
-                self.anim.?.init_opts.duration = @divTrunc(self.init_options.animation_duration, 2);
+                self.anim.?.init_opts.duration = motion.duration(@divTrunc(self.init_options.animation_duration, 2));
                 self.anim.?.startEnd();
             } else {
                 self.anim.?.val = 0.0;

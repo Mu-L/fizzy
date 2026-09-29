@@ -224,7 +224,7 @@ pub fn tooltipFade(wd: *dvui.WidgetData, duration_us: i32) f32 {
     // Not shown last frame (or ever): a new showing.
     if (last == null or now - last.? > 100 * std.time.ns_per_ms) {
         _ = dvui.currentWindow().animations.remove(wd.id.update("_tooltip_fade"));
-        dvui.animation(wd.id, "_tooltip_fade", .{ .start_val = 0, .end_val = 1, .end_time = duration_us, .easing = motion.fade });
+        dvui.animation(wd.id, "_tooltip_fade", .{ .start_val = 0, .end_val = 1, .end_time = motion.duration(duration_us), .easing = motion.fade });
     }
     return if (dvui.animationGet(wd.id, "_tooltip_fade")) |a| std.math.clamp(a.value(), 0, 1) else 1;
 }
@@ -918,7 +918,7 @@ pub fn toastDisplay(id: dvui.Id) !void {
     });
     defer box.deinit();
 
-    var animator = dvui.animate(@src(), .{ .kind = .alpha, .duration = 400_000 }, .{ .id_extra = id.asUsize(), .gravity_x = 0.5 });
+    var animator = dvui.animate(@src(), .{ .kind = .alpha, .duration = motion.duration(400_000) }, .{ .id_extra = id.asUsize(), .gravity_x = 0.5 });
     defer animator.deinit();
 
     dvui.labelNoFmt(@src(), message, .{}, .{
@@ -1193,7 +1193,7 @@ pub fn saveCompleteToastDisplay(id: dvui.Id) !void {
         return;
     };
 
-    var animator = dvui.animate(@src(), .{ .kind = .alpha, .duration = 350_000 }, .{
+    var animator = dvui.animate(@src(), .{ .kind = .alpha, .duration = motion.duration(350_000) }, .{
         .id_extra = id.asUsize(),
     });
     defer animator.deinit();

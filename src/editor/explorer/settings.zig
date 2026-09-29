@@ -177,6 +177,14 @@ pub const groups = [_]Group{
                 .keywords = "animation motion reduce reduced accessibility bounce spring playful minimal ripple glass",
                 .draw = drawMotion,
             },
+            .{
+                .label = "Motion speed",
+                .key = "motion_speed",
+                .description = "How fast the interface moves, from half as fast to twice as fast. " ++
+                    "The middle is as designed. It never stops motion; Motion at 0 does that.",
+                .keywords = "animation motion speed fast slow duration",
+                .draw = drawMotionSpeed,
+            },
         },
     },
     .{
@@ -474,6 +482,27 @@ fn drawMotion() void {
             .color_text = .{ .color = text.opacity(0.6) },
         });
     }
+}
+
+fn drawMotionSpeed() void {
+    const settings = &fizzy.editor().app.settings;
+    if (dvui.sliderEntry(@src(), "{d:0.01}", .{
+        .value = &settings.motion_speed,
+        .interval = 0.01,
+        .max = 1.0,
+        .min = 0.0,
+    }, .{ .expand = .horizontal })) {
+        fizzy.editor().markSettingsDirty();
+        dvui.refresh(null, @src(), null);
+    }
+    var row = dvui.overlay(@src(), .{ .expand = .horizontal });
+    defer row.deinit();
+    const text = dvui.themeGet().color(.control, .text).opacity(0.6);
+    const rate = fizzy.core.motion.rateFor(settings.motion_speed);
+    for ([_][]const u8{ "Slow", "Fast" }, [_]f32{ 0, 1 }, 0..) |name, at, i| {
+        dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = i, .gravity_x = at, .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = text }, .padding = .{} });
+    }
+    dvui.label(@src(), "{d:.2}×", .{rate}, .{ .gravity_x = 0.5, .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = text }, .padding = .{} });
 }
 
 // ---- Input ------------------------------------------------------------------------------

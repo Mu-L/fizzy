@@ -181,7 +181,7 @@ fn drawCollapseButton(explorer: *Explorer, editor: *fizzy.Editor) void {
         dvui.animation(anim_id, "_appear", .{
             .start_val = 0.0,
             .end_val = 1.0,
-            .end_time = 450_000,
+            .end_time = fizzy.core.motion.duration(450_000),
             .easing = fizzy.core.motion.enter,
         });
     }

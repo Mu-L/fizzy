@@ -213,7 +213,9 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
             };
             if (panes[i].waves[0].live(now) or panes[i].waves[1].live(now)) moving = true;
         }
-        glass(id, &panes, g, scale);
+        var area = r.center;
+        for (all[1..]) |z| area = area.unionWith(r.of(z));
+        glass(id, &panes, area, g, scale);
         for (all, 0..) |z, i| {
             if (z == .center and look.center == .none) continue;
             drawIcon(panes[i].r, iconFor(z, look.center), g, st.lit[i], scale);
@@ -255,7 +257,7 @@ pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
             .waves = .{ .{ .origin = st.rect.center(), .start_ns = st.born_ns, .amount = motion.playful() }, .{} },
         };
         if (pane.waves[0].live(now)) moving = true;
-        glass(id, &.{pane}, g, scale);
+        glass(id, &.{pane}, st.rect, g, scale);
         drawIcon(pane.r, .{ .name = "drop_zone_join", .tvg = icons.tvg.lucide.@"squares-unite" }, g, 1, scale);
     }
     if (moving) {
@@ -325,10 +327,15 @@ const Pane = struct {
 
 
 
-/// The frost under `panes` at strength `g`: one read of the frame and one blur for all of them,
+/// The frost under `panes` at strength `g`: one read of `area` and one blur for all of them,
 /// laid down as a bent mesh each, tinted and lifted like the dialogs' glass, the lit ones
 /// brighter. With the blur off it is the dialogs' fill, as much of it as `g`.
-fn glass(id: dvui.Id, panes: []const Pane, g: f32, scale: f32) void {
+///
+/// **Read rarely.** `area` is where the panes settle, not where they are this frame, so a pane
+/// growing in does not move what is read; what is under it does not change during a drag (the
+/// app under one stays put), so it is read again a few times a second, and when the blur has
+/// grown a step. Reading and blurring a place every frame was most of what the glass cost.
+fn glass(id: dvui.Id, panes: []const Pane, area: dvui.Rect.Physical, g: f32, scale: f32) void {
     // Finalized, as a widget's options would be: an unresolved corner draws square whatever
     // radius it names.
     const theme = dvui.themeGet();
@@ -359,22 +366,34 @@ fn glass(id: dvui.Id, panes: []const Pane, g: f32, scale: f32) void {
         job.count += 1;
     }
     if (job.count == 0) return;
-    // The layer covers the panes it serves and nothing else, so what it reads back and blurs is
-    // only what the glass will show.
-    var bounds = job.panes[0].r;
-    for (job.panes[1..job.count]) |pane| bounds = bounds.unionWith(pane.r);
+    // The layer covers the place the panes settle in and nothing else, so what it reads back and
+    // blurs is only what the glass will show.
+    const bounds = area;
     job.pane = scaled(base, g);
+    // In steps, so a frost fading in is re-blurred a dozen times rather than every frame.
+    job.pane.radius = @round(job.pane.radius / blur_step) * blur_step;
     job.bounds = bounds;
     const backdrop = dvui.dataGetPtrDefault(null, id, "_drop_zones_frost", BlurBackdrop, .{});
     dvui.dataSetDeinitFunction(null, id, "_drop_zones_frost", &BlurBackdrop.releaseTexture);
     backdrop.mode = .readback;
     backdrop.radius_px = job.pane.radius;
     backdrop.detail = job.pane.detail;
-    // Re-read every frame: what is under the zones moves for the whole of a drag.
-    backdrop.init(dvui.windowRectScale().rectFromPhysical(bounds), .{ bounds, job.now, job.pane.radius });
+    // Ripples are bent into the picture before it is blurred, near each pane's rim; while any
+    // runs the place is read every frame.
+    backdrop.warp = .{ .now = job.now, .scale = scale };
+    for (job.panes[0..job.count]) |*pane| {
+        backdrop.warp.addPane(pane.r);
+        for (pane.waves) |w| backdrop.warp.addWave(w);
+    }
+    const reread = if (backdrop.warp.live()) job.now else @divTrunc(job.now, reread_ms * std.time.ns_per_ms);
+    backdrop.init(dvui.windowRectScale().rectFromPhysical(bounds), .{ bounds, reread, job.pane.radius });
     job.backdrop = backdrop;
     dvui.deferRender(job, LayerJob.draw);
 }
+
+/// How often the glass reads again what is under it, and the steps its blur grows in.
+const reread_ms: i128 = 250;
+const blur_step: f32 = 3;
 
 /// `base` at strength `g`: its blur, tint and lift all scaled together, so a weaker frost is the
 /// same glass, thinner.
@@ -415,10 +434,13 @@ const LayerJob = struct {
         // lift added over it.
         const frost_mod: dvui.Color = if (self.pane.tint != null) dvui.Color.white.opacity(1 - mix) else .white;
         for (self.panes[0..self.count]) |*pane| {
+            // The ripples were bent into the picture before it was blurred; here they only shade.
             liquid_glass.drawPane(tex, self.bounds, pane.r, self.radius, self.scale, frost_mod, .{
                 .lens = self.lens,
                 .waves = &pane.waves,
                 .now = self.now,
+                .waves_bend = false,
+                .sharp = backdrop.sharpTexture(),
             });
             if (self.pane.tint) |tint| BlurBackdrop.addTint(pane.r, self.corners, self.scale, tint, mix);
             const lift = std.math.clamp(self.pane.lift + lit_lift * pane.lit * self.strength, 0, 1);

@@ -3621,7 +3621,7 @@ test "motion: every curve starts at 0 and lands on 1, at every level" {
     }
 }
 
-test "motion: plain at the low end, a clean overshoot at minimal, a jiggle at playful" {
+test "motion: plain at the low end, a slight bounce at minimal, a soft spring at playful" {
     const M = fizzy.core.motion;
     // Just above off: linear, nothing overshoots.
     try std.testing.expectApproxEqAbs(@as(f32, 0.3), M.enterAt(0.001, 0.3), 0.01);
@@ -3629,15 +3629,11 @@ test "motion: plain at the low end, a clean overshoot at minimal, a jiggle at pl
     try std.testing.expect(peakOf(M.settleAt, 0.001) <= 1.001);
     // Minimal: arrivals overshoot a touch; moves only decelerate.
     const minimal = peakOf(M.enterAt, 0.5);
-    try std.testing.expect(minimal > 1.05 and minimal < 1.15);
+    try std.testing.expect(minimal > 1.03 and minimal < 1.08);
     try std.testing.expect(peakOf(M.settleAt, 0.5) <= 1.001);
-    // Playful: a bigger overshoot, and the spring dips back under before it settles.
+    // Playful: starts from rest — fluid, not snappy — and swings a little further.
+    try std.testing.expect(M.enterAt(1, 0.05) < M.enterAt(0.5, 0.05));
+    try std.testing.expect(M.enterAt(1, 0.05) < 0.1);
     try std.testing.expect(peakOf(M.enterAt, 1) > minimal);
-    var dips = false;
-    var t: f32 = 0.6;
-    while (t < 1) : (t += 0.01) {
-        if (M.enterAt(1, t) < 0.999) dips = true;
-    }
-    try std.testing.expect(dips);
     try std.testing.expect(peakOf(M.settleAt, 1) > 1.01);
 }

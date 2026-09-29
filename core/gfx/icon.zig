@@ -61,16 +61,23 @@ pub fn render(name: []const u8, tvg_bytes: []const u8, rs: dvui.RectScale, opts:
         return;
     }
 
-    // One flat colour on both fill and stroke is drawn white and tinted on the quad, so the
-    // texture is shared by every colour the icon is ever drawn in.
+    // One flat colour is drawn white and tinted on the quad, so the texture is shared by every
+    // colour the icon is ever drawn in: fill and stroke the same, or one of them clear (a line
+    // icon with no fill). Baked in its own colour instead, an icon whose colour animates — fading
+    // in, lighting under the pointer — is rasterized again every frame it moves.
     var bake = icon_opts;
     var tint = opts;
     const fill = flat(icon_opts.fill_color);
     const stroke = flat(icon_opts.stroke_color);
-    if (fill != null and stroke != null and std.meta.eql(fill.?, stroke.?)) {
-        bake.fill_color = .white;
-        bake.stroke_color = .white;
-        tint.colormod = multiply(opts.colormod, fill.?);
+    if (fill != null and stroke != null) {
+        const f = fill.?;
+        const k = stroke.?;
+        const one: ?dvui.Color = if (std.meta.eql(f, k)) f else if (f.a == 0) k else if (k.a == 0) f else null;
+        if (one) |c| {
+            bake.fill_color = if (f.a == 0) .transparent else .white;
+            bake.stroke_color = if (k.a == 0) .transparent else .white;
+            tint.colormod = multiply(opts.colormod, c);
+        }
     }
 
     // The texture is the icon at the size it is drawn, in pixels.

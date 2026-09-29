@@ -262,7 +262,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
             dvui.animation(self.wd.id, "_close_width", .{
                 .start_val = self.wd.rect.w,
                 .end_val = close_rect.w,
-                .end_time = 400_000,
+                .end_time = motion.duration(400_000),
                 .easing = motion.exit,
             });
         }
@@ -288,7 +288,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
             dvui.animation(self.wd.id, "_close_height", .{
                 .start_val = self.wd.rect.h,
                 .end_val = close_rect.h,
-                .end_time = 400_000,
+                .end_time = motion.duration(400_000),
                 .easing = motion.exit,
             });
         }
@@ -314,7 +314,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
             dvui.animation(self.wd.id, "_close_x", .{
                 .start_val = self.wd.rect.x,
                 .end_val = close_rect.x,
-                .end_time = 400_000,
+                .end_time = motion.duration(400_000),
                 .easing = motion.exit,
             });
         }
@@ -340,7 +340,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
             dvui.animation(self.wd.id, "_close_y", .{
                 .start_val = self.wd.rect.y,
                 .end_val = close_rect.y,
-                .end_time = 400_000,
+                .end_time = motion.duration(400_000),
                 .easing = motion.exit,
             });
         }
@@ -376,7 +376,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                         dvui.animation(self.wd.id, "_auto_width", .{
                             .start_val = self.wd.rect.w,
                             .end_val = ms.w,
-                            .end_time = 300_000,
+                            .end_time = motion.duration(300_000),
                             .easing = motion.enter,
                         });
                     }
@@ -384,7 +384,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                     dvui.animation(self.wd.id, "_auto_width", .{
                         .start_val = self.wd.rect.w,
                         .end_val = ms.w,
-                        .end_time = 300_000,
+                        .end_time = motion.duration(300_000),
                         .easing = motion.enter,
                     });
                 }
@@ -397,7 +397,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                         dvui.animation(self.wd.id, "_auto_height", .{
                             .start_val = self.wd.rect.h,
                             .end_val = ms.h,
-                            .end_time = 300_000,
+                            .end_time = motion.duration(300_000),
                             .easing = motion.enter,
                         });
                     }
@@ -405,7 +405,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
                     dvui.animation(self.wd.id, "_auto_height", .{
                         .start_val = self.wd.rect.h,
                         .end_val = ms.h,
-                        .end_time = 300_000,
+                        .end_time = motion.duration(300_000),
                         .easing = motion.enter,
                     });
                 }

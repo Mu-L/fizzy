@@ -84,7 +84,7 @@ pub fn reveal(id: dvui.Id, key: u64, opts: RevealOptions) Reveal {
         },
         .fading => {
             if (!running) {
-                dvui.animation(id, anim_key, .{ .start_time = 0, .end_time = opts.duration_micros });
+                dvui.animation(id, anim_key, .{ .start_time = 0, .end_time = motion.duration(opts.duration_micros) });
             }
             const v = if (dvui.animationGet(id, anim_key)) |a| std.math.clamp(a.value(), 0, 1) else 1;
             return .{ .prev_alpha = dvui.alpha(v), .value = v };
