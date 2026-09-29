@@ -243,7 +243,10 @@ fn deinitFromTarget(self: *BlurBackdrop) bool {
 
     const blur_prev_rendering = dvui.renderingSet(true);
     defer _ = dvui.renderingSet(blur_prev_rendering);
-    const prev_alpha = dvui.alpha(1);
+    // `alphaSet`, not `alpha(1)`: that multiplies the current alpha by 1, which is no change —
+    // under a fade the copy (and every pass after it) came out see-through.
+    const prev_alpha = dvui.currentWindow().alpha;
+    dvui.alphaSet(1);
     defer dvui.alphaSet(prev_alpha);
 
     const step = self.level(0, w, h) orelse return false;
@@ -455,7 +458,10 @@ fn runKawase(self: *BlurBackdrop, source: Texture, restore_target: bool, first: 
     var last: ?usize = null;
     // The taps are weights of their own; the ambient alpha (a region fading in around the
     // caller) must not scale them too.
-    const prev_alpha = dvui.alpha(1);
+    // `alphaSet`, not `alpha(1)`: that multiplies the current alpha by 1, which is no change —
+    // under a fade the copy (and every pass after it) came out see-through.
+    const prev_alpha = dvui.currentWindow().alpha;
+    dvui.alphaSet(1);
     defer dvui.alphaSet(prev_alpha);
 
     var prev1: dvui.RenderTarget = undefined;
@@ -682,7 +688,10 @@ fn runKawase(self: *BlurBackdrop, source: Texture, restore_target: bool, first: 
 /// down, by the copy's own 2×2 box) is never written; halvings take slots from `first`, and the
 /// passes ping-pong between the next two.
 fn runFine(self: *BlurBackdrop, source: Texture, restore_target: bool, first: usize, source_coarse: u32) ?usize {
-    const prev_alpha = dvui.alpha(1);
+    // `alphaSet`, not `alpha(1)`: that multiplies the current alpha by 1, which is no change —
+    // under a fade the copy (and every pass after it) came out see-through.
+    const prev_alpha = dvui.currentWindow().alpha;
+    dvui.alphaSet(1);
     defer dvui.alphaSet(prev_alpha);
 
     var prev1: dvui.RenderTarget = undefined;
@@ -805,7 +814,10 @@ fn dither(last: Texture) void {
     const prev_clip = dvui.clipGet();
     defer dvui.clipSet(prev_clip);
     dvui.clipSet(.{ .w = w, .h = h });
-    const prev_alpha = dvui.alpha(1);
+    // `alphaSet`, not `alpha(1)`: that multiplies the current alpha by 1, which is no change —
+    // under a fade the copy (and every pass after it) came out see-through.
+    const prev_alpha = dvui.currentWindow().alpha;
+    dvui.alphaSet(1);
     defer dvui.alphaSet(prev_alpha);
     // The texture holds 0…63 (in 1/255 units); 1/64 of that is 0…1 LSB. Tiled by uv > 1.
     dvui.renderTexture(noise, .{ .r = .{ .w = w, .h = h }, .s = 1 }, .{
@@ -987,6 +999,14 @@ const FrostJob = struct {
         const self: *FrostJob = @ptrCast(@alignCast(ctx orelse return));
         const prof = @import("../profile.zig").begin("fizzy", "frost pane");
         defer prof.end();
+        // At full alpha, whatever alpha the pane was queued under. The replay runs under the
+        // alpha of the moment it was queued, and a pane drawn inside a fade — a tooltip fading in
+        // under its own alpha — is queued at partial alpha; but a frost *replaces* what it covers,
+        // so at partial alpha it writes a half-transparent patch — a hole to the desktop through
+        // a see-through window. The glass fades by forming (`Pane.form`), never by alpha.
+        const prev_alpha = dvui.currentWindow().alpha;
+        dvui.alphaSet(1);
+        defer dvui.alphaSet(prev_alpha);
         // The capture, now that everything below this pane is on the target.
         self.backdrop.deinit();
         const weight: f32 = if (self.tint != null) 1 - self.mix else 1;

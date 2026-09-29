@@ -474,6 +474,11 @@ const LayerJob = struct {
     fn draw(ctx: ?*anyopaque) void {
         const self: *LayerJob = @ptrCast(@alignCast(ctx orelse return));
         const backdrop = self.backdrop orelse return;
+        // At full alpha, as every frost draws (`BlurBackdrop.FrostJob`): the glass comes in by
+        // its strength, and a frost at partial alpha is a hole.
+        const prev_alpha = dvui.currentWindow().alpha;
+        dvui.alphaSet(1);
+        defer dvui.alphaSet(prev_alpha);
         backdrop.deinit();
         const tex = backdrop.small orelse return;
         if (self.bounds.w < 1 or self.bounds.h < 1) return;
