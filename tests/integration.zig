@@ -3647,8 +3647,9 @@ test "motion: every level arrives on time, and passes through without a kink" {
         // Above minimal it draws back before it leaves.
         if (M.swingAt(lv) > 0) try std.testing.expect(M.exitAt(lv, M.swingAt(lv) * 0.4) < 0);
         if (M.swingAt(lv) > 0) {
-            // The same speed either side of the target.
-            const h: f32 = 0.001;
+            // The same speed either side of the target. A fine step: at low levels the swing
+            // turns sharply, and a coarse one reads its curvature as a kink.
+            const h: f32 = 0.0001;
             const a = M.arrival;
             const before = (M.enterAt(lv, a) - M.enterAt(lv, a - h)) / h;
             const after = (M.enterAt(lv, a + h) - M.enterAt(lv, a)) / h;

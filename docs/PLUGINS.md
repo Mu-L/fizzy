@@ -1200,8 +1200,9 @@ through `core.vfs.Mem` in a few dozen lines. The design and its remaining edges 
 The user picks how the app moves with one setting, **Motion**, from 0 to 1: 0 is off (nothing
 animates), up to 0.5 — *minimal*, the default — motion is plain and even, and toward 1 —
 *playful* — things carry on past where they are going and settle back (about 12% at 1). Every
-level arrives on time — at `motion.arrival` (40%) of the duration it was given — and the
-overshoot swings in the time after, so the level changes character, never speed. A second setting, **Motion speed**,
+level arrives on time — at `motion.arrival` (40%) of the duration it was given — so the level
+changes character, never speed: above minimal the approach eases into the target and a damped
+spring carries it past and lets it settle over the rest of the duration. A second setting, **Motion speed**,
 runs every duration from half to twice as fast. A system request for reduced motion turns motion
 off. The host publishes both into the shared dvui window each frame, so a plugin's copy of `core` reads the same value, and sets dvui's
 own `reduce_motion` in the plugin's image too.
@@ -1216,7 +1217,7 @@ dvui.animation(id, "open", .{ .start_val = 0, .end_val = 1, .end_time = motion.d
 | Ask | For |
 |---|---|
 | `motion.enter` | something arriving — opening, appearing, growing into place |
-| `motion.exit` | something leaving — `enter` run backwards |
+| `motion.exit` | something leaving — a quick draw back above minimal, then gone at `arrival` |
 | `motion.settle` | something moving to a new place or size — slides, resizes, reorders |
 | `motion.fade` | opacity; never overshoots |
 | `motion.duration(us)` / `durationMs(ms)` | a duration at this level: zero when off |

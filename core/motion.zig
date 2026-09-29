@@ -119,19 +119,18 @@ pub const open_us: i32 = 260_000;
 
 /// When, as a share of its duration, every motion reaches its target, at every level.
 pub const arrival: f32 = 0.4;
-/// The share of a duration the overshoot takes after the arrival, at playful: long enough to
-/// carry it about 12% past the target at the approach's own speed, and back.
+/// The share of a duration a leaving motion's draw back takes, at playful (`exit`).
 pub const swing_max: f32 = 0.26;
 
-/// The share of a duration the overshoot takes at level `lv`: none up to minimal.
+/// The share of a duration the draw back before leaving takes at level `lv`: none up to minimal.
 pub fn swingAt(lv: f32) f32 {
     return swing_max * std.math.clamp((lv - 0.5) * 2, 0, 1);
 }
 
 // ── Curves by intent ────────────────────────────────────────────────────────────────────────────
 
-/// Something arriving — opening, appearing, growing into place: at constant speed to its target
-/// by `arrival`, then, above minimal, carrying on past it and settling back.
+/// Something arriving — opening, appearing, growing into place: to its target by `arrival`, then,
+/// above minimal, carrying on past it and settling back like a spring (`enterAt`).
 pub fn enter(t: f32) f32 {
     return enterAt(level(), t);
 }
@@ -156,25 +155,66 @@ pub fn fade(t: f32) f32 {
 
 /// `enter` with no hold after it: the approach and the swing over the whole of `t`, for a caller
 /// timing phases of its own (the drop zones' split), where a motion that finished early and sat
-/// still would leave its phase dead. Arrives at the end at minimal, halfway at playful.
+/// still would leave its phase dead. Arrives at the end at minimal, `arrival` in at playful — whose
+/// swing already runs to the end.
 pub fn enterFull(t: f32) f32 {
     const lv = level();
-    return enterAt(lv, clamp01(t) * (arrival + swingAt(lv)));
+    return enterAt(lv, clamp01(t) * (arrival + (1 - arrival) * playfulness(lv)));
 }
 
-/// `enter` at a given level, for a call site (or a test) that has its own. Linear to the target
-/// at `arrival`, then a swing that leaves with the approach's own speed — so there is no kink as
-/// it passes — rises, and comes back to rest at the end of it.
+/// How far toward playful level `lv` is, 0 up to minimal to 1 at playful.
+fn playfulness(lv: f32) f32 {
+    return std.math.clamp((lv - 0.5) * 2, 0, 1);
+}
+
+/// How far past its target `enter` carries at playful.
+pub const overshoot_max: f32 = 0.12;
+/// The approach's speed as it leaves and as it reaches the target, at playful, relative to
+/// constant speed: quicker away, and slower into the target so the swing past it is carried, not
+/// flung. Between them a smooth ease-out.
+const leave_speed: f32 = 1.5;
+const arrive_speed: f32 = 0.6;
+/// How quickly the swing dies down, as a share of how quickly it turns: each half turn is
+/// `e^(-damping·π)` of the one before — a broad swing past, a small one back, then rest.
+const damping: f32 = 0.6;
+
+/// `enter` at a given level, for a call site (or a test) that has its own.
+///
+/// Up to minimal, constant speed to the target at `arrival`, then still. Above it an ease-out
+/// to the target, reaching it at `arrival` all the same, then a damped spring that leaves it at
+/// the approach's own speed — no kink as it passes — swings past (up to `overshoot_max` at
+/// playful), back a little, and comes to rest by the end. The swing takes the whole of the rest of
+/// the duration rather than a short burst after the arrival, so it reads as mass settling, not a
+/// flick.
 pub fn enterAt(lv: f32, t: f32) f32 {
     const u = clamp01(t);
-    if (u <= arrival) return u / arrival;
-    const swing = swingAt(lv);
-    if (swing <= 0 or u >= arrival + swing) return 1;
-    const x = (u - arrival) / swing;
-    // y = 1 + B·sin(πx)·(1 − x): leaves 1 with slope B·π/swing, which is the approach's
-    // 1/arrival, and lands back on 1 at rest.
-    const b = swing / (std.math.pi * arrival);
-    return 1 + b * @sin(std.math.pi * x) * (1 - x);
+    const k = playfulness(lv);
+    // The approach: a cubic from 0 to 1 over [0, arrival], leaving and arriving at `m0`, `m1`
+    // times constant speed — both 1 at minimal, which is the straight line.
+    const m0 = 1 + (leave_speed - 1) * k;
+    const m1 = 1 + (arrive_speed - 1) * k;
+    if (u <= arrival) {
+        const x = u / arrival;
+        const x2 = x * x;
+        const x3 = x2 * x;
+        return (x3 - 2 * x2 + x) * m0 + (-2 * x3 + 3 * x2) + (x3 - x2) * m1;
+    }
+    if (k <= 0.001) return 1;
+    // The swing: 1 + (v/ω)·e^(-σ·τ)·sin(ω·τ), which leaves 1 at the arrival speed `v`; ω is set
+    // by how far past it should carry, since that peak is (v/ω)·g for the damping's g.
+    const v = m1 / arrival;
+    const peak_turn = std.math.atan(1 / damping);
+    const g = @exp(-damping * peak_turn) * @sin(peak_turn);
+    const w = v * g / (overshoot_max * k);
+    const sigma = damping * w;
+    const tau = u - arrival;
+    const rest = 1 - arrival;
+    // What is left of the swing fades out over the last of the duration, so it is at rest at
+    // the end rather than stopped there.
+    const fade_from = 0.7 * rest;
+    const fx = std.math.clamp((tau - fade_from) / (rest - fade_from), 0, 1);
+    const window = 1 - fx * fx * (3 - 2 * fx);
+    return 1 + (v / w) * @exp(-sigma * tau) * @sin(w * tau) * window;
 }
 
 /// `exit` at a given level: the swing run backwards first — a draw back — then the approach run
@@ -184,7 +224,22 @@ pub fn exitAt(lv: f32, t: f32) f32 {
     const span = arrival + swing;
     const u = clamp01(t);
     if (u >= span) return 1;
-    return 1 - enterAt(lv, span - u);
+    return 1 - swingEnterAt(lv, span - u);
+}
+
+/// The arrival `exit` runs backwards: constant speed to the target at `arrival`, then a short
+/// swing that leaves with the approach's speed and comes back to rest `swingAt` later — a quick
+/// draw back before something leaves, where a long one would only delay it.
+fn swingEnterAt(lv: f32, t: f32) f32 {
+    const u = clamp01(t);
+    if (u <= arrival) return u / arrival;
+    const swing = swingAt(lv);
+    if (swing <= 0 or u >= arrival + swing) return 1;
+    const x = (u - arrival) / swing;
+    // y = 1 + B·sin(πx)·(1 − x): leaves 1 with slope B·π/swing, which is the approach's
+    // 1/arrival, and lands back on 1 at rest.
+    const b = swing / (std.math.pi * arrival);
+    return 1 + b * @sin(std.math.pi * x) * (1 - x);
 }
 
 /// `settle` at a given level.
