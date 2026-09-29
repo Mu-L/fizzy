@@ -961,6 +961,18 @@ pub fn drawPluginRegionContents(self: *Layout, token: sdk.RegionSpec.Token) !dvu
             dvui.refresh(null, @src(), null);
         };
     }
+    // A document lifted off its tab strip has no place of its own to be photographed from
+    // (`ViewDrag.beginLoose`): its card's preview is taken here, from the pane that is showing
+    // it, from this very draw and no other — as a region's card is (`Region.drawContentsPhotographed`).
+    if (ViewDrag.previewWanted(self, s.id)) {
+        const rect = dvui.parentGet().data().contentRectScale().r.intersect(dvui.clipGet());
+        if (core.anim.CrossFade.beginCapture(rect)) |pic_in| {
+            var pic = pic_in;
+            const res = self.drawSwapped(key, s, null, .none);
+            ViewDrag.keepShot(self, .{ .card = true }, &pic);
+            return res;
+        }
+    }
     return self.drawSwapped(key, s, null, .none);
 }
 

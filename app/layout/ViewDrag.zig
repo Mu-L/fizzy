@@ -468,17 +468,23 @@ pub fn drawFloat(l: *Layout) void {
     if (!d.active()) return;
     const mouse = dvui.currentWindow().mouse_pt;
     const now = dvui.currentWindow().frame_time_ns;
-    // The lift is a move to a new size, at the app's motion level: instant when motion is off.
-    const dur: f64 = core.motion.durationMs(220) * @as(f64, std.time.ns_per_ms);
+    // The lift grows the card the way a dialog grows open (`motion.enter` over the dialogs' 300ms
+    // as written, past its size and back when motion is playful): instant when motion is off.
+    const dur: f64 = core.motion.durationMs(300) * @as(f64, std.time.ns_per_ms);
     const elapsed: f64 = @floatFromInt(now - d.start_ns);
-    const t = if (dur <= 0) 1 else core.motion.settle(@floatCast(std.math.clamp(elapsed / dur, 0, 1)));
+    const t = if (dur <= 0) 1 else core.motion.enter(@floatCast(std.math.clamp(elapsed / dur, 0, 1)));
 
-    // Shrink from the place's own size to a card, keeping the grab point
-    // under the pointer, so the view appears to be picked up rather than
-    // replaced by an icon.
+    // From the size of what was grabbed to a card, keeping the grab point under the pointer, so
+    // the view appears to be picked up rather than replaced by an icon: a place shrinks into its
+    // photograph, a tab grows into its document's (or, with none, into a pill of its own).
     const from = d.from;
     const scale = dvui.currentWindow().natural_scale;
-    const target = floatTarget(from, scale);
+    const pad = card_padding * scale;
+    const title = if (l.host.surfaceById(d.moved_id)) |s| s.title else "view";
+    const target: dvui.Size.Physical = if (d.texture != null) blk: {
+        const f = floatTarget(d.texture_rect.size(), scale);
+        break :blk .{ .w = f.w + 2 * pad, .h = f.h + 2 * pad };
+    } else pillSize(l, d, title, scale);
     const w = from.w + (target.w - from.w) * t;
     const h = from.h + (target.h - from.h) * t;
     const sx = if (from.w > 0) w / from.w else 1;
@@ -487,42 +493,109 @@ pub fn drawFloat(l: *Layout) void {
     const tl = mouse.plus(.{ .x = off.x * sx, .y = off.y * sy });
     const nat = dvui.Rect.Physical.fromPoint(tl).toSize(.{ .w = w, .h = h }).toNatural();
 
-    const theme = dvui.themeGet();
+    // Glass, like every floating surface: frosted over what it passes above (forming as it is
+    // lifted), its shadow a ring round it, what it carries on top.
+    const corners = core.corners.round(core.corners.card);
     var fw: dvui.FloatingWidget = undefined;
     fw.init(@src(), .{ .mouse_events = false }, .{
         .rect = .{ .x = nat.x, .y = nat.y, .w = nat.w, .h = nat.h },
-        .padding = .{},
-        .corners = core.corners.round(core.corners.card),
-        .background = true,
-        .color_fill = .{ .color = theme.color(.window, .fill) },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = theme.color(.highlight, .fill) },
-        .box_shadow = .{
-            .color = .black,
-            .alpha = 0.28,
-            .fade = 12,
-            .offset = .{ .x = 0, .y = 4 },
-            .corners = core.corners.round(core.corners.card),
-        },
+        .padding = .all(card_padding),
+        .corners = corners,
+        .background = false,
+        .border = .all(0),
     });
     defer fw.deinit();
-
-    const dest = fw.data().contentRectScale().r;
-    if (d.texture) |tex| {
-        core.anim.blit(tex, null, dest, 0, 1);
-    } else {
-        // Nothing photographed it — a document tab, lifted off its strip — so the card says what
-        // it is carrying by name.
-        const title = if (l.host.surfaceById(d.moved_id)) |s| s.title else "view";
-        dvui.labelNoFmt(@src(), title, .{}, .{
-            .gravity_x = 0.5,
-            .gravity_y = 0.5,
-            .color_text = .{ .color = theme.color(.control, .text) },
-        });
+    {
+        const brs = fw.data().borderRectScale();
+        if (!core.dialogs.frostPane(fw.data().id, brs.r, corners, brs.s)) {
+            brs.r.fill(corners.scale(brs.s, dvui.CornerRect.Physical), .{ .color = .{ .color = core.dialogs.dialogFill() }, .fade = 1 });
+        }
+        core.dialogs.glassShadow(brs.r, corners, brs.s, core.dialogs.surfaceShadow(), 1);
     }
-    // Frames only while the card is still shrinking into the hand: after that it moves when the
-    // pointer does, and the pointer moving is a frame anyway.
+
+    if (d.texture) |tex| {
+        // The photograph, inset in the glass, its corners following the card's.
+        // Over the content fill: a document paints no background of its own (the pane behind it
+        // does), and on bare glass its photograph was text floating in the frost.
+        const inner = core.corners.round(@max(0, core.corners.scaled(core.corners.card) - card_padding));
+        const crs = fw.data().contentRectScale();
+        crs.r.fill(inner.scale(crs.s, dvui.CornerRect.Physical), .{ .color = .{ .color = dvui.themeGet().color(.content, .fill) }, .fade = 1 });
+        dvui.renderTexture(tex, crs, .{ .corners = inner }) catch {};
+    } else {
+        drawTabFace(l, d, title);
+    }
+    // Frames only while the card is still changing into the one in the hand: after that it moves
+    // when the pointer does, and the pointer moving is a frame anyway.
     if (elapsed < dur) dvui.refresh(null, @src(), null);
+}
+
+/// Points between the card's glass and what it carries.
+const card_padding: f32 = 6;
+
+/// Points: the tab face on a card with no photograph — a file icon, the title and, when there
+/// are unsaved changes, the dirty dot — and the gaps between them.
+const face_icon: f32 = 16;
+const face_gap: f32 = 6;
+const face_dot: f32 = 7;
+const face_pad_x: f32 = 10;
+const face_pad_y: f32 = 6;
+
+/// The document behind the dragged surface, when it is one.
+fn draggedDoc(l: *Layout, d: ViewDrag) ?struct { path: []const u8, dirty: bool } {
+    const path = sdk.document.pathOfSurfaceId(d.moved_id) orelse return null;
+    const doc = l.host.docFromPath(path);
+    return .{ .path = path, .dirty = if (doc) |dh| dh.owner.isDirty(dh) else false };
+}
+
+/// A card with no photograph: a pill round the tab's face.
+fn pillSize(l: *Layout, d: ViewDrag, title: []const u8, scale: f32) dvui.Size.Physical {
+    const text = dvui.Font.theme(.body).textSize(title);
+    const doc = draggedDoc(l, d);
+    var w = text.w + 2 * face_pad_x;
+    if (doc != null) w += face_icon + face_gap;
+    if (doc) |dd| if (dd.dirty) {
+        w += face_gap + face_dot;
+    };
+    const h = @max(face_icon, text.h) + 2 * face_pad_y;
+    return .{ .w = (w + 2 * card_padding) * scale, .h = (h + 2 * card_padding) * scale };
+}
+
+/// What a tab shows, centred on the card: the file's icon, its title, the dirty dot.
+fn drawTabFace(l: *Layout, d: ViewDrag, title: []const u8) void {
+    const color = dvui.themeGet().color(.control, .text);
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .gravity_y = 0.5 });
+    defer row.deinit();
+    const doc = draggedDoc(l, d);
+    if (doc) |dd| {
+        var slot = dvui.box(@src(), .{}, .{
+            .gravity_y = 0.5,
+            .min_size_content = .all(face_icon),
+            .max_size_content = .size(.all(face_icon)),
+            .margin = .{ .w = face_gap },
+        });
+        defer slot.deinit();
+        _ = l.host.drawFileIcon(std.fs.path.extension(dd.path), dd.path, color);
+    }
+    dvui.labelNoFmt(@src(), title, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = color }, .padding = .{} });
+    if (doc) |dd| if (dd.dirty) {
+        var dot = dvui.box(@src(), .{}, .{
+            .gravity_y = 0.5,
+            .min_size_content = .all(face_dot),
+            .margin = .{ .x = face_gap },
+            .background = true,
+            .color_fill = .{ .color = color.opacity(0.8) },
+            .corners = .round(face_dot / 2),
+        });
+        dot.drawBackground();
+        dot.deinit();
+    };
+}
+
+/// Whether surface `id`'s draw this frame should photograph it for the card: a loose drag (a
+/// document lifted off its tab strip) carrying it, with no picture yet.
+pub fn previewWanted(l: *Layout, id: []const u8) bool {
+    const d = l.state.view_drag;
+    return d.active() and d.loose() and d.texture == null and std.mem.eql(u8, d.moved_id, id);
 }
 
 fn floatTarget(from: dvui.Size.Physical, scale: f32) dvui.Size.Physical {
