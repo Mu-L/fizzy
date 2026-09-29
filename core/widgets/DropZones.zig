@@ -599,8 +599,12 @@ fn drawIcon(zr: dvui.Rect.Physical, glyph: Glyph, g: f32, lit: f32, scale: f32, 
     if (arrive <= 0.01) return;
     const theme = dvui.themeGet();
     const ink = theme.color(.window, .text);
+    // Full ink whether lit or not: every bubble is a live option, and a glyph mixed toward the
+    // dialog fill read as see-through over frost that is not that colour — the lit glass says
+    // which one a release takes. Mixed in only as the bubble arrives.
+    _ = lit;
     const glass_c = dialogs.dialogFill().opacity(1);
-    const color = glass_c.lerp(ink, arrive * (0.35 + 0.65 * lit));
+    const color = glass_c.lerp(ink, arrive);
     const at_r: dvui.Rect.Physical = .{ .x = zr.x + (zr.w - side) / 2, .y = zr.y + (zr.h - side) / 2, .w = side, .h = side };
     icon_tex.render(glyph.name, glyph.tvg, .{ .r = at_r, .s = scale }, .{}, .{
         .stroke_color = .{ .color = color },
