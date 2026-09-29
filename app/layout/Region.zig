@@ -407,10 +407,12 @@ pub fn init(self: *Layout, src: std.builtin.SourceLocation, init_opts: InitOptio
     var default_extent: f32 = 0;
     if (init_opts.resize) {
         const given = opts.min_size_content orelse dvui.Size{};
+        // The shape's `min_size_content` is the content it wants to open to; the extent is the
+        // whole region round it.
         const default: f32 = switch (axis) {
             .horizontal => given.w,
             .vertical => given.h,
-        };
+        } + alongAxis(opts.paddingGet(), axis) + alongAxis(opts.borderGet(), axis);
         default_extent = default;
         // Seeded from what the user last left this region at, by name — so a layout persists
         // across restarts without the framework knowing which regions an app has.
@@ -451,19 +453,25 @@ pub fn init(self: *Layout, src: std.builtin.SourceLocation, init_opts: InitOptio
         // stop responding once it reaches that content's natural width. Pinning the maximum too
         // makes the stored size exact and stops a plugin's content dictating the app's
         // proportions — the hazard `layout.zig` names in its sizing notes.
+        //
+        // The extent is the region's whole reach — its border edge to border edge, what a split
+        // measures from the fixed edge to the pointer — so its own padding and border come out of
+        // it before it becomes a content size. Taken as the content size, a place card's padding
+        // was added on top: a split grabbed at rest jumped by the card's padding either side.
+        box_opts.padding = foldedPadding(box_opts.paddingGet(), extent, axis);
+        const content = @max(0, extent - alongAxis(box_opts.paddingGet(), axis) - alongAxis(box_opts.borderGet(), axis));
         box_opts.min_size_content = switch (axis) {
-            .horizontal => .{ .w = extent, .h = given.h },
-            .vertical => .{ .w = given.w, .h = extent },
+            .horizontal => .{ .w = content, .h = given.h },
+            .vertical => .{ .w = given.w, .h = content },
         };
         box_opts.max_size_content = switch (axis) {
-            .horizontal => .width(extent),
-            .vertical => .height(extent),
+            .horizontal => .width(content),
+            .vertical => .height(content),
         };
         if (parent) |p| {
             p.last_resizable = id;
             p.resizables.append(self.arena, id) catch {};
         }
-        box_opts.padding = foldedPadding(box_opts.paddingGet(), extent, axis);
         shut_now = extent <= 0;
     }
 
@@ -1059,6 +1067,14 @@ fn sashWidth(self: *Layout, name: []const u8, target: dvui.Id) f32 {
 /// it comes in proportionally, so nothing reaches nothing.
 ///
 /// Only along the parent's axis. The cross axis is not closing.
+/// What `r` (a padding or border) takes along `axis`: both of its sides that way.
+fn alongAxis(r: dvui.Rect, axis: dvui.enums.Direction) f32 {
+    return switch (axis) {
+        .horizontal => r.x + r.w,
+        .vertical => r.y + r.h,
+    };
+}
+
 fn foldedPadding(p: dvui.Rect, extent: f32, axis: dvui.enums.Direction) dvui.Rect {
     const along = switch (axis) {
         .horizontal => p.x + p.w,

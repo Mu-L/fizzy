@@ -113,7 +113,7 @@ pub fn layout(ctx: ?*anyopaque, f: *Layout) !dvui.App.Result {
 /// Padding and margin stay the region's `dvui.Options`. A sash gap is a
 /// packed split, never a handle_size margin on the card.
 const place_radius: f32 = 12;
-/// Between a place card's edge and the surface in it, before the rounding's own inset.
+/// Between a place card's edge and the surface in it.
 const place_padding: f32 = 8;
 
 /// The window fill shows as a frame around the place cards — the icon rail on
@@ -136,11 +136,9 @@ fn placeCard(editor: *fizzy.Editor, extra: dvui.Options) dvui.Options {
     opts.color_fill = .{ .color = fill };
     const radius = fizzy.core.corners.scaled(place_radius);
     opts.corners = dvui.CornerRect.round(radius);
-    // Inset the plugin surface inside the card, and by what the card's rounding takes on top
-    // (`cornerInset`): content runs square to its edges — a canvas shades them — and at 8 alone
-    // its corner sat right against the card's curve. A sash is a packed split, not this
-    // padding — this only shrinks the content rect.
-    if (opts.padding == null) opts.padding = .all(place_padding + fizzy.core.dialogs.cornerInset(radius));
+    // Inset the plugin surface inside the card. A sash is a packed split,
+    // not this padding — this only shrinks the content rect.
+    if (opts.padding == null) opts.padding = .all(place_padding);
     if (opts.margin == null) opts.margin = .{};
     return opts;
 }
