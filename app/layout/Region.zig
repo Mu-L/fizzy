@@ -74,10 +74,20 @@ on_drop: ?*const fn (ctx: ?*anyopaque, drop: sdk.RegionSpec.Drop) bool = null,
 drop_ctx: ?*anyopaque = null,
 
 /// The key this region's selection lives under in the host — see `Layout.selectedIn`.
+///
+/// A by-name place keeps its selection under its name alone. A place split into others is known
+/// by that name twice — the branch that holds the split (keyed to `slot`) and the leaf left
+/// showing its views (keyed to its own keywords) — and a key folding in the keywords gave the
+/// two different selections: a drag out of the place read the branch's and carried a view the
+/// place was not showing.
 pub fn selectionKey(self: *const Region) u64 {
-    const group = sdk.keywords.groupKey(self.keywords);
-    if (!self.by_name) return group;
-    return group ^ std.hash.Wyhash.hash(0x51a7, self.name);
+    if (self.by_name) return namedSelectionKey(self.name);
+    return sdk.keywords.groupKey(self.keywords);
+}
+
+/// `selectionKey` of the by-name place `name`, for when only its name is at hand.
+pub fn namedSelectionKey(name: []const u8) u64 {
+    return std.hash.Wyhash.hash(0x51a7, name);
 }
 
 pub fn deinit(self: *Region) void {

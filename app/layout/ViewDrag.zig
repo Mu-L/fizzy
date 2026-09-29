@@ -819,7 +819,14 @@ fn dropOnPluginChooser(l: *Layout, source: []const u8, dest: []const u8, mouse: 
 /// come through here too, which is why it takes a `Drop.Kind` rather than a
 /// pointer position.
 pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) void {
-    const plan = Drop.plan(kind, std.mem.eql(u8, source, dest), joins(l, source, dest)) orelse return;
+    // Split onto its own place, a view stays where it is (the empty leaf opens beside it) only
+    // when it is all the place holds. Beside others it goes to the leaf under the pointer and they
+    // stay: left in the origin, the view and the others kept the place between them and the leaf
+    // opened empty on the far side — a tab dragged to the top of its own strip's place moved the
+    // tabs left behind to the bottom, as though another view had been carried.
+    const same = std.mem.eql(u8, source, dest);
+    const stays = same and (kind != .split or holding(l, source).len <= 1);
+    const plan = Drop.plan(kind, stays, joins(l, source, dest)) orelse return;
     // The trash is about what is carried, not where it was let go.
     if (plan == .remove) return remove(l, source);
     const moved = ownId(l.arena, movedFrom(l, source) orelse return) orelse return;
@@ -1040,8 +1047,7 @@ fn ownId(arena: std.mem.Allocator, id: []const u8) ?[]const u8 {
 }
 
 fn slotKey(name: []const u8) u64 {
-    const group = sdk.keywords.groupKey(Layout.slot_keywords);
-    return group ^ std.hash.Wyhash.hash(0x51a7, name);
+    return Region.namedSelectionKey(name);
 }
 
 fn selectNamed(l: *Layout, name: []const u8, id: []const u8) void {
