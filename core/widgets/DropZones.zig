@@ -197,12 +197,12 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
     if (g > 0.01) {
         var area = r.center;
         for (all[1..]) |z| area = area.unionWith(r.of(z));
-        const set = splitting(r, area, st.shown, &st.lit, scale);
-        glass(id, set.panes[0..set.count], area, g, scale);
-        if (set.count == all.len) for (all, 0..) |z, i| {
+        const panes = splitting(r, area, st.shown, &st.lit, scale);
+        glass(id, &panes, area, g, scale);
+        for (all, 0..) |z, i| {
             if (z == .center and look.center == .none) continue;
-            drawIcon(set.panes[i].r, iconFor(z, look.center), @min(g, set.panes[i].lens), st.lit[i], scale);
-        };
+            drawIcon(panes[i].r, iconFor(z, look.center), @min(g, panes[i].lens), st.lit[i], scale);
+        }
     }
 
     if (moving) {
@@ -268,55 +268,41 @@ fn frost(t: f32) f32 {
     return motion.fade(t);
 }
 
-/// The zones `p` of the way in, as liquid splitting into five. A round drop at the place's centre
-/// swells out to fill it, its corners tightening as it reaches the edges; then it parts — as tiles
-/// that exactly fill the place, each grown half a gap toward its neighbours and square where they
-/// meet — the gaps open, the corners where they met round off and each piece's edge forms, and
-/// they are five.
-/// Leaving runs it backwards: the pieces run together into one, and it fades. Glass that overlaps
-/// itself would double its tint where it did, so the pieces never overlap — they tile.
-/// The glass `splitting` lays down: one drop, or the five pieces it split into.
-const Split = struct {
-    panes: [all.len]Pane,
-    count: usize,
-};
-
-fn splitting(r: Rects, area: dvui.Rect.Physical, p: f32, lit: *const [all.len]f32, scale: f32) Split {
+/// The zones `p` of the way in, as liquid splitting into five. They come out of the place's
+/// centre as a cluster of droplets — the five tiles that exactly fill the place, each grown half
+/// a gap toward its neighbours, swelling from small together and each as round as its size
+/// allows — and once they have mostly filled it they part: the gaps open, and each piece's
+/// corners tighten to the app's rounding as its edge forms. Leaving runs it backwards: the pieces
+/// run together, round up, and shrink away into the centre.
+///
+/// Round from the start, never square: a piece that appeared with square corners and rounded
+/// them later read as a box being cut, not liquid. Pieces never overlap — glass over glass would
+/// double its tint where it did — so the cluster is tiles, rounded, not overlapping drops.
+fn splitting(r: Rects, area: dvui.Rect.Physical, p: f32, lit: *const [all.len]f32, scale: f32) [all.len]Pane {
     const half_gap = gap * scale / 2;
     const radius = surfaceRadius(scale);
-    // A drop at the place's centre swells to fill it, then splits once it is mostly there. While
-    // it is small it is round all over — its outer corners as round as its size allows — and
-    // they tighten to the surface rounding as it reaches the edges.
     const fill = grow(std.math.clamp(p / 0.55, 0, 1));
     const swell = drop_start + (1 - drop_start) * fill;
     const split = grow(std.math.clamp((p - 0.4) / 0.6, 0, 1));
-    const round = std.math.clamp(split, 0, 1);
-    const outer_radius = radius + (@min(area.w, area.h) / 2 - radius) * (1 - std.math.clamp(fill, 0, 1));
+    const settle = std.math.clamp(split, 0, 1);
     const c = area.center();
     var out: [all.len]Pane = undefined;
-    // Until it starts to part it is one pane — as tiles, its outline could only round as far as
-    // the thin side bands allow, and a drop is round. The tiles take over at the instant they
-    // start to part, when the drop has all but reached the place's corners and matches them.
-    if (split <= 0.001) {
-        const drop: dvui.Rect.Physical = .{ .x = c.x - area.w * swell / 2, .y = c.y - area.h * swell / 2, .w = area.w * swell, .h = area.h * swell };
-        out[0] = .{ .r = drop, .radii = liquid_glass.uniform(outer_radius), .lens = 0 };
-        return .{ .panes = out, .count = 1 };
-    }
     for (all, 0..) |z, i| {
         const settled = r.of(z);
         const tile = tileOf(settled, z, half_gap);
         const here = lerpRect(tile, settled, split);
         // The whole set swells as one, about the place's centre.
         const swollen: dvui.Rect.Physical = .{ .x = c.x + (here.x - c.x) * swell, .y = c.y + (here.y - c.y) * swell, .w = here.w * swell, .h = here.h * swell };
-        var radii: liquid_glass.Radii = undefined;
-        for (outerCorners(z), 0..) |outer, k| radii[k] = if (outer) outer_radius else radius * round;
+        // As round as the piece allows, tightening to the rounding as it settles.
+        const roundest = @min(swollen.w, swollen.h) / 2;
+        const corner = radius + (@max(radius, roundest) - radius) * (1 - settle);
         // Each piece's own edge — its refraction and light — forms as it comes away.
-        out[i] = .{ .r = swollen, .lit = lit[i], .radii = radii, .lens = round };
+        out[i] = .{ .r = swollen, .lit = lit[i], .radii = liquid_glass.uniform(corner), .lens = settle };
     }
-    return .{ .panes = out, .count = all.len };
+    return out;
 }
 
-/// How big the drop the zones come out of starts, of the place.
+/// How big the cluster the zones come out of starts, of the place.
 const drop_start: f32 = 0.18;
 
 /// `settled` grown half a gap toward every neighbouring zone, so the five tile the place.
@@ -336,19 +322,6 @@ fn tileOf(settled: dvui.Rect.Physical, z: Zone, h: f32) dvui.Rect.Physical {
         .y = settled.y - grow_by[1],
         .w = settled.w + grow_by[0] + grow_by[2],
         .h = settled.h + grow_by[1] + grow_by[3],
-    };
-}
-
-/// Which of a zone's corners are the solid pane's own — round from the start — in ring order:
-/// top-left, bottom-left, bottom-right, top-right. Only the side bands reach the place's corners.
-fn outerCorners(z: Zone) [4]bool {
-    return switch (z) {
-        .center => .{ false, false, false, false },
-        .edge => |side| switch (side) {
-            .left => .{ true, true, false, false },
-            .right => .{ false, false, true, true },
-            .top, .bottom => .{ false, false, false, false },
-        },
     };
 }
 
