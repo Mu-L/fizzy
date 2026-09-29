@@ -303,13 +303,12 @@ fn tooltipGlass(wd: *dvui.WidgetData, r: dvui.Rect.Physical, scale: f32, t: f32,
 /// when this showing began (held inside the tooltip, so it grows from its nearest edge when the
 /// pointer is beside it). A showing begins when the tooltip is drawn after a pause.
 fn tooltipGrown(wd: *dvui.WidgetData, full: dvui.Rect.Physical, grow: f32) dvui.Rect.Physical {
-    const now = dvui.currentWindow().frame_time_ns;
-    const last = dvui.dataGet(null, wd.id, "_tooltip_grown_ns", i128);
-    dvui.dataSet(null, wd.id, "_tooltip_grown_ns", now);
-    if (last == null or now - last.? > 100 * std.time.ns_per_ms or dvui.dataGet(null, wd.id, "_tooltip_origin", dvui.Point.Physical) == null) {
-        dvui.dataSet(null, wd.id, "_tooltip_origin", dvui.currentWindow().mouse_pt);
-    }
-    const at = dvui.dataGet(null, wd.id, "_tooltip_origin", dvui.Point.Physical) orelse full.center();
+    // Kept only while drawn every frame (`tooltipClock`): gone, this is a new showing.
+    const at = dvui.dataGet(null, wd.id, "_tooltip_origin", dvui.Point.Physical) orelse blk: {
+        const mouse = dvui.currentWindow().mouse_pt;
+        dvui.dataSet(null, wd.id, "_tooltip_origin", mouse);
+        break :blk mouse;
+    };
     const o: dvui.Point.Physical = .{
         .x = std.math.clamp(at.x, full.x, full.x + full.w),
         .y = std.math.clamp(at.y, full.y, full.y + full.h),
@@ -325,15 +324,18 @@ fn tooltipGrown(wd: *dvui.WidgetData, full: dvui.Rect.Physical, grow: f32) dvui.
 
 /// How far into this showing a tooltip is, 0…1, linear over a floating surface's opening time
 /// (`motion.open_us`) — the clock a menu slides open on, so the two open together. A showing
-/// starts when it is first drawn after a pause, so a tooltip that hides and comes back opens
-/// again — a tooltip widget exists every frame whether shown or not, so its first frame will not
-/// do.
+/// starts on the first frame it is drawn after a frame it was not, so a tooltip that hides and
+/// comes back opens again — a tooltip widget exists every frame whether shown or not, so its
+/// first frame will not do.
+///
+/// Told by frames, not time: dvui drops a data entry nobody touched in a frame, so the marker
+/// here is present exactly when the tooltip was drawn in the last one — however long ago that
+/// was. A gap in time said "hidden" whenever the app slept between mouse moves, and the tooltip
+/// opened again on every move after a pause.
 fn tooltipClock(wd: *dvui.WidgetData) f32 {
-    const now = dvui.currentWindow().frame_time_ns;
-    const last = dvui.dataGet(null, wd.id, "_tooltip_shown_ns", i128);
-    dvui.dataSet(null, wd.id, "_tooltip_shown_ns", now);
-    // Not shown last frame (or ever): a new showing.
-    if (last == null or now - last.? > 100 * std.time.ns_per_ms) {
+    const shown_before = dvui.dataGet(null, wd.id, "_tooltip_shown", bool) != null;
+    dvui.dataSet(null, wd.id, "_tooltip_shown", true);
+    if (!shown_before) {
         _ = dvui.currentWindow().animations.remove(wd.id.update("_tooltip_open"));
         dvui.animation(wd.id, "_tooltip_open", .{ .start_val = 0, .end_val = 1, .end_time = motion.duration(motion.open_us) });
     }
