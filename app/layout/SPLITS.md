@@ -77,13 +77,14 @@ and the view you are carrying — never as the view drawn in two places.
 - **Nothing is previewed in place.** No place poses the view as if it had landed, and none pulls
   back to make room: one copy of a view is easier to read than two, and the layout that answers
   the drop moves after it, with the easing every split and swap already has.
-- **The zones are liquid glass.** An edge zone grows in out of its edge and the middle out of its
-  centre, on a bounce, while the frost comes in ahead of the size; its icon arrives once the glass
-  is mostly there. The glass is a mesh over one blur of the place, so it bends what it shows: a
-  lens band at the rim, and a damped ripple running in from where the zone grew, and out from the
-  pointer when a zone lights. Going, the same curve backwards, quicker. Never by opacity: a frost
-  replaces what it covers, and a half-opaque one would show a see-through window's content
-  through it.
+- **The zones split out of one pane of glass.** Arriving over a place, its zones come in as one
+  solid frosted pane — five tiles that exactly fill it, square where they meet — which swells to
+  size and then splits: the gaps open, the corners where the pieces met round off, and each
+  piece's edge forms. Leaving, the pieces run back together and fade. Pieces never overlap
+  (glass over glass would double its tint), they tile. The glass is `core.liquid_glass`: a drop's
+  soft refraction and light at the rim, one smooth field with no crease at the corners. All of
+  it runs at the app's motion level and speed, and never by opacity: a frost replaces what it
+  covers, and a half-opaque one would show a see-through window's content through it.
 - **A drag does not change the map it is read against.** The places, and where they are, are
   photographed at lift, exactly like the view is. A place can still move during a drag — a split
   easing shut, a window resized — and a hit-test read against the live layout would chase it.

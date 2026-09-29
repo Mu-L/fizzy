@@ -185,15 +185,13 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
 
     const g = frost(st.shown);
     if (g > 0.01) {
-        const e = grow(st.shown);
-        var panes: [all.len]Pane = undefined;
-        for (all, 0..) |z, i| panes[i] = .{ .r = entering(r.of(z), z, e), .lit = st.lit[i] };
         var area = r.center;
         for (all[1..]) |z| area = area.unionWith(r.of(z));
+        const panes = splitting(r, area, st.shown, &st.lit, scale);
         glass(id, &panes, area, g, scale);
         for (all, 0..) |z, i| {
             if (z == .center and look.center == .none) continue;
-            drawIcon(panes[i].r, iconFor(z, look.center), g, st.lit[i], scale);
+            drawIcon(panes[i].r, iconFor(z, look.center), @min(g, panes[i].lens), st.lit[i], scale);
         }
     }
 
@@ -226,8 +224,9 @@ pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
     const g = frost(st.shown);
     if (g > 0.01 and st.rect.w >= 1 and st.rect.h >= 1) {
         const pane: Pane = .{
-            .r = entering(st.rect, .center, 0.85 + 0.15 * grow(st.shown)),
+            .r = scaleAbout(st.rect, 0.85 + 0.15 * grow(st.shown), 0.85 + 0.15 * grow(st.shown)),
             .lit = 1,
+            .radii = liquid_glass.uniform(surfaceRadius(scale)),
         };
         glass(id, &.{pane}, st.rect, g, scale);
         drawIcon(pane.r, .{ .name = "drop_zone_join", .tvg = icons.tvg.lucide.@"squares-unite" }, g, 1, scale);
@@ -254,19 +253,87 @@ fn frost(t: f32) f32 {
     return motion.fade(t);
 }
 
-/// A zone at size `e`: an edge band grown out of its own edge — its outer side fixed, its depth
-/// scaled, its length nearly whole — and the middle from its centre.
-fn entering(r: dvui.Rect.Physical, z: Zone, e: f32) dvui.Rect.Physical {
-    const along = 0.8 + 0.2 * @min(e, 1);
-    return switch (z) {
-        .center => scaleAbout(r, e, e),
+/// The zones `p` of the way in, as one pane of glass splitting into five. They start as tiles
+/// that exactly fill the place — each grown half a gap toward its neighbours, square where they
+/// meet — so together they are one solid pane, fading in and swelling to size; then the gaps
+/// open, the corners where they met round off and each piece's edge forms, and they are five.
+/// Leaving runs it backwards: the pieces run together into one, and it fades. Glass that overlaps
+/// itself would double its tint where it did, so the pieces never overlap — they tile.
+fn splitting(r: Rects, area: dvui.Rect.Physical, p: f32, lit: *const [all.len]f32, scale: f32) [all.len]Pane {
+    const half_gap = gap * scale / 2;
+    const radius = surfaceRadius(scale);
+    // The solid comes in first, the split follows once it is mostly there.
+    const swell = 0.94 + 0.06 * grow(std.math.clamp(p / 0.5, 0, 1));
+    const split = grow(std.math.clamp((p - 0.25) / 0.75, 0, 1));
+    const round = std.math.clamp(split, 0, 1);
+    const c = area.center();
+    var out: [all.len]Pane = undefined;
+    for (all, 0..) |z, i| {
+        const settled = r.of(z);
+        const tile = tileOf(settled, z, half_gap);
+        const here = lerpRect(tile, settled, split);
+        // The whole set swells as one, about the place's centre.
+        const swollen: dvui.Rect.Physical = .{ .x = c.x + (here.x - c.x) * swell, .y = c.y + (here.y - c.y) * swell, .w = here.w * swell, .h = here.h * swell };
+        var radii: liquid_glass.Radii = undefined;
+        for (outerCorners(z), 0..) |outer, k| radii[k] = if (outer) radius else radius * round;
+        // Each piece's own edge — its refraction and light — forms as it comes away.
+        out[i] = .{ .r = swollen, .lit = lit[i], .radii = radii, .lens = round };
+    }
+    return out;
+}
+
+/// `settled` grown half a gap toward every neighbouring zone, so the five tile the place.
+fn tileOf(settled: dvui.Rect.Physical, z: Zone, h: f32) dvui.Rect.Physical {
+    // How far each side grows: left, top, right, bottom.
+    const grow_by: [4]f32 = switch (z) {
+        .center => .{ h, h, h, h },
         .edge => |side| switch (side) {
-            .left => .{ .x = r.x, .y = r.y + r.h * (1 - along) / 2, .w = r.w * e, .h = r.h * along },
-            .right => .{ .x = r.x + r.w - r.w * e, .y = r.y + r.h * (1 - along) / 2, .w = r.w * e, .h = r.h * along },
-            .top => .{ .x = r.x + r.w * (1 - along) / 2, .y = r.y, .w = r.w * along, .h = r.h * e },
-            .bottom => .{ .x = r.x + r.w * (1 - along) / 2, .y = r.y + r.h - r.h * e, .w = r.w * along, .h = r.h * e },
+            .left => .{ 0, 0, h, 0 },
+            .right => .{ h, 0, 0, 0 },
+            .top => .{ h, 0, h, h },
+            .bottom => .{ h, h, h, 0 },
         },
     };
+    return .{
+        .x = settled.x - grow_by[0],
+        .y = settled.y - grow_by[1],
+        .w = settled.w + grow_by[0] + grow_by[2],
+        .h = settled.h + grow_by[1] + grow_by[3],
+    };
+}
+
+/// Which of a zone's corners are the solid pane's own — round from the start — in ring order:
+/// top-left, bottom-left, bottom-right, top-right. Only the side bands reach the place's corners.
+fn outerCorners(z: Zone) [4]bool {
+    return switch (z) {
+        .center => .{ false, false, false, false },
+        .edge => |side| switch (side) {
+            .left => .{ true, true, false, false },
+            .right => .{ false, false, true, true },
+            .top, .bottom => .{ false, false, false, false },
+        },
+    };
+}
+
+/// The app's surface rounding in physical pixels. Finalized, as a widget's options would be: an
+/// unresolved corner draws square whatever radius it names.
+fn surfaceRadius(scale: f32) f32 {
+    const theme = dvui.themeGet();
+    return dialogs.surface_corners.finalize(&theme).tl.radius() * scale;
+}
+
+/// Per-corner radii (physical, ring order) as dvui corners in natural units at `scale`.
+fn cornersOf(radii: liquid_glass.Radii, scale: f32) dvui.CornerRect {
+    return .{
+        .tl = .round(radii[0] / scale),
+        .bl = .round(radii[1] / scale),
+        .br = .round(radii[2] / scale),
+        .tr = .round(radii[3] / scale),
+    };
+}
+
+fn lerpRect(a: dvui.Rect.Physical, b: dvui.Rect.Physical, t: f32) dvui.Rect.Physical {
+    return .{ .x = a.x + (b.x - a.x) * t, .y = a.y + (b.y - a.y) * t, .w = a.w + (b.w - a.w) * t, .h = a.h + (b.h - a.h) * t };
 }
 
 fn scaleAbout(r: dvui.Rect.Physical, kx: f32, ky: f32) dvui.Rect.Physical {
@@ -277,10 +344,13 @@ fn scaleAbout(r: dvui.Rect.Physical, kx: f32, ky: f32) dvui.Rect.Physical {
 
 // ── The glass ───────────────────────────────────────────────────────────────────────────────────
 
-/// One pane of glass to lay down: where, and how lit.
+/// One pane of glass to lay down: where, how lit, its corner radii (physical), and how much of
+/// its edge — refraction and light — it has yet.
 const Pane = struct {
     r: dvui.Rect.Physical,
     lit: f32 = 0,
+    radii: liquid_glass.Radii,
+    lens: f32 = 1,
 };
 
 
@@ -294,25 +364,18 @@ const Pane = struct {
 /// app under one stays put), so it is read again a few times a second, and when the blur has
 /// grown a step. Reading and blurring a place every frame was most of what the glass cost.
 fn glass(id: dvui.Id, panes: []const Pane, area: dvui.Rect.Physical, g: f32, scale: f32) void {
-    // Finalized, as a widget's options would be: an unresolved corner draws square whatever
-    // radius it names.
-    const theme = dvui.themeGet();
-    const corners_nat = dialogs.surface_corners.finalize(&theme);
     const base = widgets.menuFrost() orelse {
-        const corners = corners_nat.scale(scale, dvui.CornerRect.Physical);
         const fill = dialogs.dialogFill();
         for (panes) |pane| {
             if (pane.r.w < 1 or pane.r.h < 1) continue;
             const c = fill.lerp(.white, lit_lift * pane.lit);
-            pane.r.fill(corners, .{ .color = .{ .color = c.opacity(@as(f32, @floatFromInt(c.a)) / 255 * g) }, .fade = 1.0 });
+            pane.r.fill(cornersOf(pane.radii, 1).scale(1, dvui.CornerRect.Physical), .{ .color = .{ .color = c.opacity(@as(f32, @floatFromInt(c.a)) / 255 * g) }, .fade = 1.0 });
         }
         return;
     };
     const job = dvui.dataGetPtrDefault(null, id, "_drop_zones_job", LayerJob, .{});
     job.* = .{
         .backdrop = job.backdrop,
-        .corners = corners_nat,
-        .radius = corners_nat.tl.radius() * scale,
         .scale = scale,
         .now = dvui.currentWindow().frame_time_ns,
         .strength = g,
@@ -363,9 +426,6 @@ const LayerJob = struct {
     backdrop: ?*BlurBackdrop = null,
     pane: BlurBackdrop.Pane = .{},
     bounds: dvui.Rect.Physical = .{},
-    corners: dvui.CornerRect = .{},
-    /// Physical pixels: the panes' corner radius.
-    radius: f32 = 0,
     scale: f32 = 1,
     now: i128 = 0,
     strength: f32 = 1,
@@ -386,16 +446,15 @@ const LayerJob = struct {
         const frost_mod: dvui.Color = if (self.pane.tint != null) dvui.Color.white.opacity(1 - mix) else .white;
         const light = BlurBackdrop.additiveWhite();
         for (self.panes[0..self.count]) |pane| {
-            liquid_glass.drawPane(tex, self.bounds, pane.r, self.radius, self.scale, frost_mod, .{
-                .lens = self.lens,
+            liquid_glass.drawPane(tex, self.bounds, pane.r, pane.radii, self.scale, frost_mod, .{
+                .lens = self.lens * pane.lens,
                 .refraction = self.pane.refraction,
-                .sharp = backdrop.sharpTexture(),
             });
-            if (self.pane.tint) |tint| BlurBackdrop.addTint(pane.r, self.corners, self.scale, tint, mix);
-            // The lift and the bevel's light, in one pass after the tint so they stay white; a lit
+            if (self.pane.tint) |tint| BlurBackdrop.addTint(pane.r, cornersOf(pane.radii, self.scale), self.scale, tint, mix);
+            // The lift and the rim's light, in one pass after the tint so they stay white; a lit
             // zone is brighter and catches more.
             const lift = std.math.clamp(self.pane.lift + lit_lift * pane.lit * self.strength, 0, 1);
-            if (light) |l| liquid_glass.drawLift(l, pane.r, self.radius, self.scale, lift, self.strength * self.lens * (1 + 0.6 * pane.lit));
+            if (light) |l| liquid_glass.drawLift(l, pane.r, pane.radii, self.scale, lift, self.strength * self.lens * pane.lens * (1 + 0.6 * pane.lit));
         }
     }
 };

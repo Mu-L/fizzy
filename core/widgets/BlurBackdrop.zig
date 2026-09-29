@@ -943,7 +943,7 @@ const FrostJob = struct {
         // The lift and the bevel's light, in one pass after the tint so they stay white.
         const lift: f32 = if (self.tint != null) self.lift else 0;
         if (liquid_glass.bends(.{ .lens = self.lens })) {
-            if (whiteTexture()) |light| liquid_glass.drawLift(light, self.rect, self.finalCorners().tl.radius() * self.scale, self.scale, lift, self.lens);
+            if (whiteTexture()) |light| liquid_glass.drawLift(light, self.rect, self.radii(), self.scale, lift, self.lens);
         } else if (lift > 0) {
             addTint(self.rect, self.corners, self.scale, .white, lift);
         }
@@ -952,14 +952,20 @@ const FrostJob = struct {
     /// The frost at `weight` of itself: through a bevelled edge when the motion level asks for
     /// it (`liquid_glass`), a flat rect when it does not.
     fn drawFrost(self: *const FrostJob, weight: f32) void {
-        const look: liquid_glass.Look = .{ .lens = self.lens, .refraction = self.refraction, .sharp = self.backdrop.sharpTexture() };
+        const look: liquid_glass.Look = .{ .lens = self.lens, .refraction = self.refraction };
         const tex = self.backdrop.small orelse return;
         if (!liquid_glass.bends(look)) {
             self.backdrop.drawRoundedScaled(self.corners, self.scale, weight);
             return;
         }
-        const corners = self.finalCorners();
-        liquid_glass.drawPane(tex, self.backdrop.rect, self.rect, corners.tl.radius() * self.scale, self.scale, dvui.Color.white.opacity(weight), look);
+        liquid_glass.drawPane(tex, self.backdrop.rect, self.rect, self.radii(), self.scale, dvui.Color.white.opacity(weight), look);
+    }
+
+    /// The pane's corner radii in physical pixels, in `liquid_glass`'s ring order.
+    fn radii(self: *const FrostJob) liquid_glass.Radii {
+        const c = self.finalCorners();
+        const s = self.scale;
+        return .{ c.tl.radius() * s, c.bl.radius() * s, c.br.radius() * s, c.tr.radius() * s };
     }
 
     /// The pane's corners as drawn: a theme corner resolved to the theme's own.
@@ -968,15 +974,6 @@ const FrostJob = struct {
         return self.corners.finalize(&theme);
     }
 };
-
-/// Fizzy addition: the picture this backdrop blurred, before the blur — the copy of the rect the
-/// pyramid starts from (half size at any real radius), bent by `warp` if one ran. Null when the
-/// capture read the window back instead of copying it on the GPU. Good until the next capture.
-pub fn sharpTexture(self: *const BlurBackdrop) ?Texture {
-    if (self.stable or self.mode != .readback) return null;
-    const t = self.levels[0] orelse return null;
-    return Texture.fromTargetTemp(t) catch null;
-}
 
 /// Fizzy addition: `drawRounded` at `weight` of itself — the frost half of a frost/tint mix.
 /// The texture's copy blend writes exactly `weight * frost`, alpha included.

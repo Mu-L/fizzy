@@ -3589,7 +3589,7 @@ test "drop zones: a small place keeps a middle to aim at" {
 test "liquid glass: the rings of a pane run the way dvui's paths do" {
     const r: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
     var pts: [4 * 7 + 2 * (8 - 1) + 2 * (4 - 1)]dvui.Point.Physical = undefined;
-    fizzy.core.liquid_glass.ringPoints(&pts, r, 8, 0, 6, 8, 4);
+    fizzy.core.liquid_glass.ringPoints(&pts, null, r, fizzy.core.liquid_glass.uniform(8), 0, 6, 8, 4);
     // Shoelace: the sign of dvui's own rect path (top-left, bottom-left, bottom-right,
     // top-right), which is negative in these coordinates.
     var area: f32 = 0;
