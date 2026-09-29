@@ -741,6 +741,10 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
         bw.drawBackground();
         core.icon.icon(@src(), "regions", dvui.entypo.grid, .{
             .fill_color = .{ .color = if (bw.hovered()) theme.color(.highlight, .fill) else theme.color(.control, .fill).lerp(theme.color(.control, .text), alpha) },
+            // A clear stroke makes it one flat colour, which the icon cache tints rather than
+            // bakes: baked, every step of the fade (it comes and goes as a drag crosses a place)
+            // rasterized a new texture, two render-target switches a frame.
+            .stroke_color = .transparent,
         }, .{ .expand = .both });
     }
     if (bw.clicked() and !dragged) {

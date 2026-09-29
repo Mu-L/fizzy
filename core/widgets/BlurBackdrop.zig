@@ -298,9 +298,14 @@ fn deinitFromTarget(self: *BlurBackdrop) bool {
             dvui.renderTexture(src, .{ .r = dest, .s = 1 }, .{ .uv = uv }) catch {};
         }
     }
-    _ = dvui.renderTarget(prev);
+    // Straight from the copy into the passes, and back to the frame once at the end: the frame's
+    // target is the whole window, and on a tiling GPU (a phone's) every bind of it reloads all of
+    // it — rebinding it between the copy and the passes did that once more per capture, for no
+    // drawing at all. The passes bind their own levels first; with nothing to blur (a radius too
+    // small for a pass) the copy is simply left and the frame rebound.
+    defer _ = dvui.renderTarget(prev);
     const source = dvui.Texture.fromTargetTemp(step) catch return false;
-    _ = self.runKawase(source, true, 1, shrink);
+    _ = self.runKawase(source, false, 1, shrink);
     return true;
 }
 
@@ -351,6 +356,8 @@ fn releaseLevels(self: *BlurBackdrop) void {
 /// Fizzy addition: the `.readback` capture. Reads `rect` back from the current target as it
 /// stands, uploads it, and runs the same pipeline `deinit` does on a replayed capture.
 fn deinitReadback(self: *BlurBackdrop) void {
+    // Keep the frame in a texture for as long as frosts read it (`FrameTarget.want`).
+    @import("../gfx/FrameTarget.zig").want();
     if (self.deinitFromTarget()) return;
     if (!dvui.Backend.support_read_pixels) return;
     var r = self.rect;

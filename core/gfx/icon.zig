@@ -45,6 +45,14 @@ pub fn draw(iw: *dvui.IconWidget) void {
 /// `dvui.renderIcon` through the texture cache. `opts.colormod` multiplies the result the way
 /// it does for any texture.
 pub fn render(name: []const u8, tvg_bytes: []const u8, rs: dvui.RectScale, opts: dvui.RenderTextureOptions, icon_opts: dvui.IconRenderOptions) void {
+    renderRaster(name, tvg_bytes, rs, null, opts, icon_opts);
+}
+
+/// `render`, rasterized at `raster` pixels (its size at rest) and stretched to `rs` — for an icon
+/// whose size animates. Rasterized at every size it passes through, it made a texture (and two
+/// render-target switches) every frame of the animation; stretched a little either way, one
+/// texture serves the whole of it. Null `raster` is `render`.
+pub fn renderRaster(name: []const u8, tvg_bytes: []const u8, rs: dvui.RectScale, raster: ?dvui.Size.Physical, opts: dvui.RenderTextureOptions, icon_opts: dvui.IconRenderOptions) void {
     if (rs.s == 0 or rs.r.w < 1 or rs.r.h < 1) return;
     if (dvui.clipGet().intersect(rs.r).empty()) return;
     if (builtin.target.cpu.arch == .wasm32) {
@@ -80,14 +88,17 @@ pub fn render(name: []const u8, tvg_bytes: []const u8, rs: dvui.RectScale, opts:
         }
     }
 
-    // The texture is the icon at the size it is drawn, in pixels.
-    const h: u32 = @intFromFloat(@ceil(rs.r.h));
-    const w: u32 = @intFromFloat(@ceil(rs.r.w));
+    // The texture is the icon at the size it is drawn (or rests at), in pixels.
+    const size = raster orelse rs.r.size();
+    const h: u32 = @intFromFloat(@ceil(size.h));
+    const w: u32 = @intFromFloat(@ceil(size.w));
     if (w == 0 or h == 0) return;
+    // Its strokes at the scale of the size it is rasterized at, not the one it is drawn at.
+    const raster_s = rs.s * size.h / rs.r.h;
 
     const key = cacheKey(tvg_bytes, w, h, bake);
     const tex = dvui.textureGetCached(key) orelse blk: {
-        const made = rasterize(name, tvg_bytes, w, h, rs.s, bake) orelse {
+        const made = rasterize(name, tvg_bytes, w, h, raster_s, bake) orelse {
             dvui.renderIcon(name, tvg_bytes, rs, opts, icon_opts) catch {};
             return;
         };

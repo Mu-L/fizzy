@@ -249,7 +249,7 @@ pub fn draw(id: dvui.Id, w: Wheel, scale: f32, look: Look) void {
             const z = all[i];
             if (z == .center and look.center == .none) continue;
             const zr: dvui.Rect.Physical = .{ .x = dc.c.x - dc.r, .y = dc.c.y - dc.r, .w = 2 * dc.r, .h = 2 * dc.r };
-            drawIcon(zr, iconFor(z, look.center), g * settle, st.lit[i], scale, dc.r * bubble_icon / scale);
+            drawIcon(zr, iconFor(z, look.center), g * settle, st.lit[i], scale, dc.r * bubble_icon / scale, w.bubble(z).r * bubble_icon);
         };
     }
 
@@ -402,7 +402,7 @@ pub fn drawSingle(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32, opts: Sing
             .radii = liquid_glass.uniform(radius),
         };
         glass(id, &.{pane}, st.rect, g, scale);
-        if (opts.icon) |icon| drawIcon(pane.r, iconFor(.center, icon), g, 1, scale, icon_size);
+        if (opts.icon) |icon| drawIcon(pane.r, iconFor(.center, icon), g, 1, scale, icon_size, icon_size * scale);
     }
     if (moving) {
         dvui.refresh(null, @src(), id);
@@ -592,7 +592,9 @@ const LayerJob = struct {
 /// A zone's icon, over its glass (queued after it, so drawn after it). Faint until lit, and in
 /// only once the glass is mostly there; blended toward the glass rather than made translucent,
 /// so a glyph's crossing strokes never show.
-fn drawIcon(zr: dvui.Rect.Physical, glyph: Glyph, g: f32, lit: f32, scale: f32, size: f32) void {
+/// `rest` is the icon's side in physical pixels once its bubble has settled: it is rasterized at
+/// that and stretched as its bubble swells and shrinks (`icon.renderRaster`).
+fn drawIcon(zr: dvui.Rect.Physical, glyph: Glyph, g: f32, lit: f32, scale: f32, size: f32, rest: f32) void {
     const side = size * scale;
     if (zr.w < side * 1.5 or zr.h < side * 1.5) return;
     const arrive = std.math.clamp((g - 0.45) / 0.55, 0, 1);
@@ -606,7 +608,7 @@ fn drawIcon(zr: dvui.Rect.Physical, glyph: Glyph, g: f32, lit: f32, scale: f32, 
     const glass_c = dialogs.dialogFill().opacity(1);
     const color = glass_c.lerp(ink, arrive);
     const at_r: dvui.Rect.Physical = .{ .x = zr.x + (zr.w - side) / 2, .y = zr.y + (zr.h - side) / 2, .w = side, .h = side };
-    icon_tex.render(glyph.name, glyph.tvg, .{ .r = at_r, .s = scale }, .{}, .{
+    icon_tex.renderRaster(glyph.name, glyph.tvg, .{ .r = at_r, .s = scale }, .{ .w = @round(rest), .h = @round(rest) }, .{}, .{
         .stroke_color = .{ .color = color },
         .fill_color = .transparent,
     });

@@ -20,6 +20,7 @@
 //! dialogs, the palette) so those land in the target too, then unbinds it and draws it. On a
 //! backend without render targets neither does anything and the frame draws as before.
 const std = @import("std");
+const builtin = @import("builtin");
 const dvui = @import("dvui");
 const profile = @import("../profile.zig");
 
@@ -30,6 +31,11 @@ const FrameTarget = @This();
 targets: [2]?dvui.Texture.Target = .{ null, null },
 /// Which of `targets` this frame draws into.
 index: u1 = 0,
+/// Whether each of `targets` holds the frame after the one before it — false once a frame has
+/// been drawn straight to the window, so `snapshot` never hands back a stale picture.
+fresh: [2]bool = .{ false, false },
+/// Frames since anything last asked to read the frame (`want`).
+unread: u32 = 0,
 /// This frame's target (`targets[index]`), bound between `begin` and `end`.
 target: ?dvui.Texture.Target = null,
 bound: bool = false,
@@ -45,8 +51,45 @@ pub fn init() void {
     if (@hasField(@TypeOf(impl.*), "clear_window_on_begin")) impl.clear_window_on_begin = false;
 }
 
+/// Only on the web, frames nothing reads are drawn straight to the window. A phone's GPU tiles:
+/// every frame drawn into a window-sized texture is written out whole and read back whole for
+/// the blit — ~30 MB a frame at a phone's resolution, for a home screen with no glass on it.
+/// Natively the target stays: on Metal it is also what defers acquiring the drawable to the
+/// end of the frame (see above), and the desktop GPU does not notice the copy.
+const skip_unread = builtin.target.cpu.arch == .wasm32;
+
+/// Frames the target stays bound after the last `want`: a tooltip or menu opening and shutting
+/// should not flip it on and off, and glass coming back finds it still there.
+const linger_frames: u32 = 60;
+
+const want_id: dvui.Id = @enumFromInt(0x6669_7a7a_6672_6d77); // "fizzfrmw"
+const want_key = "_frame_target_wanted";
+
+/// Something will read what is under it this frame (a frost, `BlurBackdrop`) — keep the frame in
+/// a texture. Any image may call it: it goes through the shared dvui window, so a plugin's glass
+/// counts as much as the host's. On a frame drawn straight to the window the read finds no
+/// texture and draws no frost; the target is bound from the next frame on — a pane's first
+/// frame, which every glass surface fades in from.
+pub fn want() void {
+    if (dvui.current_window == null) return;
+    dvui.dataSet(null, want_id, want_key, true);
+}
+
 /// Bind a window-sized target, made fresh when the window's pixel size changes.
 pub fn begin(self: *FrameTarget) void {
+    if (skip_unread) {
+        const wanted = dvui.dataGet(null, want_id, want_key, bool) orelse false;
+        dvui.dataRemove(null, want_id, want_key);
+        self.unread = if (wanted) 0 else self.unread +| 1;
+        if (self.unread > linger_frames) {
+            // Straight to the window (the web backend clears it every frame itself).
+            self.index +%= 1;
+            self.fresh[self.index] = false;
+            self.target = null;
+            current = self;
+            return;
+        }
+    }
     const win = dvui.windowRectPixels();
     const w: u32 = @intFromFloat(@max(1, @round(win.w)));
     const h: u32 = @intFromFloat(@max(1, @round(win.h)));
@@ -62,6 +105,7 @@ pub fn begin(self: *FrameTarget) void {
         self.targets[self.index] = dvui.textureCreateTarget(.{ .width = w, .height = h, .interpolation = .nearest }) catch return;
     }
     self.target = self.targets[self.index];
+    self.fresh[self.index] = true;
     current = self;
     const t = self.target.?;
     // `create` clears once; every frame after starts from what the last one left.
@@ -138,6 +182,7 @@ pub fn deinit(self: *FrameTarget) void {
 pub fn snapshot(rect: dvui.Rect.Physical) ?dvui.Texture {
     const self = current orelse return null;
     if (!self.bound) return null;
+    if (!self.fresh[self.index +% 1]) return null;
     const prev = self.targets[self.index +% 1] orelse return null;
     const r = rect.intersect(dvui.windowRectPixels());
     if (r.w < 1 or r.h < 1) return null;
