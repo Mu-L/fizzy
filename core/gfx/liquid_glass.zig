@@ -80,6 +80,12 @@ pub fn bends(look: Look) bool {
 /// bend changes fastest. Few enough that a pane stays cheap — every vertex is copied to the GPU
 /// each frame, for every pane on screen — and enough that the bend between them reads as a curve.
 const ring_steps = [_]f32{ 0, 0.05, 0.12, 0.21, 0.33, 0.48, 0.66, 1.0 };
+/// How much white the rim adds at its steepest, where it faces the light and where it faces away
+/// (times the caller's `amount`, which carries the refraction setting): a hint of a catch-light,
+/// not a line drawn round the pane.
+const light_toward: f32 = 0.15;
+const light_away: f32 = 0.05;
+
 /// Segments in a corner's arc: enough that a corner reads as a curve, not a polygon.
 const arc_steps = 8;
 
@@ -237,7 +243,7 @@ pub fn drawLift(light: dvui.Texture, r: dvui.Rect.Physical, radii: Radii, scale:
         for (pts) |p| {
             const f = fieldAt(p, r, scale);
             const facing = f.out.x * lx + f.out.y * ly;
-            const lit = 0.20 * @max(0, facing) + 0.07 * @max(0, -facing);
+            const lit = light_toward * @max(0, facing) + light_away * @max(0, -facing);
             const col = dvui.Color.PMA.fromColor(dvui.Color.white.opacity(std.math.clamp(lift + amount * f.steep * lit, 0, 1)));
             b.appendVertex(.{ .pos = p, .col = col, .uv = .{ 0.5, 0.5 } });
         }
