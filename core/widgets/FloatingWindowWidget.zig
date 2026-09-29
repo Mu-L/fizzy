@@ -606,7 +606,19 @@ fn drawFrost(self: *FloatingWindowWidget, frost: Frost) void {
         .lift = frost.lift,
         .detail = frost.detail,
         .refraction = frost.refraction,
+        .form = self.closingForm(),
     });
+}
+
+/// While the window closes, how formed its glass still is: whole when it sets off, gone when it
+/// arrives, on the same curve it travels by. Null otherwise — the glass forms by itself as the
+/// window opens (`BlurBackdrop.Pane.form`).
+fn closingForm(self: *FloatingWindowWidget) ?f32 {
+    const a = dvui.animationGet(self.data().id, "_close_x") orelse return null;
+    const span = a.end_time - a.start_time;
+    if (span <= 0) return null;
+    const frac = @as(f32, @floatFromInt(-a.start_time)) / @as(f32, @floatFromInt(span));
+    return 1 - std.math.clamp(motion.exit(std.math.clamp(frac, 0, 1)), 0, 1);
 }
 
 fn dragPart(me: Event.Mouse, rs: RectScale) DragPart {

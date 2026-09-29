@@ -232,12 +232,14 @@ fn tooltipSurfaceWith(wd: *dvui.WidgetData, frost_fade: f32, paint_fade: f32) vo
     // to make a pass at all.
     if (f.radius * t < 2) return;
     widgets.BlurBackdrop.frostPane(wd.id, brs.r, tooltipCorners(), brs.s, .{
-        .radius = f.radius * t,
+        .radius = f.radius,
         .refresh_ms = f.refresh_ms,
         .tint = f.tint,
-        .mix = f.mix * t,
-        .lift = f.lift * t,
+        .mix = f.mix,
+        .lift = f.lift,
         .detail = f.detail,
+        // Forms on the tooltip's own fade.
+        .form = t,
     });
 }
 

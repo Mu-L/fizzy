@@ -879,7 +879,17 @@ pub const Pane = struct {
     /// How far the pane's bevelled edge refracts what it shows, 0 (none) to 2
     /// (`liquid_glass.Look.refraction`).
     refraction: f32 = 1,
+    /// How formed the glass is, 0 (not there yet: the scene behind it, sharp and unbent) to 1.
+    /// Its blur, tint, lift and edge all come in with it — the blur from sharp, the edge's
+    /// refraction squeezing in from none — so glass *forms* over what is behind rather than
+    /// fading in over it. Null forms it by itself as the pane first appears (`form_ms`, at the
+    /// app's motion); a caller that knows better — a window closing, a tooltip on its own fade —
+    /// passes its own.
+    form: ?f32 = null,
 };
+
+/// How long a pane takes to form by itself, as written (`core.motion.durationMs`).
+pub const form_ms: f32 = 350;
 
 /// Fizzy addition: a frosted pane — what is under `rect`, blurred, composed with a tint and a
 /// lift per `pane`, drawn with `corners`. Keyed by `id`, so the blur texture lives and dies with
@@ -898,14 +908,21 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
     const job = dvui.dataGetPtrDefault(null, id, "_frost_job", FrostJob, .{});
     const backdrop = dvui.dataGetPtrDefault(null, id, "_frost", BlurBackdrop, .{});
     dvui.dataSetDeinitFunction(null, id, "_frost", &releaseTexture);
+    const now = dvui.currentWindow().frame_time_ns;
+    // How formed it is: the caller's, or its own from when it first came up. Per id, so it
+    // lives exactly as long as the pane is drawn and a pane that comes back forms anew.
+    const form = std.math.clamp(pane.form orelse selfForm(id, now), 0, 1);
+    // The blur comes in from sharp; the edge squeezes in on the arrival curve, past its final
+    // shape and back when motion is playful.
+    const radius = pane.radius * form;
+    const edge = @max(0, motion.enterFull(form));
     backdrop.mode = .readback;
-    backdrop.radius_px = pane.radius;
+    backdrop.radius_px = radius;
     backdrop.detail = pane.detail;
 
-    const now = dvui.currentWindow().frame_time_ns;
     // The glass's edge shows what lies just beyond it (`liquid_glass`), so the capture reaches
     // that far past the pane; flat glass needs none.
-    const lens = motion.liquid() * liquid_glass.blurRamp(pane.radius) * liquid_glass.sizeRamp(rect, scale);
+    const lens = motion.liquid() * liquid_glass.blurRamp(pane.radius) * liquid_glass.sizeRamp(rect, scale) * edge;
     const margin = liquid_glass.margin(.{ .lens = lens, .refraction = pane.refraction }, scale);
     const captured = rect.insetAll(-margin);
     // `init` takes a rect in *window* coordinates.
@@ -920,13 +937,24 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
         .scale = scale,
         .rect = rect,
         .tint = pane.tint,
-        .mix = std.math.clamp(pane.mix, 0, 1),
-        .lift = std.math.clamp(pane.lift, 0, 1),
+        .mix = std.math.clamp(pane.mix * form, 0, 1),
+        .lift = std.math.clamp(pane.lift * form, 0, 1),
         // The edge comes in with the blur, so a barely-frosted pane has barely an edge.
         .lens = lens,
         .refraction = pane.refraction,
     };
     dvui.deferRender(job, FrostJob.draw);
+}
+
+/// How formed a pane is by itself: from nothing when it first came up to whole over `form_ms`,
+/// keeping frames coming while it forms.
+fn selfForm(id: dvui.Id, now: i128) f32 {
+    const born = dvui.dataGetPtrDefault(null, id, "_frost_born", i128, now);
+    const ms = motion.durationMs(form_ms);
+    if (ms <= 0) return 1;
+    const t = @as(f32, @floatFromInt(now - born.*)) / std.time.ns_per_ms / ms;
+    if (t < 1) dvui.refresh(null, @src(), id);
+    return std.math.clamp(t, 0, 1);
 }
 
 /// What `frostPane` hands to the replay. Lives in the data store under the owner's id, so the
