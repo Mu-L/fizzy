@@ -952,7 +952,7 @@ const FrostJob = struct {
     /// The frost at `weight` of itself: through a bevelled edge when the motion level asks for
     /// it (`liquid_glass`), a flat rect when it does not.
     fn drawFrost(self: *const FrostJob, weight: f32) void {
-        const look: liquid_glass.Look = .{ .lens = self.lens, .refraction = self.refraction };
+        const look: liquid_glass.Look = .{ .lens = self.lens, .refraction = self.refraction, .sharp = self.backdrop.sharpTexture() };
         const tex = self.backdrop.small orelse return;
         if (!liquid_glass.bends(look)) {
             self.backdrop.drawRoundedScaled(self.corners, self.scale, weight);
@@ -974,6 +974,15 @@ const FrostJob = struct {
         return self.corners.finalize(&theme);
     }
 };
+
+/// Fizzy addition: the picture this backdrop blurred, before the blur — the copy of the rect the
+/// pyramid starts from (half size at any real radius). Null when the capture read the window
+/// back instead of copying it on the GPU, or the blur has no pyramid. Good until the next capture.
+pub fn sharpTexture(self: *const BlurBackdrop) ?Texture {
+    if (self.stable or self.mode != .readback) return null;
+    const t = self.levels[0] orelse return null;
+    return Texture.fromTargetTemp(t) catch null;
+}
 
 /// Fizzy addition: `drawRounded` at `weight` of itself — the frost half of a frost/tint mix.
 /// The texture's copy blend writes exactly `weight * frost`, alpha included.

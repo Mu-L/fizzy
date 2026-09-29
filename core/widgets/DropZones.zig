@@ -449,6 +449,7 @@ const LayerJob = struct {
             liquid_glass.drawPane(tex, self.bounds, pane.r, pane.radii, self.scale, frost_mod, .{
                 .lens = self.lens * pane.lens,
                 .refraction = self.pane.refraction,
+                .sharp = backdrop.sharpTexture(),
             });
             if (self.pane.tint) |tint| BlurBackdrop.addTint(pane.r, cornersOf(pane.radii, self.scale), self.scale, tint, mix);
             // The lift and the rim's light, in one pass after the tint so they stay white; a lit

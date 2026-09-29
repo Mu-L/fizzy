@@ -13,8 +13,10 @@
 //! mitred frame; a band with a fixed profile drew a line where it met the face. The field has no
 //! crease anywhere, so neither does the glass.
 //!
-//! The drop shows the same blur as the face, only bent: a sharper picture in the rim drew the
-//! pixels of whatever was behind as streaks.
+//! The rim is also **clearer** than the face: the picture before the blur shows through it,
+//! bent the same way, strongest at the very edge and fading into the frost with the drop's
+//! steepness. (Through a bevel's creases the same picture drew streaks; through a smooth field it
+//! is only magnified.)
 //!
 //! How much of it is the caller's (`Look`): the app scales it by `core.motion.liquid` and the
 //! user's dialog refraction, so the glass is flat when motion is off.
@@ -24,11 +26,14 @@ const dvui = @import("dvui");
 /// Points: how far in, at the very rim, the drop reaches for what it shows (times
 /// `Look.refraction`); how far in its curve fades by a factor of e; and how softly its sides blend
 /// into each other round a corner.
-pub const refraction: f32 = 10;
-pub const falloff: f32 = 9;
+pub const refraction: f32 = 18;
+pub const falloff: f32 = 15;
 pub const softness: f32 = 10;
+/// How much of the unblurred picture the rim shows at its very edge, 0…1: glass is clearer
+/// where it is thin and steep, frosted across its face.
+pub const clarity: f32 = 0.55;
 /// Points: how far in the mesh keeps rings, beyond which the drop is flat and a fan will do.
-const band: f32 = 32;
+const band: f32 = 44;
 
 /// A pane's corner radii in physical pixels, in the order its rings run: top-left, bottom-left,
 /// bottom-right, top-right. Per corner, so a pane can be square where it meets another and
@@ -46,6 +51,9 @@ pub const Look = struct {
     /// How far the drop refracts, times `refraction`: the user's dialog refraction setting,
     /// 0 (none) to 2.
     refraction: f32 = 1,
+    /// The same picture before it was blurred, covering the same bounds, when there is one
+    /// (`BlurBackdrop.sharpTexture`): what the clearer rim shows (`clarity`).
+    sharp: ?dvui.Texture = null,
 };
 
 /// Whether `look` bends anything at all — when it does not, a flat textured rect is the same
@@ -128,6 +136,38 @@ pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.
     appendRingStrips(&b, per_ring, rings + 1);
     appendFan(&b, per_ring, rings, vtx_count - 1);
     dvui.renderTriangles(b.build_unowned(), tex) catch {};
+
+    if (look.sharp) |sharp| drawClear(sharp, tex_bounds, r, radii, scale, mod, look, band_px);
+}
+
+/// The rim's clearer glass: the unblurred picture over the frost, bent the same way, as much of
+/// it as `clarity` times the drop's steepness — sharpest at the very edge, gone where the face
+/// is flat. Drawn at the frost's weight (`mod`), so it takes the pane's tint and lift afterwards
+/// like the frost does.
+fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.Physical, radii: Radii, scale: f32, mod: dvui.Color, look: Look, band_px: f32) void {
+    const amount = clarity * look.lens * @as(f32, @floatFromInt(mod.a)) / 255;
+    if (amount <= 0.01) return;
+    const per_ring = 4 * (arc_steps + 1);
+    const arena = dvui.currentWindow().arena();
+    const rings = ring_steps.len;
+    var b = dvui.Triangles.Builder.init(arena, per_ring * (rings + 1), per_ring * 6 * rings) catch return;
+    defer b.deinit(arena);
+    const pts = arena.alloc(dvui.Point.Physical, per_ring) catch return;
+    const clear = dvui.Color.PMA.fromColor(.transparent);
+    const reach_px = refraction * scale * look.lens * look.refraction;
+    ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
+    for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+    for (ring_steps) |x| {
+        ringPoints(pts, null, r, radii, @max(aa_in, band_px * x), arc_steps, 1, 1);
+        for (pts) |p| {
+            const steep = fieldAt(p, r, scale).steep;
+            // Squared, so the clear glass hugs the edge and the face stays frosted.
+            const col = dvui.Color.PMA.fromColor(dvui.Color.white.opacity(amount * steep * steep));
+            b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+        }
+    }
+    appendRingStrips(&b, per_ring, rings + 1);
+    dvui.renderTriangles(b.build_unowned(), sharp) catch {};
 }
 
 /// Where the glass at `p` shows: further in, against the drop's outward direction, by as much of
