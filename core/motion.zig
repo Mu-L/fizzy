@@ -113,6 +113,10 @@ pub fn durationMs(ms: f32) f32 {
     return if (off()) 0 else ms / rate();
 }
 
+/// Microseconds, as written (pass it through `duration`), that a floating surface takes to open:
+/// a menu sliding down, a tooltip growing out of the pointer. One number, so they open together.
+pub const open_us: i32 = 260_000;
+
 /// When, as a share of its duration, every motion reaches its target, at every level.
 pub const arrival: f32 = 0.4;
 /// The share of a duration the overshoot takes after the arrival, at playful: long enough to

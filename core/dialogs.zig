@@ -181,8 +181,11 @@ pub fn surfaceShadow() dvui.Options.BoxShadow {
 /// drawn after the glass so the glass never blurs it in (`liquid_glass.drawShadow`). Call after
 /// the frost; an opaque surface keeps the ordinary box shadow under its fill.
 pub fn glassShadow(r: dvui.Rect.Physical, corners: dvui.CornerRect, scale: f32, bs: dvui.Options.BoxShadow, alpha_mult: f32) void {
+    // The glass's own outline, always: the ring hugs the pane, whatever corners the shadow was
+    // described with (resolved through the theme's corner kind, they could come out square
+    // beside glass that is explicitly round).
     const theme = dvui.themeGet();
-    const c = (bs.corners orelse corners).finalize(&theme);
+    const c = corners.finalize(&theme);
     const radii: liquid_glass.Radii = .{ c.tl.radius() * scale, c.bl.radius() * scale, c.br.radius() * scale, c.tr.radius() * scale };
     liquid_glass.drawShadow(r.insetAll(scale * bs.shrink), radii, bs.fade * scale, bs.offset.scale(scale, dvui.Point.Physical), bs.color, bs.alpha * alpha_mult);
 }
@@ -233,15 +236,23 @@ pub fn tooltipSurfaceFaded(wd: *dvui.WidgetData, fade: f32) void {
 /// `tooltipSurfaceFaded` with the frost's fade and the plain paint's (shadow, blur-off fill)
 /// apart: under a fade that already scales everything drawn (a tooltip's own alpha animation),
 /// the plain paint takes 1 — it is faded once by that alpha — while the frost, drawn later and
-/// outside it, still needs the fade to form by.
+/// outside it, still needs the fade to form by. It grows over the whole of the fade.
 fn tooltipSurfaceWith(wd: *dvui.WidgetData, frost_fade: f32, paint_fade: f32) void {
     const t = std.math.clamp(frost_fade, 0, 1);
+    tooltipSurfaceAt(wd, t, motion.enterFull(t), paint_fade);
+}
+
+/// The surface under a shown tooltip: formed `form` of the way (0…1), grown `grow` of the way
+/// out of the point the pointer was at (past 1 while it overshoots), its plain paint at
+/// `paint_fade`.
+fn tooltipSurfaceAt(wd: *dvui.WidgetData, form: f32, grow: f32, paint_fade: f32) void {
+    const t = std.math.clamp(form, 0, 1);
     const p = std.math.clamp(paint_fade, 0, 1);
     const brs = wd.borderRectScale();
-    // It grows out of where the pointer was when it began to show, on the curve it forms by, and
-    // what it holds is cut to it as it grows — the tooltip opens from the thing it is about, as a
-    // menu slides open from what opened it.
-    const r = tooltipGrown(wd, brs.r, t);
+    // It grows out of where the pointer was when it began to show, and what it holds is cut to
+    // it as it grows — the tooltip opens from the thing it is about, as a menu slides open from
+    // what opened it.
+    const r = tooltipGrown(wd, brs.r, grow);
     dvui.clipSet(dvui.clipGet().intersect(r));
     const phys_corners = tooltipCorners().scale(brs.s, dvui.CornerRect.Physical);
     const bs = surfaceShadow();
@@ -264,15 +275,14 @@ fn tooltipSurfaceWith(wd: *dvui.WidgetData, frost_fade: f32, paint_fade: f32) vo
         .mix = f.mix,
         .lift = f.lift,
         .detail = f.detail,
-        // Forms on the tooltip's own fade.
         .form = t,
     });
 }
 
-/// `full` — a shown tooltip's rect — `t` of the way grown out of the point the pointer was at
+/// `full` — a shown tooltip's rect — `k` of the way grown out of the point the pointer was at
 /// when this showing began (held inside the tooltip, so it grows from its nearest edge when the
 /// pointer is beside it). A showing begins when the tooltip is drawn after a pause.
-fn tooltipGrown(wd: *dvui.WidgetData, full: dvui.Rect.Physical, t: f32) dvui.Rect.Physical {
+fn tooltipGrown(wd: *dvui.WidgetData, full: dvui.Rect.Physical, grow: f32) dvui.Rect.Physical {
     const now = dvui.currentWindow().frame_time_ns;
     const last = dvui.dataGet(null, wd.id, "_tooltip_grown_ns", i128);
     dvui.dataSet(null, wd.id, "_tooltip_grown_ns", now);
@@ -284,7 +294,7 @@ fn tooltipGrown(wd: *dvui.WidgetData, full: dvui.Rect.Physical, t: f32) dvui.Rec
         .x = std.math.clamp(at.x, full.x, full.x + full.w),
         .y = std.math.clamp(at.y, full.y, full.y + full.h),
     };
-    const k = @max(0, motion.enterFull(t));
+    const k = @max(0, grow);
     return .{
         .x = o.x + (full.x - o.x) * k,
         .y = o.y + (full.y - o.y) * k,
@@ -293,47 +303,62 @@ fn tooltipGrown(wd: *dvui.WidgetData, full: dvui.Rect.Physical, t: f32) dvui.Rec
     };
 }
 
-/// How far a tooltip has faded in this showing, 0…1 over `duration_us` (eased). A showing starts
-/// when it is first drawn after a pause, so a tooltip that hides and comes back fades in again —
-/// a tooltip widget exists every frame whether shown or not, so its first frame will not do.
-pub fn tooltipFade(wd: *dvui.WidgetData, duration_us: i32) f32 {
+/// How far into this showing a tooltip is, 0…1, linear over a floating surface's opening time
+/// (`motion.open_us`) — the clock a menu slides open on, so the two open together. A showing
+/// starts when it is first drawn after a pause, so a tooltip that hides and comes back opens
+/// again — a tooltip widget exists every frame whether shown or not, so its first frame will not
+/// do.
+fn tooltipClock(wd: *dvui.WidgetData) f32 {
     const now = dvui.currentWindow().frame_time_ns;
     const last = dvui.dataGet(null, wd.id, "_tooltip_shown_ns", i128);
     dvui.dataSet(null, wd.id, "_tooltip_shown_ns", now);
     // Not shown last frame (or ever): a new showing.
     if (last == null or now - last.? > 100 * std.time.ns_per_ms) {
-        _ = dvui.currentWindow().animations.remove(wd.id.update("_tooltip_fade"));
-        dvui.animation(wd.id, "_tooltip_fade", .{ .start_val = 0, .end_val = 1, .end_time = motion.duration(duration_us), .easing = motion.fade });
+        _ = dvui.currentWindow().animations.remove(wd.id.update("_tooltip_open"));
+        dvui.animation(wd.id, "_tooltip_open", .{ .start_val = 0, .end_val = 1, .end_time = motion.duration(motion.open_us) });
     }
-    return if (dvui.animationGet(wd.id, "_tooltip_fade")) |a| std.math.clamp(a.value(), 0, 1) else 1;
+    return if (dvui.animationGet(wd.id, "_tooltip_open")) |a| std.math.clamp(a.value(), 0, 1) else 1;
 }
 
-/// A shown tooltip's surface and fade in one: the surface at this showing's fade
-/// (`tooltipFade`), and the same fade on everything drawn after — the tooltip's contents — so
-/// glass and text arrive together. Returns the alpha to restore once the contents are drawn:
+/// How far a tooltip has faded in this showing, 0…1 (`motion.fade` on `tooltipClock`).
+/// `duration_us` is kept for callers written against the older clock of their own; a tooltip
+/// now opens on the menus' clock, whatever it asks for.
+pub fn tooltipFade(wd: *dvui.WidgetData, duration_us: i32) f32 {
+    _ = duration_us;
+    return motion.fade(tooltipClock(wd));
+}
+
+/// A shown tooltip's surface and fade in one: the glass forming and growing out of the pointer as
+/// a menu slides open (`tooltipClock`), and the same fade on everything drawn after — the
+/// tooltip's contents — so glass and text arrive together. Returns the alpha to restore once the
+/// contents are drawn:
 ///
 ///     if (tt.shown()) {
 ///         const prev = core.dialogs.tooltipBegin(tt.data(), 350_000);
 ///         defer dvui.alphaSet(prev);
 ///         // contents
 ///     }
+///
+/// `duration_us` as `tooltipFade`'s: kept, not used.
 pub fn tooltipBegin(wd: *dvui.WidgetData, duration_us: i32) f32 {
-    const t = tooltipFade(wd, duration_us);
-    tooltipSurfaceFaded(wd, t);
+    _ = duration_us;
+    const u = tooltipClock(wd);
+    const t = motion.fade(u);
+    tooltipSurfaceAt(wd, t, motion.enter(u), t);
     return dvui.alpha(t);
 }
 
-/// `tooltipBegin` for a `dvui.FloatingTooltipWidget`, following the widget's own fade when it
-/// has one. A tooltip with a `delay` is "shown" from the moment the pointer arrives and hides
-/// its contents behind its own alpha animation (nothing for 80% of the delay, then a fade) — a
-/// clock of our own started then formed the glass, dark tint and all, while the text still
-/// waited out the delay. With a delay the frost forms by that same animation, and the plain
-/// paint and contents are left to it; without one, `tooltipBegin`'s own fade over
-/// `duration_us`. Returns the alpha to restore after the contents, as `tooltipBegin` does.
+/// `tooltipBegin` for a `dvui.FloatingTooltipWidget`. A tooltip with a `delay` is "shown" from
+/// the moment the pointer arrives and hides its contents behind its own alpha animation (nothing
+/// for 80% of the delay, then a quick fade): the glass waits for that to begin — so it does not
+/// form, dark tint and all, while the text still waits out the delay — and then opens on the
+/// menus' clock like any other tooltip, rather than riding the widget's fade, which runs over a
+/// fifth of the delay and played the whole grow in a blink. Returns the alpha to restore after
+/// the contents, as `tooltipBegin` does.
 pub fn tooltipBeginFor(tt: *dvui.FloatingTooltipWidget, duration_us: i32) f32 {
     if (tt.animate) |fade_in| {
-        tooltipSurfaceWith(tt.data(), fade_in.val orelse 1, 1);
-        return dvui.alpha(1);
+        // Still waiting out the delay: nothing, and no showing begun yet.
+        if ((fade_in.val orelse 1) <= 0.01) return dvui.alpha(1);
     }
     return tooltipBegin(tt.data(), duration_us);
 }

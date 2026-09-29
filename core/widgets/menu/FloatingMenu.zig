@@ -273,8 +273,8 @@ fn reveal(self: *FloatingMenu, from: ?Rect.Natural) void {
     dvui.refresh(null, @src(), id);
 }
 
-/// Microseconds, as written, a menu takes to slide open (`core.motion.duration`).
-const reveal_us: i32 = 260_000;
+/// Microseconds, as written, a menu takes to slide open: a floating surface's (`core.motion`).
+const reveal_us: i32 = motion.open_us;
 
 pub fn close(self: *FloatingMenu) void {
     self.menu.close();

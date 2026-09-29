@@ -36,6 +36,17 @@ pub const refraction: f32 = 22;
 pub const falloff: f32 = 6;
 pub const softness: f32 = 10;
 
+/// How much deeper than `falloff` the curve runs at the strongest refraction: past the setting's
+/// middle it does not only bend harder, it bends further in — at the top of the scale the drop's
+/// edge reaches `1 + depth_gain` times as far across the pane.
+pub const depth_gain: f32 = 1.5;
+
+/// Physical pixels the drop's curve fades over by a factor of e, at `look`: `falloff`, deepened
+/// past the middle of the refraction setting (`depth_gain`).
+pub fn depthPx(look: Look, scale: f32) f32 {
+    return falloff * scale * (1 + depth_gain * std.math.clamp(look.refraction - 1, 0, 1));
+}
+
 /// Physical pixels a caller should capture beyond a pane for it to refract, at `look`.
 pub fn margin(look: Look, scale: f32) f32 {
     if (!bends(look)) return 0;
@@ -124,8 +135,7 @@ const ring_count = 10;
 /// the rim got a few big kinks, contours round the pane, and the flat face rings it did not need.
 /// The last ring sits well into the flat, where a fan to the centre takes over. Never past `cap`,
 /// the most a small pane has room for.
-fn ringInsets(buf: *[ring_count + 1]f32, scale: f32, cap: f32) []const f32 {
-    const l = falloff * scale;
+fn ringInsets(buf: *[ring_count + 1]f32, l: f32, cap: f32) []const f32 {
     var n: usize = 0;
     var i: usize = 0;
     while (i < ring_count) : (i += 1) {
@@ -178,9 +188,9 @@ pub const Field = struct {
     steep: f32,
 };
 
-/// The drop's field at `p` in pane `r`: a soft minimum of the distances to its four sides —
+/// The drop's field at `p` in pane `r`, its curve `depth_px` deep (`depthPx`): a soft minimum of the distances to its four sides —
 /// `-k·ln Σ e^(-dᵢ/k)` — so the corners are round and the gradient never turns sharply.
-pub fn fieldAt(p: dvui.Point.Physical, r: dvui.Rect.Physical, scale: f32) Field {
+pub fn fieldAt(p: dvui.Point.Physical, r: dvui.Rect.Physical, scale: f32, depth_px: f32) Field {
     const k = softness * scale;
     const d = [4]f32{ p.x - r.x, r.x + r.w - p.x, p.y - r.y, r.y + r.h - p.y };
     const m = @min(@min(d[0], d[1]), @min(d[2], d[3]));
@@ -194,7 +204,7 @@ pub fn fieldAt(p: dvui.Point.Physical, r: dvui.Rect.Physical, scale: f32) Field 
     const soft = m - k * @log(sum);
     return .{
         .out = .{ .x = (w[1] - w[0]) / sum, .y = (w[3] - w[2]) / sum },
-        .steep = @exp(-@max(0, soft) / (falloff * scale)),
+        .steep = @exp(-@max(0, soft) / depth_px),
     };
 }
 
@@ -205,8 +215,9 @@ pub fn fieldAt(p: dvui.Point.Physical, r: dvui.Rect.Physical, scale: f32) Field 
 pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.Physical, radii: Radii, scale: f32, mod: dvui.Color, look: Look) void {
     const half = @min(r.w, r.h) / 2;
     if (half < 1 or tex_bounds.w < 1 or tex_bounds.h < 1) return;
+    const depth = depthPx(look, scale);
     var insets_buf: [ring_count + 1]f32 = undefined;
-    const insets = ringInsets(&insets_buf, scale, half * 0.9);
+    const insets = ringInsets(&insets_buf, depth, half * 0.9);
     const arc_steps = arcSteps(radii);
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();
@@ -224,10 +235,10 @@ pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.
         defer b.deinit(arena);
         for (insets) |d| {
             ringPoints(pts, null, r, radii, d, arc_steps, 1, 1);
-            for (pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+            for (pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, depth, reach_px, tex_bounds) });
         }
         const c = r.center();
-        b.appendVertex(.{ .pos = c, .col = col, .uv = seen(c, r, scale, reach_px, tex_bounds) });
+        b.appendVertex(.{ .pos = c, .col = col, .uv = seen(c, r, scale, depth, reach_px, tex_bounds) });
         appendRingStrips(&b, per_ring, rings);
         appendFan(&b, per_ring, rings - 1, vtx_count - 1);
         dvui.renderTriangles(b.build_unowned(), tex) catch {};
@@ -239,9 +250,9 @@ pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.
         var b = dvui.Triangles.Builder.init(arena, per_ring * 2, per_ring * 6) catch return;
         defer b.deinit(arena);
         ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
-        for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+        for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, depth, reach_px, tex_bounds) });
         ringPoints(pts, null, r, radii, aa_in, arc_steps, 1, 1);
-        for (pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+        for (pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, depth, reach_px, tex_bounds) });
         appendRingStrips(&b, per_ring, 2);
         if (look.blend_over) |set| set(tex, true);
         dvui.renderTriangles(b.build_unowned(), tex) catch {};
@@ -264,7 +275,8 @@ fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.P
     const arena = dvui.currentWindow().arena();
     // Only as far in as the clear glass shows: it fades with the steepness squared, so past about
     // two falloffs there is nothing of it left to draw.
-    const reach_in = falloff * scale * 2.2;
+    const depth = depthPx(look, scale);
+    const reach_in = depth * 2.2;
     var rings: usize = 0;
     while (rings < insets.len and (rings < 2 or insets[rings - 1] <= reach_in)) rings += 1;
     const used = insets[0..rings];
@@ -274,14 +286,14 @@ fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.P
     const clear = dvui.Color.PMA.fromColor(.transparent);
     const reach_px = refraction * scale * look.lens * look.refraction;
     ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
-    for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+    for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, depth, reach_px, tex_bounds) });
     for (used) |d| {
         ringPoints(pts, null, r, radii, d, arc_steps, 1, 1);
         for (pts) |p| {
-            const steep = fieldAt(p, r, scale).steep;
+            const steep = fieldAt(p, r, scale, depth).steep;
             // Squared, so the clear glass hugs the edge and the face stays frosted.
             const col = dvui.Color.PMA.fromColor(dvui.Color.white.opacity(amount * steep * steep));
-            b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+            b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, depth, reach_px, tex_bounds) });
         }
     }
     appendRingStrips(&b, per_ring, rings + 1);
@@ -290,8 +302,8 @@ fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.P
 
 /// Where the glass at `p` shows: further out, along the drop's outward direction, by as much of
 /// `reach_px` as the drop is steep there.
-fn seen(p: dvui.Point.Physical, r: dvui.Rect.Physical, scale: f32, reach_px: f32, bd: dvui.Rect.Physical) @Vector(2, f32) {
-    const f = fieldAt(p, r, scale);
+fn seen(p: dvui.Point.Physical, r: dvui.Rect.Physical, scale: f32, depth: f32, reach_px: f32, bd: dvui.Rect.Physical) @Vector(2, f32) {
+    const f = fieldAt(p, r, scale, depth);
     const reach = reach_px * f.steep;
     const q: dvui.Point.Physical = .{ .x = p.x + f.out.x * reach, .y = p.y + f.out.y * reach };
     return .{
@@ -313,7 +325,8 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
     if (half < 1) return;
     // The rim line needs rings of its own, a fraction of a point apart, before the curve's.
     var curve_buf: [ring_count + 1]f32 = undefined;
-    const curve = ringInsets(&curve_buf, scale, half * 0.9);
+    const depth = falloff * scale;
+    const curve = ringInsets(&curve_buf, depth, half * 0.9);
     var insets_buf: [ring_count + 6]f32 = undefined;
     var n_insets: usize = 0;
     for ([_]f32{ 0, 0.5, 1.0, 1.6, 2.5 }) |pt| {
@@ -326,7 +339,7 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
     for (curve) |d| {
         if (d <= insets_buf[n_insets - 1] + 0.25) continue;
         // Past about two falloffs the broad glow is gone and the lift is flat: the fan does.
-        if (d > falloff * scale * 2) break;
+        if (d > depth * 2) break;
         insets_buf[n_insets] = d;
         n_insets += 1;
     }
@@ -349,7 +362,7 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
         ringPoints(pts, null, r, radii, d, arc_steps, 1, 1);
         const line = @exp(-d / (line_width * scale));
         for (pts) |p| {
-            const f = fieldAt(p, r, scale);
+            const f = fieldAt(p, r, scale, depth);
             const facing = f.out.x * lx + f.out.y * ly;
             const toward = @max(0, facing);
             const away = @max(0, -facing);
