@@ -888,6 +888,9 @@ pub const Pane = struct {
     form: ?f32 = null,
 };
 
+/// Physical pixels: the least blur a frost is drawn with (`frostPane`).
+pub const min_blur: f32 = 3;
+
 /// How long a pane takes to form by itself, as written (`core.motion.durationMs`).
 pub const form_ms: f32 = 350;
 
@@ -915,6 +918,12 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
     // The blur comes in from sharp; the edge squeezes in on the arrival curve, past its final
     // shape and back when motion is playful.
     const radius = pane.radius * form;
+    // Under a few pixels of blur the pyramid makes no pass, and the picture it hands back is an
+    // empty target — which a frost, replacing what it covers, lays down as a hole: the desktop
+    // showed through a pane forming or unforming, tinted whatever was behind the window. Glass
+    // that is barely there is the scene behind it, so draw none; its tint and lift are as good as
+    // nothing by the time there is blur enough to show.
+    if (radius < min_blur) return;
     const edge = @max(0, motion.enterFull(form));
     backdrop.mode = .readback;
     backdrop.radius_px = radius;

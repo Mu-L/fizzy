@@ -424,6 +424,12 @@ fn glass(id: dvui.Id, panes: []const Pane, area: dvui.Rect.Physical, g: f32, sca
     job.pane = scaled(base, g);
     // In steps, so a frost fading in is re-blurred a dozen times rather than every frame.
     job.pane.radius = @round(job.pane.radius / blur_step) * blur_step;
+    // Too little blur for the pyramid to make a pass: its picture would be an empty target, laid
+    // down as a hole to the desktop (`BlurBackdrop.min_blur`). Glass barely there is none yet.
+    if (job.pane.radius < BlurBackdrop.min_blur) {
+        job.count = 0;
+        return;
+    }
     job.bounds = bounds;
     const backdrop = dvui.dataGetPtrDefault(null, id, "_drop_zones_frost", BlurBackdrop, .{});
     dvui.dataSetDeinitFunction(null, id, "_drop_zones_frost", &BlurBackdrop.releaseTexture);
