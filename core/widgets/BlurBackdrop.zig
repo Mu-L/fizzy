@@ -898,6 +898,13 @@ pub const Pane = struct {
     /// app's motion); a caller that knows better — a window closing, a tooltip on its own fade —
     /// passes its own.
     form: ?f32 = null,
+    /// A signature, kept by the caller, of what lies under the pane. Set, it replaces
+    /// `refresh_ms`: what is underneath is read again only when the signature changes (or the
+    /// pane moves, resizes or forms), however many frames pass. For chrome that sits over
+    /// something the caller can describe — a button over a canvas it knows the art, zoom and pan
+    /// of — where a re-read every frame is a blur's worth of work for a picture that has not
+    /// changed.
+    witness: ?u64 = null,
 };
 
 /// Physical pixels: the least blur a frost is drawn with (`frostPane`).
@@ -949,7 +956,12 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
     // `init` takes a rect in *window* coordinates.
     const nat = dvui.windowRectScale().rectFromPhysical(captured);
     // A witness that changes with the geometry and, coarsely, with time.
-    const tick: i128 = if (pane.refresh_ms == 0) now else @divTrunc(now, @as(i128, pane.refresh_ms) * std.time.ns_per_ms);
+    const tick: i128 = if (pane.witness) |w|
+        @intCast(w)
+    else if (pane.refresh_ms == 0)
+        now
+    else
+        @divTrunc(now, @as(i128, pane.refresh_ms) * std.time.ns_per_ms);
     // The blur's radius too, so a pane forming — its blur growing from sharp — reads again every
     // frame it changes, whatever its refresh.
     backdrop.init(nat, .{ captured, tick, @round(radius) });

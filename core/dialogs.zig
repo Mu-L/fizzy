@@ -145,6 +145,24 @@ pub fn frostPane(id: dvui.Id, rect: dvui.Rect.Physical, corners: dvui.CornerRect
     return true;
 }
 
+/// `frostPane` for chrome over something the caller can describe: `witness` is a signature of
+/// what lies under `rect`, and the frost reads it again only when that changes (or the pane
+/// moves or resizes), not every frame (`BlurBackdrop.Pane.witness`). Drawn here, in the caller's
+/// own copy of the frost, since the host's route (`host_chrome`) predates the witness.
+pub fn frostPaneKept(id: dvui.Id, rect: dvui.Rect.Physical, corners: dvui.CornerRect, scale: f32, witness: u64) bool {
+    const f = dialogFrost() orelse return false;
+    widgets.BlurBackdrop.frostPane(id, rect, corners, scale, .{
+        .radius = f.radius,
+        .tint = f.tint,
+        .mix = f.mix,
+        .lift = f.lift,
+        .detail = f.detail,
+        .refraction = f.refraction,
+        .witness = witness,
+    });
+    return true;
+}
+
 // ---- one floating surface, everywhere ---------------------------------------------------------
 //
 // A dialog, the command palette, the account flyout, a menu dropdown and a store card's hover
