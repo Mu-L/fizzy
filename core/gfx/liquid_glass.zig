@@ -56,6 +56,14 @@ pub const Look = struct {
     sharp: ?dvui.Texture = null,
 };
 
+/// How much of the glass's edge a frost of blur `radius` has: none on an unblurred pane, all of
+/// it by `full_at_blur`. A drop is thick glass; a barely-frosted pane is a thin sheet, and
+/// switching the whole rim on at the first step of blur made it pop.
+pub fn blurRamp(radius: f32) f32 {
+    return std.math.clamp(radius / full_at_blur, 0, 1);
+}
+pub const full_at_blur: f32 = 20;
+
 /// Whether `look` bends anything at all — when it does not, a flat textured rect is the same
 /// picture for a fraction of the work.
 pub fn bends(look: Look) bool {
@@ -145,7 +153,8 @@ pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.
 /// is flat. Drawn at the frost's weight (`mod`), so it takes the pane's tint and lift afterwards
 /// like the frost does.
 fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.Physical, radii: Radii, scale: f32, mod: dvui.Color, look: Look, band_px: f32) void {
-    const amount = clarity * look.lens * @as(f32, @floatFromInt(mod.a)) / 255;
+    // With the refraction setting, up to as designed: a flat edge is a clear one no more.
+    const amount = clarity * look.lens * @min(1, look.refraction) * @as(f32, @floatFromInt(mod.a)) / 255;
     if (amount <= 0.01) return;
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();

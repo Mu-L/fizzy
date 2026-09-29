@@ -910,7 +910,8 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
         .tint = pane.tint,
         .mix = std.math.clamp(pane.mix, 0, 1),
         .lift = std.math.clamp(pane.lift, 0, 1),
-        .lens = motion.liquid(),
+        // The edge comes in with the blur, so a barely-frosted pane has barely an edge.
+        .lens = motion.liquid() * liquid_glass.blurRamp(pane.radius),
         .refraction = pane.refraction,
     };
     dvui.deferRender(job, FrostJob.draw);
@@ -943,7 +944,7 @@ const FrostJob = struct {
         // The lift and the bevel's light, in one pass after the tint so they stay white.
         const lift: f32 = if (self.tint != null) self.lift else 0;
         if (liquid_glass.bends(.{ .lens = self.lens })) {
-            if (whiteTexture()) |light| liquid_glass.drawLift(light, self.rect, self.radii(), self.scale, lift, self.lens);
+            if (whiteTexture()) |light| liquid_glass.drawLift(light, self.rect, self.radii(), self.scale, lift, self.lens * @min(1, self.refraction));
         } else if (lift > 0) {
             addTint(self.rect, self.corners, self.scale, .white, lift);
         }

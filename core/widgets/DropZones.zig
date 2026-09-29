@@ -379,7 +379,8 @@ fn glass(id: dvui.Id, panes: []const Pane, area: dvui.Rect.Physical, g: f32, sca
         .scale = scale,
         .now = dvui.currentWindow().frame_time_ns,
         .strength = g,
-        .lens = motion.liquid(),
+        // The edge comes in with the blur, so a barely-frosted pane has barely an edge.
+        .lens = motion.liquid() * liquid_glass.blurRamp(base.radius),
     };
     for (panes) |pane| {
         if (pane.r.w < 1 or pane.r.h < 1) continue;
@@ -455,7 +456,7 @@ const LayerJob = struct {
             // The lift and the rim's light, in one pass after the tint so they stay white; a lit
             // zone is brighter and catches more.
             const lift = std.math.clamp(self.pane.lift + lit_lift * pane.lit * self.strength, 0, 1);
-            if (light) |l| liquid_glass.drawLift(l, pane.r, pane.radii, self.scale, lift, self.strength * self.lens * pane.lens * (1 + 0.6 * pane.lit));
+            if (light) |l| liquid_glass.drawLift(l, pane.r, pane.radii, self.scale, lift, self.strength * self.lens * pane.lens * @min(1, self.pane.refraction) * (1 + 0.6 * pane.lit));
         }
     }
 };
