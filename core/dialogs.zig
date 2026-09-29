@@ -169,6 +169,16 @@ pub fn rowCorners() dvui.CornerRect {
 /// The gap between a surface's edge and its rows.
 pub const surface_padding: dvui.Rect = .all(6);
 
+/// How far in from the edges of a surface with corners of `radius` its content has to start for
+/// its own corner to clear the curve: where the arc crosses the corner's diagonal, `r(1 − 1/√2)`.
+/// Content pads itself a little anyway; this is what the rounding adds on top, so a surface at
+/// full corner roundness does not crowd a heading into its corner — nothing at square corners,
+/// a couple of points at the default, nearly five at full. Give it as padding to anything whose
+/// content runs to its edges (`tooltipOptions` does).
+pub fn cornerInset(radius: f32) f32 {
+    return @max(0, radius) * (1 - std.math.sqrt1_2);
+}
+
 /// The drop shadow under a floating surface. Its corners resolved against the theme: a box
 /// shadow's corners are not finalized the way a widget's are, and an unresolved corner draws
 /// square whatever radius it names — square shadow corners stood out past rounded glass.
@@ -207,6 +217,8 @@ pub fn tooltipOptions(id_extra: usize) dvui.Options {
         .background = false,
         .border = .all(0),
         .corners = tooltipCorners(),
+        // Whatever the tooltip holds keeps clear of its corners, however round they are.
+        .padding = .all(cornerInset(tooltipCorners().tl.radius())),
     };
 }
 
@@ -253,22 +265,30 @@ fn tooltipSurfaceAt(wd: *dvui.WidgetData, form: f32, grow: f32, paint_fade: f32)
     // it as it grows — the tooltip opens from the thing it is about, as a menu slides open from
     // what opened it.
     const r = tooltipGrown(wd, brs.r, grow);
+    tooltipGlass(wd, r, brs.s, t, p);
+    // Only now: the shadow ring lies outside the glass, and cut to its rect it was nothing but
+    // dark square wedges behind the round corners.
     dvui.clipSet(dvui.clipGet().intersect(r));
-    const phys_corners = tooltipCorners().scale(brs.s, dvui.CornerRect.Physical);
+}
+
+/// A tooltip's glass over `r` (physical, at `scale`), formed `t`, its plain paint at `p`: the
+/// frost, or with the blur off the plain fill, and the shadow ring round either.
+fn tooltipGlass(wd: *dvui.WidgetData, r: dvui.Rect.Physical, scale: f32, t: f32, p: f32) void {
+    const phys_corners = tooltipCorners().scale(scale, dvui.CornerRect.Physical);
     const bs = surfaceShadow();
     const f = dialogFrost() orelse {
-        const prect = r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
-        prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha * p) }, .fade = brs.s * bs.fade });
+        const prect = r.insetAll(scale * bs.shrink).offsetPoint(bs.offset.scale(scale, dvui.Point.Physical));
+        prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha * p) }, .fade = scale * bs.fade });
         r.fill(phys_corners, .{ .color = .{ .color = dialogFill().opacity(p) } });
         return;
     };
     // The shadow as a ring round the glass, after it (`glassShadow`), so the glass does not blur
     // it in; deferred behind the frost by drawing it once the frost is queued.
-    defer glassShadow(r, tooltipCorners(), brs.s, bs, p);
+    defer glassShadow(r, tooltipCorners(), scale, bs, p);
     // Under a couple of pixels of blur there is nothing to see yet, and too little for the blur
     // to make a pass at all.
     if (f.radius * t < 2) return;
-    widgets.BlurBackdrop.frostPane(wd.id, r, tooltipCorners(), brs.s, .{
+    widgets.BlurBackdrop.frostPane(wd.id, r, tooltipCorners(), scale, .{
         .radius = f.radius,
         .refresh_ms = f.refresh_ms,
         .tint = f.tint,
