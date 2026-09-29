@@ -13,6 +13,7 @@
 //! a floating surface. Everything else is dvui's, and updates by re-copying.
 const std = @import("std");
 const dvui = @import("dvui");
+const motion = @import("../../motion.zig");
 const dialogs = @import("../../dialogs.zig");
 const BlurBackdrop = @import("../BlurBackdrop.zig");
 
@@ -167,6 +168,8 @@ pub fn init(self: *FloatingMenu, src: std.builtin.SourceLocation, init_opts: Ini
         self.wd.rect.y = @round(self.wd.rect.y * s) / s;
     }
 
+    self.reveal(init_opts.from);
+
     self.data().register();
     dvui.parentSet(self.widget());
 
@@ -240,6 +243,37 @@ pub fn init(self: *FloatingMenu, src: std.builtin.SourceLocation, init_opts: Ini
 
     self.menu.init(@src(), .{ .dir = .vertical, .parentSubwindowId = self.prev_windowInfo.id, .keyboard_nav = self.style }, options.strip().override(.{ .role = .none, .expand = .horizontal }));
 }
+
+/// The menu slides open: from nothing to its full height on the app's arrival curve
+/// (`core.motion.enter`) — plain at minimal, carrying past and settling back when motion is
+/// playful — as a dialog and the palette open. It grows from the edge nearest where it was
+/// opened: down from a menu placed below its anchor, up from one placed above it. Only once its
+/// size is known (its second frame); a menu that comes back slides open anew.
+fn reveal(self: *FloatingMenu, from: ?Rect.Natural) void {
+    const id = self.data().id;
+    if (dvui.minSizeGet(id) == null) return;
+    const full = self.wd.rect;
+    if (full.h <= 0) return;
+    if (dvui.dataGet(null, id, "_revealed", bool) == null) {
+        dvui.dataSet(null, id, "_revealed", true);
+        dvui.animation(id, "_reveal", .{
+            .start_val = 0,
+            .end_val = 1,
+            .end_time = motion.duration(reveal_us),
+            .easing = motion.enter,
+        });
+    }
+    const a = dvui.animationGet(id, "_reveal") orelse return;
+    const k = @max(0, a.value());
+    self.wd.rect.h = full.h * k;
+    // Placed above what opened it: grow up, from its bottom edge.
+    const above = if (from) |fr| full.y + full.h <= fr.y + 1 else false;
+    if (above) self.wd.rect.y = full.y + full.h - self.wd.rect.h;
+    dvui.refresh(null, @src(), id);
+}
+
+/// Microseconds, as written, a menu takes to slide open (`core.motion.duration`).
+const reveal_us: i32 = 260_000;
 
 pub fn close(self: *FloatingMenu) void {
     self.menu.close();
