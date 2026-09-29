@@ -951,7 +951,7 @@ const FrostJob = struct {
         // The lift and the bevel's light, in one pass after the tint so they stay white.
         const lift: f32 = if (self.tint != null) self.lift else 0;
         if (liquid_glass.bends(.{ .lens = self.lens })) {
-            if (whiteTexture()) |light| liquid_glass.drawLift(light, self.rect, self.radii(), self.scale, lift, self.lens * @min(1, self.refraction));
+            if (additiveLight()) |light| liquid_glass.drawLift(light, self.rect, self.radii(), self.scale, lift, self.lens * @min(1, self.refraction));
         } else if (lift > 0) {
             addTint(self.rect, self.corners, self.scale, .white, lift);
         }
@@ -1027,6 +1027,54 @@ pub fn addTint(rect: Rect.Physical, corners: dvui.CornerRect, scale: f32, tint: 
 /// vertex colour onto what is there. Null where the backend cannot blend that way.
 pub fn additiveWhite() ?Texture {
     return whiteTexture();
+}
+
+/// Fizzy addition: what a pane's lift and rim light add themselves with (`liquid_glass.drawLift`)
+/// — a white that adds, dithered. A faint light fading over tens of pixels has a few dozen 8-bit
+/// levels to do it in, and drawn in one flat white each level is a visible tread; the dither has
+/// to be inside that same draw, since the frame rounds once per draw and noise added after would
+/// only be added to the steps. So the white is an 8×8 ordered pattern a few percent under white
+/// (`dither_depth`), tiled one texel to a screen pixel, and `gain` brings the mean back to what
+/// was asked: each level's edge breaks into a pattern that averages to the true value. Falls back
+/// to the plain white where the backend cannot keep the pattern.
+pub fn additiveLight() ?liquid_glass.Light {
+    if (lightDitherTexture()) |t| return .{ .tex = t, .gain = 1 / (1 - dither_depth * 63.0 / 128.0), .tile = bayer_size };
+    const w = whiteTexture() orelse return null;
+    return .{ .tex = w };
+}
+
+/// How far under white the pattern's darkest texel sits.
+const dither_depth: f32 = 0.12;
+var light_dither_tex: ?Texture = null;
+
+fn lightDitherTexture() ?Texture {
+    if (light_dither_tex) |t| return t;
+    if (!dvui.Backend.support_texture_blend) return null;
+    var px: [64]dvui.Color.PMA = undefined;
+    for (0..8) |y| {
+        for (0..8) |x| {
+            var n: u8 = 0;
+            var bit: u3 = 0;
+            var xx = x;
+            var yy = y;
+            while (bit < 3) : (bit += 1) {
+                const xb: u8 = @intCast(xx & 1);
+                const yb: u8 = @intCast(yy & 1);
+                n = n * 4 + (xb ^ yb) * 2 + yb;
+                xx >>= 1;
+                yy >>= 1;
+            }
+            const v: u8 = @intFromFloat(@round(255 * (1 - dither_depth * @as(f32, @floatFromInt(n)) / 64)));
+            px[y * 8 + x] = .{ .r = v, .g = v, .b = v, .a = v };
+        }
+    }
+    const t = dvui.textureCreate(&px, .{ .width = 8, .height = 8, .interpolation = .nearest, .wrap_u = .repeat, .wrap_v = .repeat }) catch return null;
+    if (!tapsBlend(t, .add)) {
+        dvui.textureDestroyLater(t);
+        return null;
+    }
+    light_dither_tex = t;
+    return t;
 }
 
 var white_tex: ?Texture = null;

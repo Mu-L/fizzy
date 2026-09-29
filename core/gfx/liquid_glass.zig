@@ -66,6 +66,21 @@ pub const Look = struct {
     blend_over: ?*const fn (tex: dvui.Texture, over: bool) void = null,
 };
 
+/// A white that adds, for `drawLift`: `tex`, tiled one texel to every screen pixel over `tile`
+/// pixels when it is a dither pattern (its uv follows the screen, so the pattern holds still as a
+/// pane moves), and the `gain` that brings its mean back to white.
+pub const Light = struct {
+    tex: dvui.Texture,
+    gain: f32 = 1,
+    /// Screen pixels the texture repeats over; 0 for a plain white, sampled anywhere.
+    tile: f32 = 0,
+
+    fn uv(self: Light, p: dvui.Point.Physical) @Vector(2, f32) {
+        if (self.tile <= 0) return .{ 0.5, 0.5 };
+        return .{ p.x / self.tile, p.y / self.tile };
+    }
+};
+
 /// How much of the glass's edge a frost of blur `radius` has: none on an unblurred pane, all of
 /// it by `full_at_blur`. A drop is thick glass; a barely-frosted pane is a thin sheet, and
 /// switching the whole rim on at the first step of blur made it pop.
@@ -236,8 +251,11 @@ fn seen(p: dvui.Point.Physical, r: dvui.Rect.Physical, scale: f32, reach_px: f32
 /// The white a pane of glass adds over its tint — its `lift`, the whole pane — and the light its
 /// rim catches on top: brightest where it faces the top left, a dimmer reflection on the side
 /// facing away, `amount` of it. One pass for both. `light` is a white texture that adds
-/// (`BlurBackdrop.additiveWhite`); draw this after the tint, so it stays white.
-pub fn drawLift(light: dvui.Texture, r: dvui.Rect.Physical, radii: Radii, scale: f32, lift: f32, amount: f32) void {
+/// (`BlurBackdrop.additiveLight`, dithered); draw this after the tint, so it stays white.
+pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, lift_in: f32, amount_in: f32) void {
+    // The texture sits a little under white on average; `gain` puts the mean back.
+    const lift = lift_in * light.gain;
+    const amount = amount_in * light.gain;
     if (lift <= 0.002 and amount <= 0.01) return;
     const half = @min(r.w, r.h) / 2;
     if (half < 1) return;
@@ -251,7 +269,7 @@ pub fn drawLift(light: dvui.Texture, r: dvui.Rect.Physical, radii: Radii, scale:
     const pts = arena.alloc(dvui.Point.Physical, per_ring) catch return;
     const clear = dvui.Color.PMA.fromColor(.transparent);
     ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
-    for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = .{ 0.5, 0.5 } });
+    for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = light.uv(p) });
     // Up and to the left, as a window's light usually is.
     const lx: f32 = -0.45;
     const ly: f32 = -0.89;
@@ -262,13 +280,13 @@ pub fn drawLift(light: dvui.Texture, r: dvui.Rect.Physical, radii: Radii, scale:
             const facing = f.out.x * lx + f.out.y * ly;
             const lit = light_toward * @max(0, facing) + light_away * @max(0, -facing);
             const col = dvui.Color.PMA.fromColor(dvui.Color.white.opacity(std.math.clamp(lift + amount * f.steep * lit, 0, 1)));
-            b.appendVertex(.{ .pos = p, .col = col, .uv = .{ 0.5, 0.5 } });
+            b.appendVertex(.{ .pos = p, .col = col, .uv = light.uv(p) });
         }
     }
-    b.appendVertex(.{ .pos = r.center(), .col = dvui.Color.PMA.fromColor(dvui.Color.white.opacity(std.math.clamp(lift, 0, 1))), .uv = .{ 0.5, 0.5 } });
+    b.appendVertex(.{ .pos = r.center(), .col = dvui.Color.PMA.fromColor(dvui.Color.white.opacity(std.math.clamp(lift, 0, 1))), .uv = light.uv(r.center()) });
     appendRingStrips(&b, per_ring, rings + 1);
     appendFan(&b, per_ring, rings, vtx_count - 1);
-    dvui.renderTriangles(b.build_unowned(), light) catch {};
+    dvui.renderTriangles(b.build_unowned(), light.tex) catch {};
 }
 
 /// Quads between `count` neighbouring rings of `per_ring` vertices each, laid down one after

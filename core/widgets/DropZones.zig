@@ -473,7 +473,7 @@ const LayerJob = struct {
         // As `frostPane` composes it: the frost at `1 - mix` of itself, then the tint and the
         // lift added over it.
         const frost_mod: dvui.Color = if (self.pane.tint != null) dvui.Color.white.opacity(1 - mix) else .white;
-        const light = BlurBackdrop.additiveWhite();
+        const light = BlurBackdrop.additiveLight();
         for (self.panes[0..self.count]) |pane| {
             liquid_glass.drawPane(tex, backdrop.coverage(), pane.r, pane.radii, self.scale, frost_mod, .{
                 .lens = self.lens * pane.lens,
