@@ -10,6 +10,7 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const rounding = @import("corners.zig");
+const liquid_glass = @import("gfx/liquid_glass.zig");
 const motion = @import("motion.zig");
 const icon_tex = @import("gfx/icon.zig");
 const builtin = @import("builtin");
@@ -168,9 +169,22 @@ pub fn rowCorners() dvui.CornerRect {
 /// The gap between a surface's edge and its rows.
 pub const surface_padding: dvui.Rect = .all(6);
 
-/// The drop shadow under a floating surface.
+/// The drop shadow under a floating surface. Its corners resolved against the theme: a box
+/// shadow's corners are not finalized the way a widget's are, and an unresolved corner draws
+/// square whatever radius it names — square shadow corners stood out past rounded glass.
 pub fn surfaceShadow() dvui.Options.BoxShadow {
-    return .{ .color = .black, .fade = 8, .corners = surfaceCorners(), .alpha = 0.25 };
+    const theme = dvui.themeGet();
+    return .{ .color = .black, .fade = 8, .corners = surfaceCorners().finalize(&theme), .alpha = 0.25 };
+}
+
+/// A frosted surface's shadow: `bs` as a ring round `r` (physical) with the surface's `corners`,
+/// drawn after the glass so the glass never blurs it in (`liquid_glass.drawShadow`). Call after
+/// the frost; an opaque surface keeps the ordinary box shadow under its fill.
+pub fn glassShadow(r: dvui.Rect.Physical, corners: dvui.CornerRect, scale: f32, bs: dvui.Options.BoxShadow, alpha_mult: f32) void {
+    const theme = dvui.themeGet();
+    const c = (bs.corners orelse corners).finalize(&theme);
+    const radii: liquid_glass.Radii = .{ c.tl.radius() * scale, c.bl.radius() * scale, c.br.radius() * scale, c.tr.radius() * scale };
+    liquid_glass.drawShadow(r.insetAll(scale * bs.shrink), radii, bs.fade * scale, bs.offset.scale(scale, dvui.Point.Physical), bs.color, bs.alpha * alpha_mult);
 }
 
 // ---- tooltips: the same surface, small ------------------------------------------------------
@@ -231,12 +245,15 @@ fn tooltipSurfaceWith(wd: *dvui.WidgetData, frost_fade: f32, paint_fade: f32) vo
     dvui.clipSet(dvui.clipGet().intersect(r));
     const phys_corners = tooltipCorners().scale(brs.s, dvui.CornerRect.Physical);
     const bs = surfaceShadow();
-    const prect = r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
-    prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha * p) }, .fade = brs.s * bs.fade });
     const f = dialogFrost() orelse {
+        const prect = r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
+        prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha * p) }, .fade = brs.s * bs.fade });
         r.fill(phys_corners, .{ .color = .{ .color = dialogFill().opacity(p) } });
         return;
     };
+    // The shadow as a ring round the glass, after it (`glassShadow`), so the glass does not blur
+    // it in; deferred behind the frost by drawing it once the frost is queued.
+    defer glassShadow(r, tooltipCorners(), brs.s, bs, p);
     // Under a couple of pixels of blur there is nothing to see yet, and too little for the blur
     // to make a pass at all.
     if (f.radius * t < 2) return;

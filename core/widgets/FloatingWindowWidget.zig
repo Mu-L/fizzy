@@ -574,15 +574,14 @@ pub fn drawBackground(self: *FloatingWindowWidget) void {
         var box_opts = self.options.override(.{ .expand = .both });
         box_opts.box_shadow = null;
         self.layout.init(@src(), .{ .dir = .vertical }, box_opts);
+        self.drawFrost(frost);
+        // The shadow as a ring round the glass, after it, so the glass never blurs it in
+        // (`core.dialogs.glassShadow`) — a box shadow under glass darkened its middle and ringed
+        // its edges.
         if (self.options.box_shadow) |bs| {
             const brs = self.layout.data().borderRectScale();
-            // `WidgetData.init` would have finalized these against the theme's corner style; we read
-            // the init options, so do it here or a theme-kind corner draws as no corner.
-            const corners = (bs.corners orelse self.layout.data().options.cornersGet()).finalize(self.options.theme);
-            const prect = brs.r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
-            prect.fill(corners.scale(brs.s, dvui.CornerRect.Physical), .{ .color = .{ .color = bs.color.opacity(bs.alpha) }, .fade = brs.s * bs.fade });
+            @import("../dialogs.zig").glassShadow(brs.r, self.layout.data().options.cornersGet(), brs.s, bs, 1);
         }
-        self.drawFrost(frost);
         // The tint *is* the fill; the box must not paint another over it.
         if (frost.tint != null) self.layout.data().options.background = false;
     } else {

@@ -100,6 +100,8 @@ have_popup_child: bool = false,
 focus_in_child: bool = false,
 prevClip: Rect.Physical,
 scale_val: f32,
+/// Sliding open this frame (`reveal`), so its scroll area shows no bar.
+revealing: bool = false,
 menu: Menu,
 style: Style,
 scaler: dvui.ScaleWidget,
@@ -218,14 +220,10 @@ pub fn init(self: *FloatingMenu, src: std.builtin.SourceLocation, init_opts: Ini
         // whatever radius it names — which is exactly how a rounded palette ended up beside a
         // square menu built from the same constant.
         const corners = options.cornersGet().finalize(options.themeGet());
-        if (options.box_shadow) |bs| {
-            const prect = brs.r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
-            prect.fill(corners.scale(brs.s, dvui.CornerRect.Physical), .{
-                .color = .{ .color = bs.color.opacity(bs.alpha) },
-                .fade = brs.s * bs.fade,
-            });
-        }
         BlurBackdrop.frostPane(self.data().id, brs.r, corners, brs.s, frost);
+        // The shadow as a ring round the glass, after it, so the glass never blurs it in
+        // (`core.dialogs.glassShadow`).
+        if (options.box_shadow) |bs| @import("../../dialogs.zig").glassShadow(brs.r, corners, brs.s, bs, 1);
     }
 
     // we are using scroll to do border/background but floating windows
@@ -235,7 +233,9 @@ pub fn init(self: *FloatingMenu, src: std.builtin.SourceLocation, init_opts: Ini
         // The shadow is already down; drawing it again from the scroll area would double it.
         scroll_opts.box_shadow = null;
     }
-    self.scroll.init(@src(), .{ .horizontal = .none }, scroll_opts);
+    // No scrollbar while it slides open: shorter than its rows for those frames, it would show
+    // one for a list that fits. A menu too long for the window still gets one once it is open.
+    self.scroll.init(@src(), .{ .horizontal = .none, .vertical_bar = if (self.revealing) .hide else .auto }, scroll_opts);
 
     if (Menu.current()) |pm| {
         pm.child_popup_rect = rs.r;
@@ -264,6 +264,7 @@ fn reveal(self: *FloatingMenu, from: ?Rect.Natural) void {
         });
     }
     const a = dvui.animationGet(id, "_reveal") orelse return;
+    self.revealing = true;
     const k = @max(0, a.value());
     self.wd.rect.h = full.h * k;
     // Placed above what opened it: grow up, from its bottom edge.

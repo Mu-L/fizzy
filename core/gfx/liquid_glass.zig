@@ -365,6 +365,32 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
     dvui.renderTriangles(b.build_unowned(), light.tex) catch {};
 }
 
+/// A pane's drop shadow as a ring round it: from its outline — `radii` at every step, grown with
+/// the ring — fading outward over `fade_px`, the outer part shifted by `offset` so it falls the
+/// way a shadow falls. Nothing inside the outline: a box shadow is a faded rect that covers the
+/// pane's interior too, and glass laid over it blurs it in — a darker middle and a halo round the
+/// edges. Draw it *after* the glass, which then never sees it.
+pub fn drawShadow(r: dvui.Rect.Physical, radii: Radii, fade_px: f32, offset: dvui.Point.Physical, color: dvui.Color, alpha: f32) void {
+    if (alpha <= 0.002 or fade_px < 0.5 or r.w < 1 or r.h < 1) return;
+    const steps = [_]f32{ 0, 0.12, 0.28, 0.48, 0.72, 1.0 };
+    const arc_steps = arcSteps(.{ radii[0] + fade_px, radii[1] + fade_px, radii[2] + fade_px, radii[3] + fade_px });
+    const per_ring = 4 * (arc_steps + 1);
+    const arena = dvui.currentWindow().arena();
+    var b = dvui.Triangles.Builder.init(arena, per_ring * steps.len, per_ring * 6 * (steps.len - 1)) catch return;
+    defer b.deinit(arena);
+    const pts = arena.alloc(dvui.Point.Physical, per_ring) catch return;
+    for (steps) |x| {
+        const out = x * fade_px;
+        const grown: Radii = .{ radii[0] + out, radii[1] + out, radii[2] + out, radii[3] + out };
+        ringPoints(pts, null, r, grown, -out, arc_steps, 1, 1);
+        const fall = 1 - x;
+        const col = dvui.Color.PMA.fromColor(color.opacity(alpha * fall * fall));
+        for (pts) |p| b.appendVertex(.{ .pos = .{ .x = p.x + offset.x * x, .y = p.y + offset.y * x }, .col = col });
+    }
+    appendRingStrips(&b, per_ring, steps.len);
+    dvui.renderTriangles(b.build_unowned(), null) catch {};
+}
+
 /// Quads between `count` neighbouring rings of `per_ring` vertices each, laid down one after
 /// another from the outermost, wound the way dvui winds a path's fill.
 fn appendRingStrips(b: *dvui.Triangles.Builder, per_ring: usize, count: usize) void {
