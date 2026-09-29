@@ -41,6 +41,11 @@ const BlurBackdrop = @This();
 
 /// Physical-pixel rect this backdrop covers. Set by `init`.
 rect: Rect.Physical = .{},
+/// Fizzy addition: the physical pixels the last capture actually copied — `rect` snapped to whole
+/// pixels, less a pixel lost to halving an odd size. `small` and `sharpTexture` are pictures of
+/// exactly this; map texture coordinates through it (`coverage`), not `rect`, or the picture
+/// sits up to a pixel off, and slides by a different fraction every time the pane moves.
+covered: Rect.Physical = .{},
 /// CSS `backdrop-filter: blur(radius_px)`-equivalent blur strength.
 radius_px: f32 = 16,
 /// Cached small texture, redrawn as-is on non-dirty frames. A view of the pyramid's last
@@ -242,6 +247,7 @@ fn deinitFromTarget(self: *BlurBackdrop) bool {
     defer dvui.alphaSet(prev_alpha);
 
     const step = self.level(0, w, h) orelse return false;
+    self.covered = .{ .x = r.x, .y = r.y, .w = @floatFromInt(w * shrink), .h = @floatFromInt(h * shrink) };
     var rt = cw.render_target;
     const off = rt.offset;
     rt.texture = step;
@@ -384,6 +390,7 @@ fn deinitReadback(self: *BlurBackdrop) void {
         }
     }
     const source = dvui.textureCreate(pixels, .{ .width = w, .height = h, .interpolation = .linear }) catch return;
+    self.covered = r;
     defer dvui.textureDestroyLater(source);
 
     const blur_prev_rendering = dvui.renderingSet(true);
@@ -953,13 +960,13 @@ const FrostJob = struct {
     /// The frost at `weight` of itself: through a bevelled edge when the motion level asks for
     /// it (`liquid_glass`), a flat rect when it does not.
     fn drawFrost(self: *const FrostJob, weight: f32) void {
-        const look: liquid_glass.Look = .{ .lens = self.lens, .refraction = self.refraction, .sharp = self.backdrop.sharpTexture() };
+        const look: liquid_glass.Look = .{ .lens = self.lens, .refraction = self.refraction, .sharp = self.backdrop.sharpTexture(), .blend_over = &blendOver };
         const tex = self.backdrop.small orelse return;
         if (!liquid_glass.bends(look)) {
             self.backdrop.drawRoundedScaled(self.corners, self.scale, weight);
             return;
         }
-        liquid_glass.drawPane(tex, self.backdrop.rect, self.rect, self.radii(), self.scale, dvui.Color.white.opacity(weight), look);
+        liquid_glass.drawPane(tex, self.backdrop.coverage(), self.rect, self.radii(), self.scale, dvui.Color.white.opacity(weight), look);
     }
 
     /// The pane's corner radii in physical pixels, in `liquid_glass`'s ring order.
@@ -975,6 +982,18 @@ const FrostJob = struct {
         return self.corners.finalize(&theme);
     }
 };
+
+/// Fizzy addition: the rect `small` is a picture of (`covered`), or `rect` before any capture.
+pub fn coverage(self: *const BlurBackdrop) Rect.Physical {
+    return if (self.covered.w > 0 and self.covered.h > 0) self.covered else self.rect;
+}
+
+/// Fizzy addition: switch a frost texture between blending over what is under it and replacing
+/// it, as a frost does across its face — for `liquid_glass.Look.blend_over`, which draws a pane's
+/// one-pixel edge fade over what is behind so the curve is smooth.
+pub fn blendOver(tex: Texture, over: bool) void {
+    _ = tapsBlend(tex, if (over) .over else .copy);
+}
 
 /// Fizzy addition: the picture this backdrop blurred, before the blur — the copy of the rect the
 /// pyramid starts from (half size at any real radius). Null when the capture read the window

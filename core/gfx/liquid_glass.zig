@@ -54,6 +54,12 @@ pub const Look = struct {
     /// The same picture before it was blurred, covering the same bounds, when there is one
     /// (`BlurBackdrop.sharpTexture`): what the clearer rim shows (`clarity`).
     sharp: ?dvui.Texture = null,
+    /// Switches `tex` between blending over what is under it (true) and its own blend (false)
+    /// — `BlurBackdrop.blendOver`. A frost *replaces* what it covers, which is right across its
+    /// face and wrong at its edge: the edge's one-pixel fade has to blend onto what is behind,
+    /// or it cuts a notch out of it and the curve shows its pixels. Null draws the edge in the
+    /// texture's own blend.
+    blend_over: ?*const fn (tex: dvui.Texture, over: bool) void = null,
 };
 
 /// How much of the glass's edge a frost of blur `radius` has: none on an unblurred pane, all of
@@ -120,30 +126,43 @@ pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.
     const band_px = @min(band * scale, half * 0.9);
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();
-    // The fringe, the rings through the curve, and the centre.
-    const rings = ring_steps.len;
-    const vtx_count = per_ring * (rings + 1) + 1;
-    var b = dvui.Triangles.Builder.init(arena, vtx_count, per_ring * 6 * rings + per_ring * 3) catch return;
-    defer b.deinit(arena);
-
     const col = dvui.Color.PMA.fromColor(mod);
     const clear = dvui.Color.PMA.fromColor(.transparent);
     const pts = arena.alloc(dvui.Point.Physical, per_ring) catch return;
     const reach_px = refraction * scale * look.lens * look.refraction;
 
-    // The fringe, clear, half a pixel outside the outline; the first ring, solid, half a pixel
-    // inside it (`aa_in`, `aa_out`).
-    ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
-    for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, reach_px, tex_bounds) });
-    for (ring_steps) |x| {
-        ringPoints(pts, null, r, radii, @max(aa_in, band_px * x), arc_steps, 1, 1);
-        for (pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+    // The face: the rings through the curve, from half a pixel inside the outline, and a fan
+    // over the flat middle — in the texture's own blend.
+    {
+        const rings = ring_steps.len;
+        const vtx_count = per_ring * rings + 1;
+        var b = dvui.Triangles.Builder.init(arena, vtx_count, per_ring * 6 * (rings - 1) + per_ring * 3) catch return;
+        defer b.deinit(arena);
+        for (ring_steps) |x| {
+            ringPoints(pts, null, r, radii, @max(aa_in, band_px * x), arc_steps, 1, 1);
+            for (pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+        }
+        const c = r.center();
+        b.appendVertex(.{ .pos = c, .col = col, .uv = seen(c, r, scale, reach_px, tex_bounds) });
+        appendRingStrips(&b, per_ring, rings);
+        appendFan(&b, per_ring, rings - 1, vtx_count - 1);
+        dvui.renderTriangles(b.build_unowned(), tex) catch {};
     }
-    const c = r.center();
-    b.appendVertex(.{ .pos = c, .col = col, .uv = seen(c, r, scale, reach_px, tex_bounds) });
-    appendRingStrips(&b, per_ring, rings + 1);
-    appendFan(&b, per_ring, rings, vtx_count - 1);
-    dvui.renderTriangles(b.build_unowned(), tex) catch {};
+
+    // The edge: solid half a pixel inside the outline to clear half a pixel outside it
+    // (`aa_in`, `aa_out`, as dvui fades a rounded fill), blended over what is behind.
+    {
+        var b = dvui.Triangles.Builder.init(arena, per_ring * 2, per_ring * 6) catch return;
+        defer b.deinit(arena);
+        ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
+        for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+        ringPoints(pts, null, r, radii, aa_in, arc_steps, 1, 1);
+        for (pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, reach_px, tex_bounds) });
+        appendRingStrips(&b, per_ring, 2);
+        if (look.blend_over) |set| set(tex, true);
+        dvui.renderTriangles(b.build_unowned(), tex) catch {};
+        if (look.blend_over) |set| set(tex, false);
+    }
 
     if (look.sharp) |sharp| drawClear(sharp, tex_bounds, r, radii, scale, mod, look, band_px);
 }

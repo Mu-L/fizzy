@@ -447,10 +447,11 @@ const LayerJob = struct {
         const frost_mod: dvui.Color = if (self.pane.tint != null) dvui.Color.white.opacity(1 - mix) else .white;
         const light = BlurBackdrop.additiveWhite();
         for (self.panes[0..self.count]) |pane| {
-            liquid_glass.drawPane(tex, self.bounds, pane.r, pane.radii, self.scale, frost_mod, .{
+            liquid_glass.drawPane(tex, backdrop.coverage(), pane.r, pane.radii, self.scale, frost_mod, .{
                 .lens = self.lens * pane.lens,
                 .refraction = self.pane.refraction,
                 .sharp = backdrop.sharpTexture(),
+                .blend_over = &BlurBackdrop.blendOver,
             });
             if (self.pane.tint) |tint| BlurBackdrop.addTint(pane.r, cornersOf(pane.radii, self.scale), self.scale, tint, mix);
             // The lift and the rim's light, in one pass after the tint so they stay white; a lit
