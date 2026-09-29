@@ -593,9 +593,11 @@ the picker uses — a tab dragged to another pane is an assignment edit, and ses
 the assignment list read back.
 
 **Dragging a view onto a region is the app's gesture, everywhere.** While a view is dragged,
-the region under the pointer shows its drop zones (the middle and each edge,
-`core.widgets.DropZones`), every place it could land showing all of them; a plugin's region
-gets the same. Two pieces let a plugin take part:
+the region under the pointer shows its drop (`core.widgets.DropZones`): a cluster of glass
+bubbles in its middle — the middle for into the place, one on each side for a split there, and a
+trash for taking the view out of the layout (a document closes) — which forms as one drop and
+splits apart as the pointer arrives. A release off the bubbles does nothing. A plugin's region
+gets the same, and `DropZones.wheel`/`at`/`draw` give a plugin the same drop for drops of its own. Two pieces let a plugin take part:
 
 - `host.beginViewDrag(surface_id, from_rect)` hands something of yours to that drag — the
   workbench calls it when a document tab is dragged off its tab strip.
@@ -612,10 +614,6 @@ gets the same. Two pieces let a plugin take part:
   reorder). It returns true while a carried view is over the strip — show where it would go in.
   `host.viewDragSurface()` names the surface being carried: leave its tab off your strips while
   it is in the hand, as a reorder leaves the tab it lifts.
-- `host.offerInterior(rect)`, from a surface's draw, says where its content is inside chrome of
-  its own (pixi: the canvas inside its rulers). The place it is drawn in covers only that with its
-  drop zones; `region.interior()` hands the same rect back for zones a plugin draws itself (the
-  workbench's file drops).
 - The look is shared (`core.dialogs`): a carried thing is `carriedGlass` — frosted, rounded, a
   ring shadow — and where it would go in among others is a `dropSlot`, seen blurred through it.
 

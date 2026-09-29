@@ -56,6 +56,7 @@ card_from: dvui.Size.Physical = .{},
 card_start_ns: i128 = 0,
 /// The card is a tab this frame: the pointer is over a chooser.
 card_tab: bool = false,
+
 /// The places this drag can land on, and where they were, frozen at lift.
 targets: [max_targets]Target = undefined,
 target_count: usize = 0,
@@ -67,13 +68,23 @@ offer_count: usize = 0,
 last_offers: [max_offers]Offer = undefined,
 last_offer_count: usize = 0,
 offer_frame: i128 = 0,
-/// Where surfaces said their content is (`offerInterior`), by the place they are drawn in: this
-/// frame's, and last frame's for a place asked about before its surface has drawn.
-interiors: [max_offers]Offer = undefined,
-interior_count: usize = 0,
-last_interiors: [max_offers]Offer = undefined,
-last_interior_count: usize = 0,
-interior_frame: i128 = 0,
+/// The drops the places queued this frame (`drawZones`), for `drawOverlay`.
+pending: [max_offers]PendingDrop = undefined,
+pending_count: usize = 0,
+pending_frame: i128 = 0,
+/// Last frame's drops, for one still going after its place stopped asking for it (`drawOverlay`).
+last_pending: [max_offers]PendingDrop = undefined,
+last_pending_count: usize = 0,
+
+/// A place's drop, queued while the place draws and drawn over everything once they all have
+/// (`drawOverlay`) — over the card riding the pointer too, which would otherwise sit on the
+/// drop it is being aimed at.
+pub const PendingDrop = struct {
+    key: dvui.Id,
+    wheel: DropZones.Wheel,
+    look: DropZones.Look,
+    clip: dvui.Rect.Physical,
+};
 
 /// A chooser a carried view is over: a place's tab strip, a rail. Chrome, not content — the
 /// place's drop zones and the card's preview stay off it (`interiorBounds`, `drawFloat`).
@@ -133,25 +144,6 @@ pub fn offerChooser(l: *Layout, name: []const u8, bounds: dvui.Rect.Physical, in
     if (d.offer_count == max_offers) return;
     d.offers[d.offer_count] = .{ .name = l.state.internName(l.gpa, name), .bounds = bounds, .into = into };
     d.offer_count += 1;
-}
-
-/// The surface drawn in place `name` says its content is at `bounds` — inside chrome of its own,
-/// a canvas inside its rulers (`Host.offerInterior`). The place's zones cover only that.
-///
-/// Kept with or without a view drag on: a plugin's own drops (a file dragged from the tree)
-/// read the same interior through `Host.Region.interior`.
-pub fn offerInterior(l: *Layout, name: []const u8, bounds: dvui.Rect.Physical) void {
-    const d = &l.state.view_drag;
-    const now = dvui.currentWindow().frame_time_ns;
-    if (d.interior_frame != now) {
-        d.last_interiors = d.interiors;
-        d.last_interior_count = d.interior_count;
-        d.interior_count = 0;
-        d.interior_frame = now;
-    }
-    if (d.interior_count == max_offers) return;
-    d.interiors[d.interior_count] = .{ .name = l.state.internName(l.gpa, name), .bounds = bounds };
-    d.interior_count += 1;
 }
 
 /// The chooser under `p`, if one offered itself this frame or the last.
@@ -291,9 +283,20 @@ fn frozen(state: *const Layout.State, name: []const u8) ?Target {
     return null;
 }
 
-fn kindAt(state: *const Layout.State, dest: []const u8, mouse: dvui.Point.Physical, scale: f32) Drop.Kind {
-    const dest_b = interiorBounds(state, dest) orelse return .swap;
-    return Drop.kindAt(dest_b, mouse, scale);
+/// What a release at `mouse` over `dest` does: its drop's reading, null off the drop.
+fn kindAt(l: *Layout, dest: []const u8, mouse: dvui.Point.Physical, scale: f32) ?Drop.Kind {
+    const dest_b = interiorBounds(l.state, dest) orelse return null;
+    return Drop.kindAt(dest_b, mouse, scale, removable(l));
+}
+
+/// Whether the drop offers the trash for what is carried: a document (it closes), or a view
+/// lifted out of a place (it leaves it). A view carried out of the picker is in no place to
+/// leave.
+pub fn removable(l: *Layout) bool {
+    const d = l.state.view_drag;
+    if (!d.active() or d.moved_id.len == 0) return false;
+    if (sdk.document.pathOfSurfaceId(d.moved_id)) |path| if (l.host.docFromPath(path) != null) return true;
+    return !d.loose();
 }
 
 /// The part of place `name` a carried view's zones cover: the place less its own chooser — a tab
@@ -324,17 +327,7 @@ pub fn interiorBounds(state: *const Layout.State, name: []const u8) ?dvui.Rect.P
             b.h = i.y - b.y;
         }
     };
-    if (b.h < 1 or b.w < 1) b = whole;
-    // And to the content its surface says it has, inside chrome of its own (`offerInterior`) —
-    // this frame's word if it has drawn yet, else last frame's.
-    const own = if (d.interior_frame == now) d.interiors[0..d.interior_count] else d.last_interiors[0..d.last_interior_count];
-    for (own) |o| {
-        if (!std.mem.eql(u8, o.name, name)) continue;
-        const i = b.intersect(o.bounds);
-        if (i.w >= 1 and i.h >= 1) b = i;
-        break;
-    }
-    return b;
+    return if (b.h >= 1 and b.w >= 1) b else whole;
 }
 
 /// The place a release at `mouse` would land on, for a view lifted from
@@ -350,10 +343,10 @@ pub fn targetAt(l: *Layout, mouse: dvui.Point.Physical, source: []const u8) ?[]c
     // and its own edges become unreachable.
     if (interiorBounds(state, source)) |bounds| {
         if (bounds.contains(mouse)) {
-            switch (Drop.kindAt(bounds, mouse, dvui.currentWindow().natural_scale)) {
-                .split => return source,
+            if (Drop.kindAt(bounds, mouse, dvui.currentWindow().natural_scale, removable(l))) |k| switch (k) {
+                .split, .remove => return source,
                 .swap => {},
-            }
+            };
         }
     }
     const d = &state.view_drag;
@@ -479,21 +472,85 @@ pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
         return;
     };
     const scale = dvui.currentWindow().natural_scale;
-    const zones = DropZones.rects(whole, scale);
-    const prev_clip = dvui.clipGet();
-    defer dvui.clipSet(prev_clip);
-    dvui.clipSet(whole);
-    const d = l.state.view_drag;
+    const zones = DropZones.wheel(whole, scale, removable(l));
+    const d = &l.state.view_drag;
     const center: DropZones.Center = if (std.mem.eql(u8, d.name, name))
         .none
     else if (joins(l, d.name, name))
         .join
     else if (regionNamed(l.state, name)) |r| (if (r.shows == .many) .add else .replace) else .replace;
-    DropZones.draw(key, zones, scale, .{
-        .hovered = if (aimed) DropZones.at(zones, dvui.currentWindow().mouse_pt) else null,
-        .target = target,
-        .center = center,
-    });
+    // Queued, not drawn: over everything, once every place has drawn (`drawOverlay`).
+    const now = dvui.currentWindow().frame_time_ns;
+    if (d.pending_frame != now) {
+        d.pending_count = 0;
+        d.pending_frame = now;
+    }
+    if (d.pending_count == max_offers) return;
+    d.pending[d.pending_count] = .{
+        .key = key,
+        .wheel = zones,
+        .look = .{
+            .hovered = if (aimed) DropZones.at(zones, dvui.currentWindow().mouse_pt) else null,
+            .target = target,
+            .center = center,
+        },
+        .clip = whole,
+    };
+    d.pending_count += 1;
+}
+
+/// What a view drag draws over every place at once, after they have all drawn: the drops they
+/// queued (`drawZones`), the join across two of them (`drawJoin`), and over them the card riding
+/// the pointer — in a layer of its own over the window.
+pub fn drawOverlay(l: *Layout) void {
+    const d = &l.state.view_drag;
+    const now = dvui.currentWindow().frame_time_ns;
+    const queued = if (d.pending_frame == now) d.pending[0..d.pending_count] else d.pending[0..0];
+    // This frame's drops, and any from last frame still going that no place asked for this time —
+    // the place a drop just landed on can be gone or changed by now, and its drop still has to run
+    // back together and shrink away rather than vanish mid-way.
+    var drops: [max_offers]PendingDrop = undefined;
+    var n: usize = 0;
+    for (queued) |p| {
+        drops[n] = p;
+        n += 1;
+    }
+    for (d.last_pending[0..d.last_pending_count]) |p| {
+        if (n == max_offers) break;
+        var asked = false;
+        for (queued) |q| {
+            if (q.key == p.key) asked = true;
+        }
+        if (asked or !DropZones.showing(p.key)) continue;
+        drops[n] = p;
+        drops[n].look.target = false;
+        drops[n].look.hovered = null;
+        n += 1;
+    }
+    d.last_pending = drops;
+    d.last_pending_count = n;
+    const join_key = dvui.Id.extendId(null, @src(), 0);
+    if (n == 0 and !d.active() and !DropZones.showing(join_key)) {
+        // Nothing to lay over the window; the join still hears that it is gone.
+        drawJoin(l, join_key);
+        return;
+    }
+    var layer: dvui.FloatingWidget = undefined;
+    layer.init(@src(), .{ .mouse_events = false }, .{ .rect = .cast(dvui.windowRect()), .background = false });
+    defer layer.deinit();
+    // The drops, then the card over them: one layer, so their order is the order drawn — the
+    // card's glass showing the drop it is aimed at blurred through it, its top left just off the
+    // pointer so the bubble under the pointer stays in view. (Two floating layers stack in the
+    // order they first appeared, and raising one breaks the drag's hold on the pointer.)
+    const scale = dvui.currentWindow().natural_scale;
+    const prev_clip = dvui.clipGet();
+    for (drops[0..n]) |p| {
+        dvui.clipSet(p.clip);
+        DropZones.draw(p.key, p.wheel, scale, p.look);
+    }
+    dvui.clipSet(prev_clip);
+    drawJoin(l, join_key);
+    if (d.active()) drawFloat(l);
 }
 
 /// Whether dropping the view lifted from `source` in the middle of `dest` joins them: the two
@@ -517,7 +574,8 @@ fn aimedJoin(l: *Layout) ?SplitTree.Forest.Pair {
     if (chooserAt(l.state, mouse) != null) return null;
     const dest = targetAt(l, mouse, d.name) orelse return null;
     if (!joins(l, d.name, dest)) return null;
-    if (kindAt(l.state, dest, mouse, dvui.currentWindow().natural_scale) != .swap) return null;
+    const k = kindAt(l, dest, mouse, dvui.currentWindow().natural_scale) orelse return null;
+    if (k != .swap) return null;
     return l.state.joinable(d.name, dest);
 }
 
@@ -526,8 +584,7 @@ fn aimedJoin(l: *Layout) ?SplitTree.Forest.Pair {
 /// drop will leave, shown before it is made — the answer to "what does dropping here do" that a
 /// single zone's icon cannot give. Drawn after every place (the framework calls it once the
 /// shape has declared them all), so it lies over the zones stepping back beneath it.
-pub fn drawJoin(l: *Layout) void {
-    const key = dvui.Id.extendId(null, @src(), 0);
+fn drawJoin(l: *Layout, key: dvui.Id) void {
     const scale = dvui.currentWindow().natural_scale;
     const pair = aimedJoin(l) orelse return DropZones.drawJoin(key, null, scale);
     const a = placeBounds(l.state, pair.keep) orelse return DropZones.drawJoin(key, null, scale);
@@ -577,7 +634,6 @@ pub fn drawFloat(l: *Layout) void {
     // From the size of what was grabbed to a card, keeping the grab point under the pointer, so
     // the view appears to be picked up rather than replaced by an icon: a place shrinks into its
     // photograph, a tab grows into its document's (or, with none, into a pill of its own).
-    const from = d.from;
     const scale = dvui.currentWindow().natural_scale;
     const pad = card_padding * scale;
     const title = if (l.host.surfaceById(d.moved_id)) |s| s.title else "view";
@@ -589,17 +645,25 @@ pub fn drawFloat(l: *Layout) void {
     const w = d.card_from.w + (target.w - d.card_from.w) * t;
     const h = d.card_from.h + (target.h - d.card_from.h) * t;
     d.card_size = .{ .w = w, .h = h };
-    const sx = if (from.w > 0) w / from.w else 1;
-    const sy = if (from.h > 0) h / from.h else 1;
     const off = dvui.dragOffset();
-    const tl = mouse.plus(.{ .x = off.x * sx, .y = off.y * sy });
+    // The pointer keeps its place on the card: the card's top left stays where it was from the
+    // pointer when it was grabbed, and the card grows right and down from there into what it
+    // shows — so what the tab was held by is still under the pointer, and the card grows away
+    // from the place it is aimed at rather than over it. Pulled in only as far as keeps the
+    // pointer on the card: a place grabbed far from its corner shrinks to a card far smaller.
+    const inset = 8 * scale;
+    const tl: dvui.Point.Physical = .{
+        .x = mouse.x + std.math.clamp(off.x, -@max(0, w - inset), 0),
+        .y = mouse.y + std.math.clamp(off.y, -@max(0, h - inset), 0),
+    };
     const nat = dvui.Rect.Physical.fromPoint(tl).toSize(.{ .w = w, .h = h }).toNatural();
 
     // Glass, like every floating surface: frosted over what it passes above (forming as it is
     // lifted), its shadow a ring round it, what it carries on top.
     const corners = core.corners.round(core.corners.card);
-    var fw: dvui.FloatingWidget = undefined;
-    fw.init(@src(), .{ .mouse_events = false }, .{
+    // A box in the drag's own layer (`drawOverlay`), not a floating window of its own: the drops
+    // go over it in the same layer, drawn after it.
+    const fw = dvui.box(@src(), .{}, .{
         .rect = .{ .x = nat.x, .y = nat.y, .w = nat.w, .h = nat.h },
         // The photograph sits inset in its glass; a tab is the glass.
         .padding = if (show_photo) .all(card_padding) else .all(0),
@@ -730,7 +794,8 @@ pub fn apply(l: *Layout, source: []const u8, mouse: dvui.Point.Physical) void {
     const dest = targetAt(l, mouse, source) orelse return;
     if (placeBounds(l.state, dest) == null) return;
     const scale = dvui.currentWindow().natural_scale;
-    place(l, source, dest, kindAt(l.state, dest, mouse, scale));
+    // Off the wheel, no drop: every drop is one the wheel lit first.
+    place(l, source, dest, kindAt(l, dest, mouse, scale) orelse return);
 }
 
 /// A release over a plugin region's own chooser: straight to the plugin's `on_drop`, as into the
@@ -755,6 +820,8 @@ fn dropOnPluginChooser(l: *Layout, source: []const u8, dest: []const u8, mouse: 
 /// pointer position.
 pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) void {
     const plan = Drop.plan(kind, std.mem.eql(u8, source, dest), joins(l, source, dest)) orelse return;
+    // The trash is about what is carried, not where it was let go.
+    if (plan == .remove) return remove(l, source);
     const moved = ownId(l.arena, movedFrom(l, source) orelse return) orelse return;
     if (regionNamed(l.state, dest)) |r| {
         const s = l.host.surfaceById(moved) orelse return;
@@ -765,6 +832,8 @@ pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) 
         if (r.on_drop) |on_drop| {
             const zone: sdk.RegionSpec.Drop.Zone = switch (plan) {
                 .swap, .join => .center,
+                // Handled before anything is asked of a place (`remove`).
+                .remove => unreachable,
                 .split => |sp| .{ .edge = switch (sp.landing) {
                     .left => .left,
                     .right => .right,
@@ -785,6 +854,7 @@ pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) 
     switch (plan) {
         .swap => swap(l, source, dest, moved),
         .join => join(l, source, dest, moved),
+        .remove => unreachable,
         .split => |s| {
             const new = Region.splitOn(l, dest, s.mint) orelse return;
             // A self-split leaves the view in the origin, which `mint` has
@@ -797,6 +867,22 @@ pub fn place(l: *Layout, source: []const u8, dest: []const u8, kind: Drop.Kind) 
             }
         },
     }
+    shutIfEmptied(l, source);
+    l.state.markDirty();
+    dvui.refresh(null, @src(), null);
+}
+
+/// What the trash does with the view carried out of `source`: a document closes — the ordinary
+/// close, which asks about unsaved changes — and any other view leaves its place, back to the
+/// picker it can be placed from again.
+fn remove(l: *Layout, source: []const u8) void {
+    const moved = ownId(l.arena, movedFrom(l, source) orelse return) orelse return;
+    if (sdk.document.pathOfSurfaceId(moved)) |path| if (l.host.docFromPath(path)) |doc| {
+        l.host.closeDocById(doc.id) catch |err| dvui.log.err("drop: could not close {s}: {t}", .{ path, err });
+        dvui.refresh(null, @src(), null);
+        return;
+    };
+    takeOut(l, source, moved, null);
     shutIfEmptied(l, source);
     l.state.markDirty();
     dvui.refresh(null, @src(), null);

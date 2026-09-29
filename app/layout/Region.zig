@@ -572,7 +572,8 @@ pub fn init(self: *Layout, src: std.builtin.SourceLocation, init_opts: InitOptio
             _ = try drawContents(self, init_opts, keywords);
         }
     }
-    if (dragging_this) ViewDrag.drawFloat(self);
+    // The card riding the pointer is drawn over everything, with the drops (`ViewDrag.drawOverlay`).
+    if (dragging_this) ViewDrag.tick(self);
 
     return .{
         .name = init_opts.name,
@@ -620,7 +621,7 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
     const over = self.state.view_drag.active() and rs.r.contains(mouse);
     // Null plan: the middle of the place the drag came from, which is not a
     // drop at all. Every other reading of the pointer lands somewhere.
-    const drop_here = over and Drop.plan(Drop.kindAt(rs.r, mouse, rs.s), dragging_this, false) != null;
+    const drop_here = over and if (Drop.kindAt(rs.r, mouse, rs.s, ViewDrag.removable(self))) |k| Drop.plan(k, dragging_this, false) != null else false;
     const near = mouse.x >= rs.r.x + rs.r.w - corner_reach * rs.s and mouse.x <= rs.r.x + rs.r.w and
         mouse.y >= rs.r.y and mouse.y <= rs.r.y + corner_reach * rs.s;
     const pressing = dvui.dataGet(null, box.data().id, "_chooser_press", bool) orelse false;
@@ -850,10 +851,6 @@ fn persistExtent(self: *Layout, opts: InitOptions, id: dvui.Id, chosen: f32, sho
 /// tab strip inside a sub-region lists what that sub-region accepts and not what its kind accepts
 /// everywhere in the app.
 fn drawContents(self: *Layout, opts: InitOptions, keywords: []const []const u8) !dvui.App.Result {
-    // The place a surface drawn from here is in, for its `Host.offerInterior`.
-    const prev_place = self.drawing_place;
-    if (opts.name.len > 0) self.drawing_place = opts.name;
-    defer self.drawing_place = prev_place;
     if (opts.content) |content| return content.draw(content.ctx, self, keywords);
     const shows = if (opts.name.len > 0) self.state.showsOf(opts.name, opts.shows) else opts.shows;
     const place: Region = .{

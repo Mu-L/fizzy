@@ -164,16 +164,21 @@ const broad_glow: f32 = 0.04;
 /// Points: how quickly the rim line fades inward — about a point wide.
 const line_width: f32 = 0.8;
 
-/// Segments in a corner's arc, for a pane with corner radii `radii` (physical): about one per
-/// `arc_segment` pixels of curve — a small corner a handful, a circle (four corners of half its
-/// size) enough that it is round, not a polygon of a couple of dozen sides.
+/// Segments in a corner's arc, for a pane with corner radii `radii` (physical): the fewest that
+/// keep every segment within `arc_tolerance` of the true arc — a quarter pixel, under what the
+/// edge's own anti-aliasing spreads over, so no corner reads as a polygon at any size. A segment
+/// per few pixels of curve, the rule before, was twice the vertices on a large circle for nothing
+/// the eye could see, and every vertex is work each frame the glass is drawn.
 fn arcSteps(radii: Radii) usize {
     var r: f32 = 0;
     for (radii) |v| r = @max(r, v);
-    const curve = r * std.math.pi / 2;
-    return @intFromFloat(std.math.clamp(@ceil(curve / arc_segment), 3, 32));
+    if (r <= arc_tolerance) return 3;
+    // A chord of angle θ strays r·(1 − cos θ/2) from its arc.
+    const theta = 2 * std.math.acos(1 - arc_tolerance / r);
+    return @intFromFloat(std.math.clamp(@ceil((std.math.pi / 2.0) / theta), 3, 32));
 }
-const arc_segment: f32 = 6;
+/// Physical pixels a corner's segment may stray from the true arc.
+const arc_tolerance: f32 = 0.25;
 
 /// Physical pixels: the edge fades from solid to clear across one pixel, half inside the outline
 /// and half outside — dvui's own anti-aliasing of a rounded fill (`Path.fillConvexTriangles`,
@@ -228,7 +233,10 @@ pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.
 
     // The face: the rings through the curve, from half a pixel inside the outline, and a fan
     // over the flat middle — in the texture's own blend.
-    {
+    const key = paneKey(r, radii, scale, mod, look, tex_bounds);
+    if (cachedMesh(key ^ 1)) |tris| {
+        dvui.renderTriangles(tris, tex) catch {};
+    } else {
         const rings = insets.len;
         const vtx_count = per_ring * rings + 1;
         var b = dvui.Triangles.Builder.init(arena, vtx_count, per_ring * 6 * (rings - 1) + per_ring * 3) catch return;
@@ -241,32 +249,44 @@ pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.
         b.appendVertex(.{ .pos = c, .col = col, .uv = seen(c, r, scale, depth, reach_px, tex_bounds) });
         appendRingStrips(&b, per_ring, rings);
         appendFan(&b, per_ring, rings - 1, vtx_count - 1);
-        dvui.renderTriangles(b.build_unowned(), tex) catch {};
+        const tris = b.build_unowned();
+        keepMesh(key ^ 1, tris);
+        dvui.renderTriangles(tris, tex) catch {};
     }
 
     // The edge: solid half a pixel inside the outline to clear half a pixel outside it
     // (`aa_in`, `aa_out`, as dvui fades a rounded fill), blended over what is behind.
     {
-        var b = dvui.Triangles.Builder.init(arena, per_ring * 2, per_ring * 6) catch return;
-        defer b.deinit(arena);
-        ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
-        for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, depth, reach_px, tex_bounds) });
-        ringPoints(pts, null, r, radii, aa_in, arc_steps, 1, 1);
-        for (pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, depth, reach_px, tex_bounds) });
-        appendRingStrips(&b, per_ring, 2);
         if (look.blend_over) |set| set(tex, true);
-        dvui.renderTriangles(b.build_unowned(), tex) catch {};
-        if (look.blend_over) |set| set(tex, false);
+        defer if (look.blend_over) |set| set(tex, false);
+        if (cachedMesh(key ^ 2)) |tris| {
+            dvui.renderTriangles(tris, tex) catch {};
+        } else {
+            var b = dvui.Triangles.Builder.init(arena, per_ring * 2, per_ring * 6) catch return;
+            defer b.deinit(arena);
+            ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
+            for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, depth, reach_px, tex_bounds) });
+            ringPoints(pts, null, r, radii, aa_in, arc_steps, 1, 1);
+            for (pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, depth, reach_px, tex_bounds) });
+            appendRingStrips(&b, per_ring, 2);
+            const tris = b.build_unowned();
+            keepMesh(key ^ 2, tris);
+            dvui.renderTriangles(tris, tex) catch {};
+        }
     }
 
-    if (look.sharp) |sharp| drawClear(sharp, tex_bounds, r, radii, scale, mod, look, insets);
+    if (look.sharp) |sharp| drawClear(sharp, tex_bounds, r, radii, scale, mod, look, insets, key ^ 3);
 }
 
 /// The rim's clearer glass: the unblurred picture over the frost, bent the same way, as much of
 /// it as `clarity` times the drop's steepness — sharpest at the very edge, gone where the face
 /// is flat. Drawn at the frost's weight (`mod`), so it takes the pane's tint and lift afterwards
 /// like the frost does.
-fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.Physical, radii: Radii, scale: f32, mod: dvui.Color, look: Look, insets: []const f32) void {
+fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.Physical, radii: Radii, scale: f32, mod: dvui.Color, look: Look, insets: []const f32, key: u64) void {
+    if (cachedMesh(key)) |tris| {
+        dvui.renderTriangles(tris, sharp) catch {};
+        return;
+    }
     // With the refraction setting, up to as designed: a flat edge is a clear one no more.
     const amount = clarity * look.lens * @min(1, look.refraction) * @as(f32, @floatFromInt(mod.a)) / 255;
     if (amount <= 0.01) return;
@@ -297,7 +317,9 @@ fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.P
         }
     }
     appendRingStrips(&b, per_ring, rings + 1);
-    dvui.renderTriangles(b.build_unowned(), sharp) catch {};
+    const tris = b.build_unowned();
+    keepMesh(key, tris);
+    dvui.renderTriangles(tris, sharp) catch {};
 }
 
 /// Where the glass at `p` shows: further out, along the drop's outward direction, by as much of
@@ -323,6 +345,11 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
     if (lift <= 0.002 and amount <= 0.01) return;
     const half = @min(r.w, r.h) / 2;
     if (half < 1) return;
+    const key = numbersKey(4, &.{ r.x, r.y, r.w, r.h, radii[0], radii[1], radii[2], radii[3], scale, lift, amount, light.gain, light.tile });
+    if (cachedMesh(key)) |tris| {
+        dvui.renderTriangles(tris, light.tex) catch {};
+        return;
+    }
     // The rim line needs rings of its own, a fraction of a point apart, before the curve's.
     var curve_buf: [ring_count + 1]f32 = undefined;
     const depth = falloff * scale;
@@ -375,7 +402,54 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
     b.appendVertex(.{ .pos = r.center(), .col = dvui.Color.PMA.fromColor(dvui.Color.white.opacity(std.math.clamp(lift, 0, 1))), .uv = light.uv(r.center()) });
     appendRingStrips(&b, per_ring, rings + 1);
     appendFan(&b, per_ring, rings, vtx_count - 1);
-    dvui.renderTriangles(b.build_unowned(), light.tex) catch {};
+    const tris = b.build_unowned();
+    keepMesh(key, tris);
+    dvui.renderTriangles(tris, light.tex) catch {};
+}
+
+// ── Meshes kept between frames ───────────────────────────────────────────────────────────────────
+//
+// A pane's meshes are the same frame after frame while it holds still — a dialog, a menu, the
+// drop's bubbles once they have parted — and building them is most of what glass costs: the
+// field and the refraction worked out at every vertex of every ring. So each is kept, keyed by
+// every number it is built from, in dvui's data store, which lets go of it the first frame it is
+// not asked for. A pane that moves builds anew each frame, as it always did.
+
+/// A key for a mesh built from `numbers`, `tag` telling apart the meshes built from the same
+/// ones. The numbers themselves, not a struct's bytes, whose padding is anything.
+fn numbersKey(tag: u64, numbers: []const f32) u64 {
+    var h = std.hash.Wyhash.init(tag);
+    h.update(std.mem.sliceAsBytes(numbers));
+    return h.final();
+}
+
+fn paneKey(r: dvui.Rect.Physical, radii: Radii, scale: f32, mod: dvui.Color, look: Look, tb: dvui.Rect.Physical) u64 {
+    return numbersKey(0x91a55, &.{
+        r.x,                           r.y,                           r.w,                           r.h,
+        radii[0],                      radii[1],                      radii[2],                      radii[3],
+        scale,                         @floatFromInt(mod.r),          @floatFromInt(mod.g),          @floatFromInt(mod.b),
+        @floatFromInt(mod.a),          look.lens,                     look.refraction,               tb.x,
+        tb.y,                          tb.w,                          tb.h,
+    }) & ~@as(u64, 3);
+}
+
+fn meshId(key: u64) dvui.Id {
+    return @enumFromInt(key);
+}
+
+fn cachedMesh(key: u64) ?dvui.Triangles {
+    const id = meshId(key);
+    const v = dvui.dataGetSlice(null, id, "_glass_v", []dvui.Vertex) orelse return null;
+    const i = dvui.dataGetSlice(null, id, "_glass_i", []dvui.Vertex.Index) orelse return null;
+    const bounds = dvui.dataGet(null, id, "_glass_b", dvui.Rect.Physical) orelse return null;
+    return .{ .vertexes = v, .indices = i, .bounds = bounds };
+}
+
+fn keepMesh(key: u64, tris: dvui.Triangles) void {
+    const id = meshId(key);
+    dvui.dataSetSlice(null, id, "_glass_v", tris.vertexes);
+    dvui.dataSetSlice(null, id, "_glass_i", tris.indices);
+    dvui.dataSet(null, id, "_glass_b", tris.bounds);
 }
 
 /// A pane's drop shadow as a ring round it: from its outline — `radii` at every step, grown with

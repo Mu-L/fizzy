@@ -554,7 +554,10 @@ fn drawLifted(self: *Picker, f: *Layout) void {
             else => {},
         }
     }
-    ViewDrag.drawFloat(f);
+    // The card itself is drawn once, over everything, with the drops (`ViewDrag.drawOverlay`);
+    // drawn here as well it was a second card, and one frame apart from the first as it changed
+    // shape over a strip.
+    ViewDrag.tick(f);
 }
 
 fn setShows(f: *Layout, region: *const Layout.Region, shows: Layout.Region.Shows) void {

@@ -249,14 +249,6 @@ pub const VTable = struct {
     /// preview, and the region's drop zones cover the region less it. True while a carried view
     /// is over it — the plugin's cue to show where it would go in.
     offerRegionChooser: *const fn (ctx: *anyopaque, token: RegionSpec.Token, bounds: dvui.Rect.Physical) bool,
-    /// The region's content this frame — what the surface drawn in it offered as its interior
-    /// (`offerInterior`), less its own chooser — for a plugin drawing drop zones of its own over
-    /// the same part the app's cover. Null when nothing narrowed it.
-    regionInterior: *const fn (ctx: *anyopaque, token: RegionSpec.Token) ?dvui.Rect.Physical,
-    /// The surface being drawn says where its content is: `bounds`, inside whatever chrome it
-    /// draws for itself (a canvas inside its rulers). While a view is carried, the drop zones of
-    /// the place it is drawn in cover only that.
-    offerInterior: *const fn (ctx: *anyopaque, bounds: dvui.Rect.Physical) void,
     /// The id of the surface the app's view drag is carrying, if one is — a tab strip leaves it
     /// out while it is in the hand, as it would the tab it is reordering.
     viewDragSurface: *const fn (ctx: *anyopaque) ?[]const u8,
@@ -561,14 +553,6 @@ pub fn beginViewDrag(self: EditorAPI, id: []const u8, from: dvui.Rect.Physical) 
 
 pub fn offerRegionChooser(self: EditorAPI, token: RegionSpec.Token, bounds: dvui.Rect.Physical) bool {
     return self.vtable.offerRegionChooser(self.ctx, token, bounds);
-}
-
-pub fn regionInterior(self: EditorAPI, token: RegionSpec.Token) ?dvui.Rect.Physical {
-    return self.vtable.regionInterior(self.ctx, token);
-}
-
-pub fn offerInterior(self: EditorAPI, bounds: dvui.Rect.Physical) void {
-    self.vtable.offerInterior(self.ctx, bounds);
 }
 
 pub fn viewDragSurface(self: EditorAPI) ?[]const u8 {

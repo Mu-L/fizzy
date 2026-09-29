@@ -166,9 +166,6 @@ depth: usize = 0,
 /// container stack is: a layout this deep is a mistake to report, not a case to support.
 plugin_regions: [max_nesting]Region = undefined,
 plugin_depth: usize = 0,
-/// The place whose surface is drawing right now — the innermost, a document pane inside the
-/// main area — which a surface's `Host.offerInterior` narrows. Empty between places.
-drawing_place: []const u8 = "",
 
 pub const PendingSplit = struct { src: std.builtin.SourceLocation, opts: Split.Options };
 
@@ -654,11 +651,12 @@ fn drawCaptured(self: *Layout, s: *Surface) !?dvui.App.Result {
     return try result;
 }
 
-/// What a view drag draws over every place at once: the pane across the two halves of a
-/// split a drop would join (`ViewDrag.drawJoin`). It spans places, so no one place can draw
-/// it; the application calls this after its shape has run, from the base window.
+/// What a view drag draws over every place at once: each place's drop and the pane across the
+/// two halves of a split a drop would join (`ViewDrag.drawOverlay`) — over the card riding the
+/// pointer too. It spans places, so no one place can draw it; the application calls this after
+/// its shape has run, from the base window.
 pub fn drawDragOverlay(self: *Layout) void {
-    ViewDrag.drawJoin(self);
+    ViewDrag.drawOverlay(self);
 }
 
 /// Snapshot every surface that drew nowhere this frame, by drawing each once offscreen at a
@@ -945,10 +943,6 @@ pub fn beginPluginRegion(self: *Layout, spec: sdk.RegionSpec) ?sdk.RegionSpec.To
 pub fn drawPluginRegionContents(self: *Layout, token: sdk.RegionSpec.Token) !dvui.App.Result {
     const r = self.pluginRegion(token) orelse return .ok;
     const s = self.selectedIn(r) orelse return .ok;
-    // The place what is drawn here is in, for a surface's `Host.offerInterior`.
-    const prev_place = self.drawing_place;
-    self.drawing_place = r.name;
-    defer self.drawing_place = prev_place;
     // Blurs from one surface to the next like every other region: a tab switch, and a document
     // landing over its loading placeholder. Capturing the outgoing view means drawing it once
     // more, which a large document can afford because it keeps its layout while hidden.
@@ -993,24 +987,6 @@ pub fn pluginRegionMatching(self: *Layout, token: sdk.RegionSpec.Token) []const 
 pub fn pluginRegionSelected(self: *Layout, token: sdk.RegionSpec.Token) ?*Surface {
     const r = self.pluginRegion(token) orelse return null;
     return self.selectedIn(r);
-}
-
-/// The part of a plugin region its drop zones cover (`ViewDrag.interiorBounds`): its content,
-/// as the surface drawn in it offered it, less its own chooser. Null when neither narrowed it.
-pub fn pluginRegionInterior(self: *Layout, token: sdk.RegionSpec.Token) ?dvui.Rect.Physical {
-    const r = self.pluginRegion(token) orelse return null;
-    if (r.name.len == 0) return null;
-    const inner = ViewDrag.interiorBounds(self.state, r.name) orelse return null;
-    const whole = ViewDrag.placeBounds(self.state, r.name) orelse return inner;
-    if (inner.x == whole.x and inner.y == whole.y and inner.w == whole.w and inner.h == whole.h) return null;
-    return inner;
-}
-
-/// The surface drawing now says its content is at `bounds` (`Host.offerInterior`): the place
-/// it is drawn in covers only that with its drop zones while a view is carried.
-pub fn offerInterior(self: *Layout, bounds: dvui.Rect.Physical) void {
-    if (self.drawing_place.len == 0) return;
-    ViewDrag.offerInterior(self, self.drawing_place, bounds);
 }
 
 /// A plugin region's own chooser (its tab strip) is at `bounds` this frame

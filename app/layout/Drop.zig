@@ -32,6 +32,8 @@ pub const Side = SplitTree.Side;
 pub const Kind = union(enum) {
     swap,
     split: Side,
+    /// The trash: out of the layout.
+    remove,
 };
 
 /// A resolved release: the same value the drop zones read, and the assignment
@@ -42,6 +44,8 @@ pub const Plan = union(enum) {
     /// Close the split the two places are the halves of: one place, holding the views of both.
     join,
     split: Split,
+    /// Out of the layout: a document closes, any other view leaves its place.
+    remove,
 
     pub const Split = struct {
         /// The edge the pointer chose — where the dragged view ends up.
@@ -55,13 +59,16 @@ pub const Plan = union(enum) {
     };
 };
 
-/// Read a pointer position against a place: the drop zones' own reading (`DropZones`), so what
-/// the zones show under the pointer is what a release does. The middle is a swap; each edge
-/// band, and the gap beside it, a split on that edge.
-pub fn kindAt(bounds: dvui.Rect.Physical, mouse: dvui.Point.Physical, scale: f32) Kind {
-    if (bounds.w <= 0 or bounds.h <= 0) return .swap;
-    return switch (DropZones.at(DropZones.rects(bounds, scale), mouse)) {
+/// Read a pointer position against a place: the drop's own reading (`DropZones`), so what the
+/// drop shows under the pointer is what a release does. Its middle is a swap, each side of
+/// its ring a split on that side, the trash (offered with `remove`) a removal, and off the drop
+/// nothing — null.
+pub fn kindAt(bounds: dvui.Rect.Physical, mouse: dvui.Point.Physical, scale: f32, remove: bool) ?Kind {
+    if (bounds.w <= 0 or bounds.h <= 0) return null;
+    const zone = DropZones.at(DropZones.wheel(bounds, scale, remove), mouse) orelse return null;
+    return switch (zone) {
         .center => .swap,
+        .remove => .remove,
         .edge => |side| .{ .split = switch (side) {
             .left => .left,
             .right => .right,
@@ -78,6 +85,7 @@ pub fn kindAt(bounds: dvui.Rect.Physical, mouse: dvui.Point.Physical, scale: f32
 pub fn plan(kind: Kind, self_drop: bool, halves: bool) ?Plan {
     return switch (kind) {
         .swap => if (self_drop) null else if (halves) .join else .swap,
+        .remove => .remove,
         .split => |landing| .{ .split = .{
             .landing = landing,
             .mint = if (self_drop) SplitTree.opposite(landing) else landing,
@@ -86,18 +94,28 @@ pub fn plan(kind: Kind, self_drop: bool, halves: bool) ?Plan {
     };
 }
 
-test "the middle is a swap and each edge is its own split" {
-    const r: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
-    try std.testing.expectEqual(Kind.swap, kindAt(r, .{ .x = 100, .y = 50 }, 1));
-    try std.testing.expectEqual(Kind{ .split = .left }, kindAt(r, .{ .x = 10, .y = 50 }, 1));
-    try std.testing.expectEqual(Kind{ .split = .right }, kindAt(r, .{ .x = 190, .y = 50 }, 1));
-    try std.testing.expectEqual(Kind{ .split = .top }, kindAt(r, .{ .x = 100, .y = 8 }, 1));
-    try std.testing.expectEqual(Kind{ .split = .bottom }, kindAt(r, .{ .x = 100, .y = 94 }, 1));
+test "the drop's middle is a swap, each side a split, the trash a removal, off it nothing" {
+    // An 800×600 place: the bubbles sit round (400, 300) — the sides 108 out, the trash 88 out
+    // on the diagonal.
+    const r: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
+    try std.testing.expectEqual(@as(?Kind, .swap), kindAt(r, .{ .x = 400, .y = 300 }, 1, false));
+    try std.testing.expectEqual(@as(?Kind, .{ .split = .left }), kindAt(r, .{ .x = 292, .y = 300 }, 1, false));
+    try std.testing.expectEqual(@as(?Kind, .{ .split = .right }), kindAt(r, .{ .x = 508, .y = 310 }, 1, false));
+    try std.testing.expectEqual(@as(?Kind, .{ .split = .top }), kindAt(r, .{ .x = 410, .y = 192 }, 1, false));
+    try std.testing.expectEqual(@as(?Kind, .{ .split = .bottom }), kindAt(r, .{ .x = 400, .y = 408 }, 1, false));
+    // The trash, only when it is offered.
+    try std.testing.expectEqual(@as(?Kind, .remove), kindAt(r, .{ .x = 488, .y = 388 }, 1, true));
+    try std.testing.expectEqual(@as(?Kind, null), kindAt(r, .{ .x = 488, .y = 388 }, 1, false));
+    // The place's own edges are off the drop: no drop.
+    try std.testing.expectEqual(@as(?Kind, null), kindAt(r, .{ .x = 20, .y = 300 }, 1, false));
+    try std.testing.expectEqual(@as(?Kind, null), kindAt(r, .{ .x = 400, .y = 10 }, 1, false));
 }
 
-test "a small place keeps a middle to aim at" {
+test "a small place fits the whole drop" {
+    // 60 tall: the cluster (148 points out) shrinks to 27 physical pixels out.
     const r: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 90, .h = 60 };
-    try std.testing.expectEqual(Kind.swap, kindAt(r, .{ .x = 45, .y = 30 }, 1));
+    try std.testing.expectEqual(@as(?Kind, .swap), kindAt(r, .{ .x = 45, .y = 30 }, 1, false));
+    try std.testing.expectEqual(@as(?Kind, .{ .split = .left }), kindAt(r, .{ .x = 45 - 19.7, .y = 30 }, 1, false));
 }
 
 test "the dropped edge is where the view lands, on any place" {

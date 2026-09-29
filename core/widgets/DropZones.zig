@@ -1,23 +1,24 @@
-//! The drop targets over a place while something is dragged: one in the middle and one along
-//! each edge. The place under the pointer shows all five at once, the one under the pointer lit;
-//! moving to another place, the old set clears as the new one comes in over it.
+//! The drop target over a place while something is dragged: a wheel in the place's middle — a
+//! circle for the place itself and a ring of four around it, one for each side it could split
+//! on. Only the place under the pointer shows one; moving to another place, the old wheel goes as
+//! the new one comes in.
 //!
-//! **One geometry, one look, for every drag.** A view dragged between places and a tab dragged
-//! between panes read the pointer against the same five rects (`rects`, `at`) and draw the same
-//! zones (`draw`), so a drop means the same thing wherever it lands and looks the same getting
+//! **One geometry, one look, for every drag.** A view dragged between places and a file or tab
+//! dragged onto a pane read the pointer against the same wheel (`wheel`, `at`) and draw the same
+//! one (`draw`), so a drop means the same thing wherever it lands and looks the same getting
 //! there.
 //!
-//! **The look is liquid glass.** A zone is a pane of the dialogs' own frost over what is under
-//! it — the app's one surface rounding, a gap around each, a faint icon saying what it does —
-//! drawn through `core.liquid_glass` over one blur of the place, so each has a bevelled edge
-//! that refracts, clears and catches the light. An edge zone grows in from its edge and the
-//! middle from its centre, eased at the app's motion level, as its frost comes in; leaving, the
-//! same backwards and quicker. What is underneath is the caller's: this
-//! only draws the glass over it.
+//! **Small, and in one place.** The wheel is the size of pixi's tool wheel, whatever the size of
+//! the place, and sits in its middle — the place stays in view around it, and the choices are
+//! where the eye already is. A release off the wheel does nothing: every drop is one the wheel
+//! lit first.
 //!
-//! **Every point of a place is some zone.** The gaps between the rects are there to be seen, not
-//! to be dead space: a point in one resolves to the nearest zone, so a drop never does nothing
-//! just because it fell between two targets.
+//! **The look is liquid glass.** The wheel is one disc of the dialogs' own frost over what is
+//! under it, drawn through `core.liquid_glass`, its sides marked off by faint lines and each
+//! carrying an icon for what it does; the part under the pointer lights as dvui lights a hovered
+//! fill. It grows out of the place's middle on the app's motion as its frost comes in, and goes
+//! back into it, quicker.
+
 const std = @import("std");
 const dvui = @import("dvui");
 const dialogs = @import("../dialogs.zig");
@@ -27,6 +28,7 @@ const icons = @import("icons");
 const icon_tex = @import("../gfx/icon.zig");
 const motion = @import("../motion.zig");
 const liquid_glass = @import("../gfx/liquid_glass.zig");
+const liquid_blob = @import("../gfx/liquid_blob.zig");
 
 pub const Side = enum { left, right, top, bottom };
 
@@ -36,77 +38,93 @@ pub const Zone = union(enum) {
     center,
     /// A split on that edge.
     edge: Side,
+    /// Out of the layout altogether: the trash.
+    remove,
 
     pub fn eql(a: Zone, b: Zone) bool {
         return switch (a) {
             .center => b == .center,
             .edge => |s| b == .edge and b.edge == s,
+            .remove => b == .remove,
         };
     }
 };
 
-/// The five targets of one place, in physical pixels.
-pub const Rects = struct {
-    center: dvui.Rect.Physical,
-    left: dvui.Rect.Physical,
-    right: dvui.Rect.Physical,
-    top: dvui.Rect.Physical,
-    bottom: dvui.Rect.Physical,
+/// One bubble of the drop: its centre and radius, physical.
+pub const Disc = struct {
+    c: dvui.Point.Physical,
+    r: f32,
+};
 
-    pub fn of(self: Rects, z: Zone) dvui.Rect.Physical {
-        return switch (z) {
-            .center => self.center,
-            .edge => |s| switch (s) {
-                .left => self.left,
-                .right => self.right,
-                .top => self.top,
-                .bottom => self.bottom,
-            },
+/// The drop over one place, in physical pixels: a cluster of bubbles in its middle.
+pub const Wheel = struct {
+    center: dvui.Point.Physical,
+    /// Physical pixels per point of the layout below — the display scale, less if the place is
+    /// too small for the whole cluster.
+    unit: f32,
+    /// Whether the trash is one of the bubbles.
+    remove: bool = false,
+
+    /// Where zone `z`'s bubble settles.
+    pub fn bubble(self: Wheel, z: Zone) Disc {
+        const off: [2]f32, const r: f32 = switch (z) {
+            .center => .{ .{ 0, 0 }, center_r },
+            .edge => |sd| .{ switch (sd) {
+                .left => .{ -side_d, 0 },
+                .right => .{ side_d, 0 },
+                .top => .{ 0, -side_d },
+                .bottom => .{ 0, side_d },
+            }, side_r },
+            .remove => .{ .{ remove_d, remove_d }, remove_r },
         };
+        return .{ .c = .{ .x = self.center.x + off[0] * self.unit, .y = self.center.y + off[1] * self.unit }, .r = r * self.unit };
+    }
+
+    /// The square the settled cluster fits in.
+    pub fn rect(self: Wheel) dvui.Rect.Physical {
+        const e = extent * self.unit;
+        return .{ .x = self.center.x - e, .y = self.center.y - e, .w = 2 * e, .h = 2 * e };
     }
 };
 
 /// Every zone, in the order they are drawn and stored.
-pub const all = [_]Zone{ .center, .{ .edge = .left }, .{ .edge = .right }, .{ .edge = .top }, .{ .edge = .bottom } };
+pub const all = [_]Zone{ .center, .{ .edge = .left }, .{ .edge = .right }, .{ .edge = .top }, .{ .edge = .bottom }, .remove };
 
-/// Points. The gap around and between zones — the middle's from the bands too, so all five read
-/// as one set — and an edge band's thickness, capped as a fraction of the place so a small place
-/// keeps a middle.
-pub const gap: f32 = 8;
-pub const band: f32 = 64;
-pub const band_fraction: f32 = 0.22;
+/// Points: the bubbles' layout — the middle, the four sides at `side_d` from it, the trash on the
+/// diagonal between the right and the bottom — about 300 across: big enough to aim at without
+/// looking, small enough to leave the place in view round it.
+const center_r: f32 = 52;
+const side_r: f32 = 40;
+const side_d: f32 = 108;
+const remove_r: f32 = 30;
+const remove_d: f32 = 88;
+/// Points: a bubble's icon, as a share of its radius.
+const bubble_icon: f32 = 0.6;
+/// How far out from the centre the cluster reaches.
+const extent: f32 = side_d + side_r;
+/// At most this share of the place's shorter side, so a small place still shows all of it.
+pub const fit: f32 = 0.45;
+/// How far past its edge a bubble still takes the pointer, as a share of its radius: a drop
+/// aimed at a bubble's rim is aimed at the bubble.
+const reach: f32 = 1.25;
 
-/// Where the five zones sit over `bounds`. The side bands run the full height; the top and
-/// bottom bands fit between them; the middle stands back from all four.
-pub fn rects(bounds: dvui.Rect.Physical, scale: f32) Rects {
-    const g = gap * scale;
-    const inner = inset(bounds, g, g);
-    const tx = @min(band * scale, inner.w * band_fraction);
-    const ty = @min(band * scale, inner.h * band_fraction);
-    const left: dvui.Rect.Physical = .{ .x = inner.x, .y = inner.y, .w = tx, .h = inner.h };
-    const right: dvui.Rect.Physical = .{ .x = inner.x + inner.w - tx, .y = inner.y, .w = tx, .h = inner.h };
-    const span_x = inner.x + tx + g;
-    const span_w = @max(0, inner.w - 2 * (tx + g));
-    const top: dvui.Rect.Physical = .{ .x = span_x, .y = inner.y, .w = span_w, .h = ty };
-    const bottom: dvui.Rect.Physical = .{ .x = span_x, .y = inner.y + inner.h - ty, .w = span_w, .h = ty };
-    return .{
-        // What is left between the bands, one gap back from each.
-        .center = inset(inner, tx + g, ty + g),
-        .left = left,
-        .right = right,
-        .top = top,
-        .bottom = bottom,
-    };
+/// Where the drop sits over `bounds`: in its middle. `remove` offers the trash.
+pub fn wheel(bounds: dvui.Rect.Physical, scale: f32, remove: bool) Wheel {
+    const room = @min(bounds.w, bounds.h) * fit / extent;
+    return .{ .center = bounds.center(), .unit = @max(0, @min(scale, room)), .remove = remove };
 }
 
-/// The zone a point reads as: the one containing it, else the nearest — the gaps belong to
-/// whichever target is closest.
-pub fn at(r: Rects, p: dvui.Point.Physical) Zone {
-    var best: Zone = .center;
+/// The zone a point reads as: the bubble it is on (or near), and nothing off every bubble.
+pub fn at(w: Wheel, p: dvui.Point.Physical) ?Zone {
+    var best: ?Zone = null;
     var best_d: f32 = std.math.floatMax(f32);
     for (all) |z| {
-        const d = distance(r.of(z), p);
-        if (d < best_d) {
+        if (z == .remove and !w.remove) continue;
+        const b = w.bubble(z);
+        const dx = p.x - b.c.x;
+        const dy = p.y - b.c.y;
+        const d = @sqrt(dx * dx + dy * dy) / @max(b.r, 0.001);
+        if (d <= reach and d < best_d) {
             best = z;
             best_d = d;
         }
@@ -114,21 +132,16 @@ pub fn at(r: Rects, p: dvui.Point.Physical) Zone {
     return best;
 }
 
-fn distance(r: dvui.Rect.Physical, p: dvui.Point.Physical) f32 {
-    const dx = @max(@max(r.x - p.x, 0), p.x - (r.x + r.w));
-    const dy = @max(@max(r.y - p.y, 0), p.y - (r.y + r.h));
-    return dx * dx + dy * dy;
-}
-
 fn inset(r: dvui.Rect.Physical, dx: f32, dy: f32) dvui.Rect.Physical {
     return .{ .x = r.x + dx, .y = r.y + dy, .w = @max(0, r.w - 2 * dx), .h = @max(0, r.h - 2 * dy) };
 }
 
-/// How long the zones take to come in and to go, in milliseconds. In is the longer: it carries
-/// the bounce, and the place arrived at is watched turning into glass. Out gets out of the way of
-/// the place arrived at, and of what a drop is doing.
+/// How long the drop takes to come in and to go, in milliseconds. In carries the drop forming
+/// and splitting, watched as the place is arrived at. Out runs it backwards — the bubbles back
+/// together into one drop that shrinks away — quickly, but slowly enough to be seen doing it
+/// rather than popping.
 pub const appear_ms: f32 = 420;
-pub const vanish_ms: f32 = 170;
+pub const vanish_ms: f32 = 380;
 /// A time constant: how quickly a zone lights or dims under the pointer, most of the way in
 /// about three of these.
 pub const light_ms: f32 = 55;
@@ -169,17 +182,16 @@ fn litToward() dvui.Color {
 /// Points: an icon's size.
 const icon_size: f32 = 18;
 
-/// Draw the zones over `r`, keyed by `id` (the place's).
+/// Draw the drop `w`, keyed by `id` (the place's).
 ///
 /// Call every frame the pointer is over the place, and after while `showing`, after what the
-/// zones cover has drawn. Gone, a place forgets its zones, so the next arrival comes in anew.
-pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
+/// drop covers has drawn. Gone, a place forgets its drop, so the next arrival comes in anew.
+pub fn draw(id: dvui.Id, w: Wheel, scale: f32, look: Look) void {
     const st = dvui.dataGetPtrDefault(null, id, "_drop_zones", State, .{});
     const now = dvui.currentWindow().frame_time_ns;
-    // A gap of more than a few frames is a new visit: start from nothing.
-    // Where the zones were is kept until they have gone (`forget`), however long between frames:
-    // a drag held still asks for none, and treating the gap as a new visit replayed the entrance
-    // on the next twitch of the pointer.
+    // Where it was is kept until it has gone (`forget`), however long between frames: a drag
+    // held still asks for none, and treating the gap as a new visit replayed the entrance on the
+    // next twitch of the pointer.
     if (st.last_ns == 0) st.last_ns = now;
     const dt_ms: f32 = @as(f32, @floatFromInt(now - st.last_ns)) / std.time.ns_per_ms;
     st.last_ns = now;
@@ -194,15 +206,51 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
     }
 
     const g = frost(st.shown);
-    if (g > 0.01) {
-        var area = r.center;
-        for (all[1..]) |z| area = area.unionWith(r.of(z));
-        const panes = splitting(r, area, st.shown, &st.lit, scale);
-        glass(id, &panes, area, g, scale);
+    if (g > 0.01 and w.unit > 0) {
+        // One drop, then its bubbles: during `drop_phase` of the way in a single bubble swells in
+        // the middle; after it the bubbles part toward where they settle — past it and back at
+        // the app's motion — while how far the field bridges them falls, so the necks between
+        // them thin and let go. Leaving, the same run backwards.
+        const form = std.math.clamp(st.shown / drop_phase, 0, 1);
+        const part = @max(0, motion.enterFull(std.math.clamp((st.shown - drop_phase) / (1 - drop_phase), 0, 1)));
+        const swell = @max(0, motion.enterFull(form));
+        var discs: [all.len]liquid_blob.Disc = undefined;
+        var zones: [all.len]usize = undefined;
+        var n: usize = 0;
         for (all, 0..) |z, i| {
-            if (z == .center and look.center == .none) continue;
-            drawIcon(panes[i].r, iconFor(z, look.center), @min(g, panes[i].lens), st.lit[i], scale);
+            if (z == .remove and !w.remove) continue;
+            const b = w.bubble(z);
+            discs[n] = .{
+                .c = .{ .x = w.center.x + (b.c.x - w.center.x) * part, .y = w.center.y + (b.c.y - w.center.y) * part },
+                .r = b.r * swell,
+                .lit = st.lit[i],
+            };
+            zones[n] = i;
+            n += 1;
         }
+        const k = (bridge_start + (bridge_end - bridge_start) * std.math.clamp(part, 0, 1)) * w.unit;
+        if (apart(discs[0..n], k)) {
+            // Parted, each bubble is a circle: the panes' own glass (`liquid_glass`), a pane
+            // with corners of its whole radius — a fraction of the union's mesh to draw, and its
+            // rim light is the panes', fine along the edge where the union's grid is coarse.
+            var panes: [all.len]Pane = undefined;
+            for (discs[0..n], 0..) |dc, i| panes[i] = .{
+                .r = .{ .x = dc.c.x - dc.r, .y = dc.c.y - dc.r, .w = 2 * dc.r, .h = 2 * dc.r },
+                .lit = dc.lit,
+                .radii = liquid_glass.uniform(dc.r),
+            };
+            glass(id, panes[0..n], w.rect(), g, scale);
+        } else {
+            blob(id, discs[0..n], k, w.rect(), g, scale);
+        }
+        // The icons, once the bubbles have come apart enough to hold them.
+        const settle = std.math.clamp((part - 0.55) / 0.45, 0, 1);
+        if (settle > 0.01) for (discs[0..n], zones[0..n]) |dc, i| {
+            const z = all[i];
+            if (z == .center and look.center == .none) continue;
+            const zr: dvui.Rect.Physical = .{ .x = dc.c.x - dc.r, .y = dc.c.y - dc.r, .w = 2 * dc.r, .h = 2 * dc.r };
+            drawIcon(zr, iconFor(z, look.center), g * settle, st.lit[i], scale, dc.r * bubble_icon / scale);
+        };
     }
 
     if (moving) {
@@ -212,14 +260,120 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
     }
 }
 
+/// Whether the field bridges none of `discs` any more: every pair further apart than the union
+/// reaches across (a few `k`), so each is a circle of its own.
+fn apart(discs: []const liquid_blob.Disc, k: f32) bool {
+    for (discs, 0..) |a, i| for (discs[i + 1 ..]) |b| {
+        const dx = a.c.x - b.c.x;
+        const dy = a.c.y - b.c.y;
+        if (@sqrt(dx * dx + dy * dy) - a.r - b.r < 4 * k) return false;
+    };
+    return true;
+}
+
+/// The share of the way in the drop spends as one bubble, before it splits.
+const drop_phase: f32 = 0.3;
+/// Points: how far the field bridges the bubbles as they begin to part, and once they have —
+/// enough at the start that they leave as one drop, little enough at the end that settled
+/// bubbles a few points apart stand clear of each other.
+const bridge_start: f32 = 16;
+const bridge_end: f32 = 1.5;
+
+/// The drop's glass: one read and blur of `area` (where it settles), the discs' union laid down
+/// on it (`liquid_blob`) with the dialogs' tint and lift, at strength `g`. With the blur off,
+/// the dialogs' fill disc by disc.
+fn blob(id: dvui.Id, discs: []const liquid_blob.Disc, k: f32, area: dvui.Rect.Physical, g: f32, scale: f32) void {
+    const base = widgets.menuFrost() orelse {
+        const fill = dialogs.dialogFill();
+        for (discs) |dc| {
+            const r: dvui.Rect.Physical = .{ .x = dc.c.x - dc.r, .y = dc.c.y - dc.r, .w = 2 * dc.r, .h = 2 * dc.r };
+            if (r.w < 1) continue;
+            const c = fill.lerp(litToward(), lit_lift * dc.lit);
+            r.fill(.round(dc.r), .{ .color = .{ .color = c.opacity(@as(f32, @floatFromInt(c.a)) / 255 * g) }, .fade = 1.0 });
+        }
+        return;
+    };
+    const job = dvui.dataGetPtrDefault(null, id, "_drop_blob_job", BlobJob, .{});
+    job.* = .{
+        .backdrop = job.backdrop,
+        .scale = scale,
+        .strength = g,
+        .k = k,
+        .lens = motion.liquid() * liquid_glass.blurRamp(base.radius),
+    };
+    for (discs) |dc| {
+        if (dc.r < 0.5) continue;
+        job.discs[job.count] = dc;
+        job.count += 1;
+    }
+    if (job.count == 0) return;
+    const bounds = area.insetAll(-liquid_glass.margin(.{ .lens = job.lens, .refraction = base.refraction }, scale));
+    job.pane = scaled(base, g);
+    job.pane.radius = @round(job.pane.radius / blur_step) * blur_step;
+    if (job.pane.radius < BlurBackdrop.min_blur) {
+        job.count = 0;
+        return;
+    }
+    job.bounds = bounds;
+    const backdrop = dvui.dataGetPtrDefault(null, id, "_drop_zones_frost", BlurBackdrop, .{});
+    dvui.dataSetDeinitFunction(null, id, "_drop_zones_frost", &BlurBackdrop.releaseTexture);
+    backdrop.mode = .readback;
+    backdrop.radius_px = job.pane.radius;
+    backdrop.detail = job.pane.detail;
+    // Read every frame, as the dialogs' glass is: what moves under the drop moves in it.
+    backdrop.init(dvui.windowRectScale().rectFromPhysical(bounds), .{ bounds, dvui.currentWindow().frame_time_ns, job.pane.radius });
+    job.backdrop = backdrop;
+    dvui.deferRender(job, BlobJob.draw);
+}
+
+/// The drop's layer, drawn at replay once everything under it is on the frame (`blob`).
+const BlobJob = struct {
+    backdrop: ?*BlurBackdrop = null,
+    pane: BlurBackdrop.Pane = .{},
+    bounds: dvui.Rect.Physical = .{},
+    scale: f32 = 1,
+    strength: f32 = 1,
+    lens: f32 = 1,
+    k: f32 = 1,
+    discs: [all.len]liquid_blob.Disc = undefined,
+    count: usize = 0,
+
+    fn draw(ctx: ?*anyopaque) void {
+        const self: *BlobJob = @ptrCast(@alignCast(ctx orelse return));
+        const backdrop = self.backdrop orelse return;
+        // At full alpha, as every frost draws: a frost at partial alpha is a hole.
+        const prev_alpha = dvui.currentWindow().alpha;
+        dvui.alphaSet(1);
+        defer dvui.alphaSet(prev_alpha);
+        backdrop.deinit();
+        const tex = backdrop.small orelse return;
+        const mix = std.math.clamp(self.pane.mix, 0, 1);
+        liquid_blob.draw(tex, backdrop.coverage(), self.discs[0..self.count], self.k, self.scale, .{
+            .lens = self.lens,
+            .refraction = self.pane.refraction,
+            .frost = if (self.pane.tint != null) dvui.Color.white.opacity(1 - mix) else .white,
+            .tint = self.pane.tint,
+            .mix = mix,
+            .lift = self.pane.lift,
+            .lit_amount = lit_lift,
+            .lit_toward = litToward(),
+            .strength = self.strength,
+            .blend_over = &BlurBackdrop.blendOver,
+        });
+    }
+};
+
 /// The join over two places a drop would make one: a single lit pane of the same glass across
 /// both, where each showed its own zones — the place the drop leaves, shown before it is made.
 /// `rect` is the two places together; null while no join is aimed at, and the pane goes over the
 /// last place it covered. Draw after every place has drawn (it lies over their zones as they go),
 /// keyed by one `id` for the whole window.
 pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
-    drawSingle(id, rect, scale, .{ .inset = gap, .icon = .join });
+    drawSingle(id, rect, scale, .{ .inset = join_inset, .icon = .join });
 }
+
+/// Points the join's pane stands in from the two places it covers.
+const join_inset: f32 = 8;
 
 /// How `drawSingle` lays its pane down.
 pub const Single = struct {
@@ -260,7 +414,7 @@ pub fn drawSingle(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32, opts: Sing
             .radii = liquid_glass.uniform(radius),
         };
         glass(id, &.{pane}, st.rect, g, scale);
-        if (opts.icon) |icon| drawIcon(pane.r, iconFor(.center, icon), g, 1, scale);
+        if (opts.icon) |icon| drawIcon(pane.r, iconFor(.center, icon), g, 1, scale, icon_size);
     }
     if (moving) {
         dvui.refresh(null, @src(), id);
@@ -286,64 +440,6 @@ fn frost(t: f32) f32 {
     return motion.fade(t);
 }
 
-/// The zones `p` of the way in, as liquid splitting into five. They come out of the place's
-/// centre as a cluster — the five tiles that exactly fill the place, each grown half a gap toward
-/// its neighbours, swelling from small together — and once they have mostly filled it they part:
-/// the gaps open and each piece's edge forms. Leaving runs it backwards: the pieces run together
-/// and shrink away into the centre.
-///
-/// Every piece has the app's rounding the whole way — never square, never rounder: a piece that
-/// appeared square and rounded later read as a box being cut, and one as round as its size read
-/// as a blob beside its neighbours. Pieces never overlap — glass over glass would
-/// double its tint where it did — so the cluster is tiles, rounded, not overlapping drops.
-fn splitting(r: Rects, area: dvui.Rect.Physical, p: f32, lit: *const [all.len]f32, scale: f32) [all.len]Pane {
-    const half_gap = gap * scale / 2;
-    const radius = surfaceRadius(scale);
-    const fill = grow(std.math.clamp(p / 0.55, 0, 1));
-    const swell = drop_start + (1 - drop_start) * fill;
-    const split = grow(std.math.clamp((p - 0.4) / 0.6, 0, 1));
-    const settle = std.math.clamp(split, 0, 1);
-    const c = area.center();
-    var out: [all.len]Pane = undefined;
-    for (all, 0..) |z, i| {
-        const settled = r.of(z);
-        const tile = tileOf(settled, z, half_gap);
-        const here = lerpRect(tile, settled, split);
-        // The whole set swells as one, about the place's centre.
-        const swollen: dvui.Rect.Physical = .{ .x = c.x + (here.x - c.x) * swell, .y = c.y + (here.y - c.y) * swell, .w = here.w * swell, .h = here.h * swell };
-        // One radius for every piece, the whole way: the app's rounding. A piece small enough
-        // is as round as it can be (the radius is clamped to half its size), so the cluster still
-        // comes out as droplets; a radius that grew with each piece gave the middle one corners
-        // far rounder than its neighbours'. Each piece's own edge — its refraction and light —
-        // forms as it comes away.
-        out[i] = .{ .r = swollen, .lit = lit[i], .radii = liquid_glass.uniform(radius), .lens = settle };
-    }
-    return out;
-}
-
-/// How big the cluster the zones come out of starts, of the place.
-const drop_start: f32 = 0.18;
-
-/// `settled` grown half a gap toward every neighbouring zone, so the five tile the place.
-fn tileOf(settled: dvui.Rect.Physical, z: Zone, h: f32) dvui.Rect.Physical {
-    // How far each side grows: left, top, right, bottom.
-    const grow_by: [4]f32 = switch (z) {
-        .center => .{ h, h, h, h },
-        .edge => |side| switch (side) {
-            .left => .{ 0, 0, h, 0 },
-            .right => .{ h, 0, 0, 0 },
-            .top => .{ h, 0, h, h },
-            .bottom => .{ h, h, h, 0 },
-        },
-    };
-    return .{
-        .x = settled.x - grow_by[0],
-        .y = settled.y - grow_by[1],
-        .w = settled.w + grow_by[0] + grow_by[2],
-        .h = settled.h + grow_by[1] + grow_by[3],
-    };
-}
-
 /// The app's surface rounding in physical pixels. Finalized, as a widget's options would be: an
 /// unresolved corner draws square whatever radius it names.
 fn surfaceRadius(scale: f32) f32 {
@@ -361,17 +457,11 @@ fn cornersOf(radii: liquid_glass.Radii, scale: f32) dvui.CornerRect {
     };
 }
 
-fn lerpRect(a: dvui.Rect.Physical, b: dvui.Rect.Physical, t: f32) dvui.Rect.Physical {
-    return .{ .x = a.x + (b.x - a.x) * t, .y = a.y + (b.y - a.y) * t, .w = a.w + (b.w - a.w) * t, .h = a.h + (b.h - a.h) * t };
-}
-
 fn scaleAbout(r: dvui.Rect.Physical, kx: f32, ky: f32) dvui.Rect.Physical {
     const w = r.w * kx;
     const h = r.h * ky;
     return .{ .x = r.x + (r.w - w) / 2, .y = r.y + (r.h - h) / 2, .w = w, .h = h };
 }
-
-// ── The glass ───────────────────────────────────────────────────────────────────────────────────
 
 /// One pane of glass to lay down: where, how lit, its corner radii (physical), and how much of
 /// its edge — refraction and light — it has yet.
@@ -436,14 +526,14 @@ fn glass(id: dvui.Id, panes: []const Pane, area: dvui.Rect.Physical, g: f32, sca
     backdrop.mode = .readback;
     backdrop.radius_px = job.pane.radius;
     backdrop.detail = job.pane.detail;
-    const reread = @divTrunc(job.now, reread_ms * std.time.ns_per_ms);
-    backdrop.init(dvui.windowRectScale().rectFromPhysical(bounds), .{ bounds, reread, job.pane.radius });
+    // Read every frame, as the dialogs' glass is: what moves under the drop — a logo following
+    // the pointer — moves in it at the frame rate, not in steps a few times a second.
+    backdrop.init(dvui.windowRectScale().rectFromPhysical(bounds), .{ bounds, job.now, job.pane.radius });
     job.backdrop = backdrop;
     dvui.deferRender(job, LayerJob.draw);
 }
 
-/// How often the glass reads again what is under it, and the steps its blur grows in.
-const reread_ms: i128 = 250;
+/// The steps the glass's blur grows in, so a frost forming is re-blurred a dozen times, not every frame.
 const blur_step: f32 = 3;
 
 /// `base` at strength `g`: its blur, tint and lift all scaled together, so a weaker frost is the
@@ -514,8 +604,8 @@ const LayerJob = struct {
 /// A zone's icon, over its glass (queued after it, so drawn after it). Faint until lit, and in
 /// only once the glass is mostly there; blended toward the glass rather than made translucent,
 /// so a glyph's crossing strokes never show.
-fn drawIcon(zr: dvui.Rect.Physical, glyph: Glyph, g: f32, lit: f32, scale: f32) void {
-    const side = icon_size * scale;
+fn drawIcon(zr: dvui.Rect.Physical, glyph: Glyph, g: f32, lit: f32, scale: f32, size: f32) void {
+    const side = size * scale;
     if (zr.w < side * 1.5 or zr.h < side * 1.5) return;
     const arrive = std.math.clamp((g - 0.45) / 0.55, 0, 1);
     if (arrive <= 0.01) return;
@@ -546,6 +636,7 @@ fn iconFor(z: Zone, center: Center) Glyph {
             .top => .{ .name = "drop_zone_top", .tvg = icons.tvg.lucide.@"panel-top" },
             .bottom => .{ .name = "drop_zone_bottom", .tvg = icons.tvg.lucide.@"panel-bottom" },
         },
+        .remove => .{ .name = "drop_zone_remove", .tvg = icons.tvg.lucide.@"trash-2" },
     };
 }
 

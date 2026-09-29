@@ -194,6 +194,9 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
         .margin = dvui.Rect.all(0),
         .padding = dvui.Rect.all(0),
         .id_extra = @intCast(self.grouping),
+        // Never shorter than a strip: with its only tab in the hand (`Host.viewDragSurface`) it
+        // has nothing to draw, and the strip — somewhere to put it back — stays.
+        .min_size_content = .{ .h = runtime.workbench().tab_strip_h },
     });
     // The strip's full width across the pane, not just its tabs: a tab put back anywhere along
     // it is still being reordered.
@@ -798,7 +801,7 @@ fn paneSide(side: sdk.RegionSpec.Drop.Side) core.widgets.DockLayout.Side {
 /// chrome, as it is for a carried tab: over it the file goes in among the tabs, where the strip's
 /// own reorder shows it and takes the release (`processTabsDrag`). A tab dragged between panes
 /// is not read here: off its strip it is the app's view drag.
-fn zoneAt(self: *const Workspace, zones: core.widgets.DropZones.Rects, p: dvui.Point.Physical) core.widgets.DropZones.Zone {
+fn zoneAt(self: *const Workspace, zones: core.widgets.DropZones.Wheel, p: dvui.Point.Physical) ?core.widgets.DropZones.Zone {
     _ = self;
     return core.widgets.DropZones.at(zones, p);
 }
@@ -812,14 +815,14 @@ fn interiorRect(self: *const Workspace) ?dvui.Rect.Physical {
     return .{ .x = pane.x, .y = top, .w = pane.w, .h = pane.y + pane.h - top };
 }
 
-pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData, region: sdk.Host.Region) void {
+pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
     const DZ = core.widgets.DropZones;
     const rs = data.rectScale();
-    // The pane's content as the app reads it for a carried view — what the document says is its
-    // inside (a canvas within its rulers), less the strip — so a file dragged from the tree and
-    // a tab carried over the pane show the same zones.
-    const bounds = region.interior() orelse self.interiorRect() orelse rs.r;
-    const zones = DZ.rects(bounds, rs.s);
+    // The pane less its strip, as the app reads a place for a carried view (`interiorBounds`),
+    // so a file dragged from the tree and a tab carried over the pane show the same wheel.
+    const bounds = self.interiorRect() orelse rs.r;
+    // No trash: a file from the tree is not in the layout to be taken out of it.
+    const zones = DZ.wheel(bounds, rs.s, false);
     const wb = runtime.workbench();
     const dragging = dvui.dragName("tab_drag") and wb.tab_drag_from_tree_path != null;
     if (!dvui.dragName("tab_drag")) wb.clearFileTreeTabDragDropState();
@@ -845,8 +848,12 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData, region: sdk.Host
         wb.dragging_surface = null;
         defer wb.clearFileTreeTabDragDropState();
 
-        const grouping = switch (self.zoneAt(zones, e.evt.mouse.p)) {
+        // Off the wheel, no drop.
+        const zone = self.zoneAt(zones, e.evt.mouse.p) orelse continue;
+        const grouping = switch (zone) {
             .center => self.grouping,
+            // Not offered for a file from the tree (`DZ.wheel(.., false)`).
+            .remove => continue,
             .edge => |side| blk: {
                 const g = wb.newGroupingID();
                 wb.paneBeside(g, self.grouping, switch (side) {
@@ -895,7 +902,7 @@ fn drawCanvas(self: *Workspace, region: sdk.Host.Region, has_tabs: bool) !void {
         self.canvas_rect_physical = frame.data().contentRectScale().r;
         frame.deinit();
     }
-    defer self.processTabDrag(frame.data(), region);
+    defer self.processTabDrag(frame.data());
 
     if (has_tabs) {
         _ = try region.drawContents();
