@@ -257,7 +257,9 @@ pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
 /// slight bounce at minimal, a soft spring at playful, plain at the low end. Read backwards on the
 /// way out, the same curve swells a touch and then goes.
 fn grow(t: f32) f32 {
-    return @max(0, motion.enter(t));
+    // The whole curve over the phase, approach and swing, with no hold after: the zones time
+    // their own phases, and one that arrived early and sat still would leave its phase dead.
+    return @max(0, motion.enterFull(t));
 }
 
 /// How much frost a zone has at progress `t`: ahead of its size, so the glass is glass before it

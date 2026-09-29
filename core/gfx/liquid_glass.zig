@@ -4,8 +4,8 @@
 //! a sheet of paper; laid down as a mesh whose texture coordinates follow the shape of a drop, it
 //! is glass. A drop is flat across the middle and curves down to its rim, so near the rim it
 //! **refracts**: it shows what lies just beyond its edge, squeezed into a sliver along it, most at
-//! the very edge and fading softly inward. It also catches **light** from the top left there, and a
-//! dimmer reflection on the far side (`drawLift`, in one pass with the pane's lift).
+//! the very edge and fading softly inward. Its border catches **light**: a thin line, brightest
+//! at the top left and bottom right (`drawLift`, in one pass with the pane's lift).
 //!
 //! **One smooth field, not a bevel.** Both come from a soft distance to the pane's edges — the
 //! four sides blended, not the nearest one taken — whose gradient turns smoothly round a corner.
@@ -33,7 +33,7 @@ const dvui = @import("dvui");
 /// reaching out only ever compresses, so it never folds at any strength. The frost has to have
 /// what lies out there in it: a caller captures `margin` beyond the pane.
 pub const refraction: f32 = 16;
-pub const falloff: f32 = 9;
+pub const falloff: f32 = 7;
 pub const softness: f32 = 10;
 
 /// Physical pixels a caller should capture beyond a pane for it to refract, at `look`.
@@ -142,11 +142,17 @@ fn ringInsets(buf: *[ring_count + 1]f32, scale: f32, cap: f32) []const f32 {
     }
     return buf[0..n];
 }
-/// How much white the rim adds at its steepest, where it faces the light and where it faces away
-/// (times the caller's `amount`, which carries the refraction setting): a hint of a catch-light,
-/// not a line drawn round the pane.
-const light_toward: f32 = 0.15;
-const light_away: f32 = 0.05;
+/// The light on a drop's rim (times the caller's `amount`, which carries the refraction setting).
+/// Not a soft band across the curve: a thin line on the border itself, where the edge of the
+/// glass catches it — brightest where the border faces along the light's diagonal, at the top
+/// left, a little less at the bottom right where it shines through and off the far side, and a
+/// faint line all the way round. A trace of a broad glow stays across the curve.
+const line_diagonal: f32 = 0.45;
+const line_far: f32 = 0.75;
+const line_base: f32 = 0.06;
+const broad_glow: f32 = 0.04;
+/// Points: how quickly the rim line fades inward — about a point wide.
+const line_width: f32 = 0.8;
 
 /// Segments in a corner's arc: enough that a corner reads as a curve, not a polygon.
 const arc_steps = 6;
@@ -280,8 +286,8 @@ fn seen(p: dvui.Point.Physical, r: dvui.Rect.Physical, scale: f32, reach_px: f32
 }
 
 /// The white a pane of glass adds over its tint — its `lift`, the whole pane — and the light its
-/// rim catches on top: brightest where it faces the top left, a dimmer reflection on the side
-/// facing away, `amount` of it. One pass for both. `light` is a white texture that adds
+/// rim catches on top: a thin line on the border, brightest at the top left and bottom right,
+/// `amount` of it. One pass for both. `light` is a white texture that adds
 /// (`BlurBackdrop.additiveLight`, dithered); draw this after the tint, so it stays white.
 pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, lift_in: f32, amount_in: f32) void {
     // The texture sits a little under white on average; `gain` puts the mean back.
@@ -290,8 +296,24 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
     if (lift <= 0.002 and amount <= 0.01) return;
     const half = @min(r.w, r.h) / 2;
     if (half < 1) return;
-    var insets_buf: [ring_count + 1]f32 = undefined;
-    const insets = ringInsets(&insets_buf, scale, half * 0.9);
+    // The rim line needs rings of its own, a fraction of a point apart, before the curve's.
+    var curve_buf: [ring_count + 1]f32 = undefined;
+    const curve = ringInsets(&curve_buf, scale, half * 0.9);
+    var insets_buf: [ring_count + 6]f32 = undefined;
+    var n_insets: usize = 0;
+    for ([_]f32{ 0, 0.5, 1.0, 1.6, 2.5 }) |pt| {
+        const d = @max(aa_in, pt * scale);
+        if (d >= half * 0.9) break;
+        if (n_insets > 0 and d <= insets_buf[n_insets - 1] + 0.25) continue;
+        insets_buf[n_insets] = d;
+        n_insets += 1;
+    }
+    for (curve) |d| {
+        if (d <= insets_buf[n_insets - 1] + 0.25) continue;
+        insets_buf[n_insets] = d;
+        n_insets += 1;
+    }
+    const insets = insets_buf[0..n_insets];
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();
     const rings = insets.len;
@@ -302,16 +324,20 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
     const clear = dvui.Color.PMA.fromColor(.transparent);
     ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
     for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = light.uv(p) });
-    // Up and to the left, as a window's light usually is.
-    const lx: f32 = -0.45;
-    const ly: f32 = -0.89;
+    // Along the diagonal from the top left, as a window's light usually is.
+    const lx: f32 = -std.math.sqrt1_2;
+    const ly: f32 = -std.math.sqrt1_2;
     for (insets) |d| {
         ringPoints(pts, null, r, radii, d, arc_steps, 1, 1);
+        const line = @exp(-d / (line_width * scale));
         for (pts) |p| {
             const f = fieldAt(p, r, scale);
             const facing = f.out.x * lx + f.out.y * ly;
-            const lit = light_toward * @max(0, facing) + light_away * @max(0, -facing);
-            const col = dvui.Color.PMA.fromColor(dvui.Color.white.opacity(std.math.clamp(lift + amount * f.steep * lit, 0, 1)));
+            const toward = @max(0, facing);
+            const away = @max(0, -facing);
+            const spec = line_diagonal * (toward * @sqrt(toward) + line_far * away * @sqrt(away)) + line_base;
+            const lit = line * spec + broad_glow * f.steep * toward;
+            const col = dvui.Color.PMA.fromColor(dvui.Color.white.opacity(std.math.clamp(lift + amount * lit, 0, 1)));
             b.appendVertex(.{ .pos = p, .col = col, .uv = light.uv(p) });
         }
     }

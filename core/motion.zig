@@ -11,15 +11,15 @@
 //!     the further up: at 1 about 12% past. Frosted glass has a refracting edge from minimal on
 //!     (`liquid`).
 //!
-//! **Every level arrives on time.** Whatever the level, a motion reaches its target at the
-//! duration it was given (divided by the speed setting). An overshoot is not squeezed into that
-//! time — a curve that arrives early to leave room for its swing reads as faster, and the slider
-//! was changing speed where it should only change character — it is added after it:
-//! `duration` stretches every animation by the share the swing takes at this level (`stretch`),
-//! the curves arrive at the old end of it, and fades hold still for the rest. So the slider
-//! changes how a motion ends, never how long it takes to get there; how long is the **speed**
-//! setting's, a window from half as fast to twice as fast which never stops motion outright —
-//! that is off's job.
+//! **Every level arrives on time.** A motion reaches its target at `arrival` of the duration it
+//! was given — the share the app's durations were tuned for, when its curves overshot and so
+//! arrived well before they ended — whatever the level. The overshoot is not squeezed into the
+//! approach (a curve that arrives earlier to make room for its swing reads as faster, and the
+//! slider was changing speed where it should only change character): it swings after the
+//! arrival, in time the duration already had, and what is left after that the motion holds
+//! still. So the slider changes how a motion ends, never how fast it gets there; how fast is the
+//! **speed** setting's, a window from half as fast to twice as fast which never stops motion
+//! outright — that is off's job.
 //!
 //! **Ask by intent, not by curve.** A call site says what the motion *is* — something arriving
 //! (`enter`), leaving (`exit`), moving to a new place (`settle`), or fading (`fade`) — and gets the
@@ -100,46 +100,42 @@ pub fn liquid() f32 {
     return std.math.clamp(level() * 2, 0, 1);
 }
 
-/// A duration in microseconds as the user wants it: at their speed, stretched to leave room after
-/// the arrival for this level's overshoot (`stretch`), and a single microsecond (done at once)
-/// when motion is off. Pass every duration an animation runs for through this, paired with one of
-/// the curves below — they arrive at the unstretched duration.
+/// A duration in microseconds as the user wants it: at their speed, and a single microsecond
+/// (done at once) when motion is off. Pass every duration an animation runs for through this,
+/// paired with one of the curves below.
 pub fn duration(us: i32) i32 {
     if (off()) return 1;
-    return @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(us)) * stretch() / rate())));
+    return @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(us)) / rate())));
 }
 
 /// The same in milliseconds, for animations stepped by hand: 0 when off.
 pub fn durationMs(ms: f32) f32 {
-    return if (off()) 0 else ms * stretch() / rate();
+    return if (off()) 0 else ms / rate();
 }
 
-/// How much longer than its arrival an animation runs at this level, for the overshoot to swing
-/// and settle in: 1 up to minimal, rising to 1 / (1 - `swing_max`) at playful.
-pub fn stretch() f32 {
-    return 1 / arrivalAt(level());
-}
+/// When, as a share of its duration, every motion reaches its target, at every level.
+pub const arrival: f32 = 0.4;
+/// The share of a duration the overshoot takes after the arrival, at playful: long enough to
+/// carry it about 12% past the target at the approach's own speed, and back.
+pub const swing_max: f32 = 0.26;
 
-/// The share of an animation its overshoot takes at playful.
-pub const swing_max: f32 = 0.4;
-
-/// When, as a share of an animation at level `lv` (stretched by `stretch`), its curves arrive.
-pub fn arrivalAt(lv: f32) f32 {
-    return 1 - swing_max * std.math.clamp((lv - 0.5) * 2, 0, 1);
+/// The share of a duration the overshoot takes at level `lv`: none up to minimal.
+pub fn swingAt(lv: f32) f32 {
+    return swing_max * std.math.clamp((lv - 0.5) * 2, 0, 1);
 }
 
 // ── Curves by intent ────────────────────────────────────────────────────────────────────────────
 
-/// Something arriving — opening, appearing, growing into place: at constant speed to its target,
-/// then, above minimal, carrying on past it and settling back.
+/// Something arriving — opening, appearing, growing into place: at constant speed to its target
+/// by `arrival`, then, above minimal, carrying on past it and settling back.
 pub fn enter(t: f32) f32 {
     return enterAt(level(), t);
 }
 
-/// Something leaving — closing, shrinking away. `enter` run backwards: above minimal it draws
-/// back first, then leaves at constant speed, taking exactly its duration to go.
+/// Something leaving — closing, shrinking away: above minimal it draws back first, then leaves at
+/// constant speed, gone `arrival` after it set off, and holds there.
 pub fn exit(t: f32) f32 {
-    return 1 - enterAt(level(), 1 - t);
+    return exitAt(level(), t);
 }
 
 /// Something moving to a new place or size — a slide, a resize, a reorder. The same motion as
@@ -148,35 +144,48 @@ pub fn settle(t: f32) f32 {
     return settleAt(level(), t);
 }
 
-/// Opacity: linear, arriving when everything else does and holding while an overshoot swings.
-/// Never past 1 — a fade has nowhere to overshoot to.
+/// Opacity: linear, there by `arrival`, and holding. Never past 1 — a fade has nowhere to
+/// overshoot to.
 pub fn fade(t: f32) f32 {
-    return clamp01(t / arrivalAt(level()));
+    return clamp01(t / arrival);
+}
+
+/// `enter` with no hold after it: the approach and the swing over the whole of `t`, for a caller
+/// timing phases of its own (the drop zones' split), where a motion that finished early and sat
+/// still would leave its phase dead. Arrives at the end at minimal, halfway at playful.
+pub fn enterFull(t: f32) f32 {
+    const lv = level();
+    return enterAt(lv, clamp01(t) * (arrival + swingAt(lv)));
 }
 
 /// `enter` at a given level, for a call site (or a test) that has its own. Linear to the target
-/// at the arrival share, then a swing that leaves with the approach's own speed — so there is no
-/// kink as it passes — rises, and comes back to rest exactly at the end.
+/// at `arrival`, then a swing that leaves with the approach's own speed — so there is no kink as
+/// it passes — rises, and comes back to rest at the end of it.
 pub fn enterAt(lv: f32, t: f32) f32 {
     const u = clamp01(t);
-    if (u >= 1) return 1;
-    const a = arrivalAt(lv);
-    if (u <= a) return u / a;
-    const swing = 1 - a;
-    const x = (u - a) / swing;
-    // y = 1 + B·sin(πx)·(1 − x): leaves 1 with slope B·π/swing, which is the approach's 1/a, and
-    // lands back on 1 at rest.
-    const b = swing / (std.math.pi * a);
+    if (u <= arrival) return u / arrival;
+    const swing = swingAt(lv);
+    if (swing <= 0 or u >= arrival + swing) return 1;
+    const x = (u - arrival) / swing;
+    // y = 1 + B·sin(πx)·(1 − x): leaves 1 with slope B·π/swing, which is the approach's
+    // 1/arrival, and lands back on 1 at rest.
+    const b = swing / (std.math.pi * arrival);
     return 1 + b * @sin(std.math.pi * x) * (1 - x);
+}
+
+/// `exit` at a given level: the swing run backwards first — a draw back — then the approach run
+/// backwards, gone at `arrival` after it set off.
+pub fn exitAt(lv: f32, t: f32) f32 {
+    const swing = swingAt(lv);
+    const span = arrival + swing;
+    const u = clamp01(t);
+    if (u >= span) return 1;
+    return 1 - enterAt(lv, span - u);
 }
 
 /// `settle` at a given level.
 pub fn settleAt(lv: f32, t: f32) f32 {
     return enterAt(lv, t);
-}
-
-fn lerp(a: f32, b: f32, k: f32) f32 {
-    return a + (b - a) * k;
 }
 
 fn clamp01(t: f32) f32 {

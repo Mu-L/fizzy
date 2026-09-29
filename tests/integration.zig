@@ -3623,9 +3623,9 @@ test "motion: every curve starts at 0 and lands on 1, at every level" {
 
 test "motion: linear up to minimal, a swing past the target toward playful" {
     const M = fizzy.core.motion;
-    // Up to minimal: linear, nothing overshoots.
+    // Up to minimal: linear to the target at `arrival`, nothing overshoots.
     for ([_]f32{ 0.001, 0.25, 0.5 }) |lv| {
-        try std.testing.expectApproxEqAbs(@as(f32, 0.3), M.enterAt(lv, 0.3), 1e-4);
+        try std.testing.expectApproxEqAbs(0.3 / M.arrival, M.enterAt(lv, 0.3), 1e-4);
         try std.testing.expect(peakOf(M.enterAt, lv) <= 1.0001);
     }
     // Playful: about 12% past, and back to rest at the end.
@@ -3637,16 +3637,19 @@ test "motion: linear up to minimal, a swing past the target toward playful" {
 test "motion: every level arrives on time, and passes through without a kink" {
     const M = fizzy.core.motion;
     for ([_]f32{ 0.3, 0.5, 0.6, 0.75, 0.9, 1.0 }) |lv| {
-        const a = M.arrivalAt(lv);
-        // At the arrival share of the stretched run — which is the unstretched duration — it is
-        // at its target, whatever the level.
-        try std.testing.expectApproxEqAbs(@as(f32, 1), M.enterAt(lv, a), 1e-4);
-        try std.testing.expectApproxEqAbs(@as(f32, 1), a * (1 / a), 1e-6);
-        // Arriving, not before: short of the arrival it is short of the target.
-        try std.testing.expect(M.enterAt(lv, a * 0.95) < 0.99);
-        if (a < 1) {
+        // At `arrival` of its duration it is at its target, whatever the level — and not before.
+        try std.testing.expectApproxEqAbs(@as(f32, 1), M.enterAt(lv, M.arrival), 1e-4);
+        try std.testing.expect(M.enterAt(lv, M.arrival * 0.95) < 0.99);
+        // Leaving, it is gone the same `arrival` after it sets off, drawing back first above
+        // minimal.
+        try std.testing.expectApproxEqAbs(@as(f32, 1), M.exitAt(lv, M.arrival + M.swingAt(lv)), 1e-4);
+        try std.testing.expect(M.exitAt(lv, (M.arrival + M.swingAt(lv)) * 0.9) < 0.99);
+        // Above minimal it draws back before it leaves.
+        if (M.swingAt(lv) > 0) try std.testing.expect(M.exitAt(lv, M.swingAt(lv) * 0.4) < 0);
+        if (M.swingAt(lv) > 0) {
             // The same speed either side of the target.
             const h: f32 = 0.001;
+            const a = M.arrival;
             const before = (M.enterAt(lv, a) - M.enterAt(lv, a - h)) / h;
             const after = (M.enterAt(lv, a + h) - M.enterAt(lv, a)) / h;
             try std.testing.expectApproxEqRel(before, after, 0.02);

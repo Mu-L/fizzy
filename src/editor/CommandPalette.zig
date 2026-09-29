@@ -40,11 +40,14 @@ const row_height: f32 = 28;
 
 /// Reveal timing. The query row is full-height from the first frame — only the suggestion list
 /// grows — so the palette's top edge never moves and the bottom edge is what springs down.
-/// Scrim fade timings. The panel's own geometry is animated by `FloatingWindowWidget`'s
-/// auto-size (300ms `outBack`) and close (400ms `inBack`) machinery; these match those so the
-/// dim lands with the panel.
-const open_secs: f32 = 0.3;
-const close_secs: f32 = 0.4;
+/// Scrim fade timings, in milliseconds as written. The panel's own geometry is animated by
+/// `FloatingWindowWidget`'s auto-size (300ms) and close (400ms) machinery, through
+/// `core.motion.duration`; these go through the same (`core.motion.durationMs`), so the dim lands
+/// with the panel and the palette stops drawing when its window has finished leaving — at any
+/// motion level and speed. On a clock of its own it stopped first, and the window vanished
+/// mid-close.
+const open_ms: f32 = 300;
+const close_ms: f32 = 400;
 
 /// A frame's worth of time, clamped. `secondsSinceLastFrame` reports the *real* gap since the
 /// previous frame, and fizzy sleeps when idle — so the frame that opens the palette typically
@@ -482,7 +485,9 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
 
     { // scrim fade + close lifecycle; the panel's geometry is the widget's job now
         const dt = frameDelta();
-        if (dvui.reduce_motion) {
+        const close_secs = fizzy.core.motion.durationMs(close_ms) / 1000;
+        const open_secs = fizzy.core.motion.durationMs(open_ms) / 1000;
+        if (dvui.reduce_motion or close_secs <= 0 or open_secs <= 0) {
             self.anim = if (self.closing) 0 else 1;
         } else if (self.closing) {
             self.anim = @max(0, self.anim - dt / close_secs);

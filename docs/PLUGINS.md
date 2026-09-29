@@ -1200,8 +1200,8 @@ through `core.vfs.Mem` in a few dozen lines. The design and its remaining edges 
 The user picks how the app moves with one setting, **Motion**, from 0 to 1: 0 is off (nothing
 animates), up to 0.5 — *minimal*, the default — motion is plain and even, and toward 1 —
 *playful* — things carry on past where they are going and settle back (about 12% at 1). Every
-level arrives on time: the overshoot is added after the arrival (`motion.duration` stretches by
-`motion.stretch()`), so the level changes character, never speed. A second setting, **Motion speed**,
+level arrives on time — at `motion.arrival` (40%) of the duration it was given — and the
+overshoot swings in the time after, so the level changes character, never speed. A second setting, **Motion speed**,
 runs every duration from half to twice as fast. A system request for reduced motion turns motion
 off. The host publishes both into the shared dvui window each frame, so a plugin's copy of `core` reads the same value, and sets dvui's
 own `reduce_motion` in the plugin's image too.
