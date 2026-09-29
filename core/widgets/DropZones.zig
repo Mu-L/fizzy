@@ -269,14 +269,14 @@ fn frost(t: f32) f32 {
 }
 
 /// The zones `p` of the way in, as liquid splitting into five. They come out of the place's
-/// centre as a cluster of droplets — the five tiles that exactly fill the place, each grown half
-/// a gap toward its neighbours, swelling from small together and each as round as its size
-/// allows — and once they have mostly filled it they part: the gaps open, and each piece's
-/// corners tighten to the app's rounding as its edge forms. Leaving runs it backwards: the pieces
-/// run together, round up, and shrink away into the centre.
+/// centre as a cluster — the five tiles that exactly fill the place, each grown half a gap toward
+/// its neighbours, swelling from small together — and once they have mostly filled it they part:
+/// the gaps open and each piece's edge forms. Leaving runs it backwards: the pieces run together
+/// and shrink away into the centre.
 ///
-/// Round from the start, never square: a piece that appeared with square corners and rounded
-/// them later read as a box being cut, not liquid. Pieces never overlap — glass over glass would
+/// Every piece has the app's rounding the whole way — never square, never rounder: a piece that
+/// appeared square and rounded later read as a box being cut, and one as round as its size read
+/// as a blob beside its neighbours. Pieces never overlap — glass over glass would
 /// double its tint where it did — so the cluster is tiles, rounded, not overlapping drops.
 fn splitting(r: Rects, area: dvui.Rect.Physical, p: f32, lit: *const [all.len]f32, scale: f32) [all.len]Pane {
     const half_gap = gap * scale / 2;
@@ -293,11 +293,12 @@ fn splitting(r: Rects, area: dvui.Rect.Physical, p: f32, lit: *const [all.len]f3
         const here = lerpRect(tile, settled, split);
         // The whole set swells as one, about the place's centre.
         const swollen: dvui.Rect.Physical = .{ .x = c.x + (here.x - c.x) * swell, .y = c.y + (here.y - c.y) * swell, .w = here.w * swell, .h = here.h * swell };
-        // As round as the piece allows, tightening to the rounding as it settles.
-        const roundest = @min(swollen.w, swollen.h) / 2;
-        const corner = radius + (@max(radius, roundest) - radius) * (1 - settle);
-        // Each piece's own edge — its refraction and light — forms as it comes away.
-        out[i] = .{ .r = swollen, .lit = lit[i], .radii = liquid_glass.uniform(corner), .lens = settle };
+        // One radius for every piece, the whole way: the app's rounding. A piece small enough
+        // is as round as it can be (the radius is clamped to half its size), so the cluster still
+        // comes out as droplets; a radius that grew with each piece gave the middle one corners
+        // far rounder than its neighbours'. Each piece's own edge — its refraction and light —
+        // forms as it comes away.
+        out[i] = .{ .r = swollen, .lit = lit[i], .radii = liquid_glass.uniform(radius), .lens = settle };
     }
     return out;
 }

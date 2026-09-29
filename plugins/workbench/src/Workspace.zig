@@ -153,6 +153,8 @@ pub fn draw(self: *Workspace) !dvui.App.Result {
         return .ok;
     };
 
+    // Where this frame's tab strip is, for a file dropped on it; none when there are no tabs.
+    self.strip_rect_physical = null;
     if (tabs.len > 0) {
         self.drawTabs(region, tabs, selected);
     } else if (!solePane()) {
@@ -491,6 +493,18 @@ fn processTabsDrag(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk
         return;
     }
 
+    // A file from the tree, let go over the strip: it opens here, as dropped on the pane's
+    // middle (`processTabDrag`, which never sees a release the strip took).
+    if (runtime.workbench().dragging_surface == null) {
+        if (runtime.workbench().tab_drag_from_tree_path) |path| {
+            const started = runtime.host().openFile(.{ .path = path, .grouping = self.grouping }) catch false;
+            _ = started;
+            runtime.workbench().clearFileTreeTabDragDropState();
+            dvui.refresh(null, @src(), null);
+        }
+        return;
+    }
+
     // From another pane: whichever one lifted the surface this frame.
     const id = runtime.workbench().dragging_surface orelse return;
     runtime.workbench().dragging_surface = null;
@@ -643,12 +657,22 @@ fn paneSide(side: sdk.RegionSpec.Drop.Side) core.widgets.DockLayout.Side {
 }
 
 /// A file-tree row dropped on this pane: the same zones and reading as a dragged view
-/// (`core.widgets.DropZones`) — the middle opens it here, an edge in a new pane on that side. A
-/// tab dragged between panes is not read here: off its strip it is the app's view drag.
+/// (`core.widgets.DropZones`) — the middle opens it here, an edge in a new pane on that side. The
+/// whole pane is the target, its tab strip included: over the strip the file joins the tabs, so
+/// the middle lights there whatever band it sits in (a drop the strip itself takes is the same,
+/// `processTabsDrag`). A tab dragged between panes is not read here: off its strip it is the
+/// app's view drag.
+/// The zone a file dropped at `p` lands in: the middle anywhere on the tab strip — it joins the
+/// tabs — else whichever zone `p` reads as.
+fn zoneAt(self: *const Workspace, zones: core.widgets.DropZones.Rects, p: dvui.Point.Physical) core.widgets.DropZones.Zone {
+    if (self.strip_rect_physical) |strip| if (strip.contains(p)) return .center;
+    return core.widgets.DropZones.at(zones, p);
+}
+
 pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
     const DZ = core.widgets.DropZones;
     const rs = data.rectScale();
-    const bounds = rs.r;
+    const bounds = self.pane_rect_physical orelse rs.r;
     const zones = DZ.rects(bounds, rs.s);
     const wb = runtime.workbench();
     const dragging = dvui.dragName("tab_drag") and wb.tab_drag_from_tree_path != null;
@@ -660,7 +684,7 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
         if (DZ.showing(data.id)) DZ.draw(data.id, zones, rs.s, .{ .target = false, .center = .add });
         if (!dragging) return;
     } else {
-        DZ.draw(data.id, zones, rs.s, .{ .hovered = DZ.at(zones, mouse), .center = .add });
+        DZ.draw(data.id, zones, rs.s, .{ .hovered = self.zoneAt(zones, mouse), .center = .add });
     }
     const path = wb.tab_drag_from_tree_path.?;
 
@@ -675,7 +699,7 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
         wb.dragging_surface = null;
         defer wb.clearFileTreeTabDragDropState();
 
-        const grouping = switch (DZ.at(zones, e.evt.mouse.p)) {
+        const grouping = switch (self.zoneAt(zones, e.evt.mouse.p)) {
             .center => self.grouping,
             .edge => |side| blk: {
                 const g = wb.newGroupingID();
