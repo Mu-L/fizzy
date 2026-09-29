@@ -179,10 +179,10 @@ pub const groups = [_]Group{
             .{
                 .label = "Motion",
                 .key = "motion",
-                .description = "How the interface moves. 0 is off — nothing animates. Low is " ++
-                    "plain, even motion; the middle, Minimal, slides in with a slight bounce " ++
-                    "and gives frosted glass a bevelled edge; toward Playful arrivals glide in " ++
-                    "on a soft spring. A system request for reduced motion turns it off.",
+                .description = "How the interface moves. 0 is off — nothing animates. Up to " ++
+                    "Minimal, motion is plain and even; toward Playful things carry on past " ++
+                    "where they are going and settle back. Every level arrives on time — " ++
+                    "Motion speed sets how fast. A system request for reduced motion turns it off.",
                 .keywords = "animation motion reduce reduced accessibility bounce spring playful minimal glass bevel easing",
                 .draw = drawMotion,
             },

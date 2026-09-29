@@ -423,9 +423,10 @@ fn glass(id: dvui.Id, panes: []const Pane, area: dvui.Rect.Physical, g: f32, sca
         job.count += 1;
     }
     if (job.count == 0) return;
-    // The layer covers the place the panes settle in and nothing else, so what it reads back and
-    // blurs is only what the glass will show.
-    const bounds = area;
+    // The layer covers the place the panes settle in, and as far beyond as their edges reach for
+    // what lies past them (`liquid_glass.margin`): what it reads back and blurs is what the glass
+    // will show.
+    const bounds = area.insetAll(-liquid_glass.margin(.{ .lens = job.lens, .refraction = base.refraction }, scale));
     job.pane = scaled(base, g);
     // In steps, so a frost fading in is re-blurred a dozen times rather than every frame.
     job.pane.radius = @round(job.pane.radius / blur_step) * blur_step;

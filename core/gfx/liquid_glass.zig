@@ -3,8 +3,8 @@
 //! A frost is a blurred picture of what is under a pane. Laid down as a flat textured rect it is
 //! a sheet of paper; laid down as a mesh whose texture coordinates follow the shape of a drop, it
 //! is glass. A drop is flat across the middle and curves down to its rim, so near the rim it
-//! **refracts**: it shows what lies a little further in, magnified out toward the edge, most at
-//! the edge and fading softly inward. It also catches **light** from the top left there, and a
+//! **refracts**: it shows what lies just beyond its edge, squeezed into a sliver along it, most at
+//! the very edge and fading softly inward. It also catches **light** from the top left there, and a
 //! dimmer reflection on the far side (`drawLift`, in one pass with the pane's lift).
 //!
 //! **One smooth field, not a bevel.** Both come from a soft distance to the pane's edges — the
@@ -16,28 +16,35 @@
 //! The rim is also **clearer** than the face: the picture before the blur shows through it,
 //! bent the same way, strongest at the very edge and fading into the frost with the drop's
 //! steepness. (Through a bevel's creases the same picture drew streaks; through a smooth field it
-//! is only magnified.)
+//! is only bent.)
 //!
 //! How much of it is the caller's (`Look`): the app scales it by `core.motion.liquid` and the
 //! user's dialog refraction, so the glass is flat when motion is off.
 const std = @import("std");
 const dvui = @import("dvui");
 
-/// Points: how far in, at the very rim, the drop reaches for what it shows (times
+/// Points: how far *out*, at the very rim, the drop reaches for what it shows (times
 /// `Look.refraction`); how far in its curve fades by a factor of e; and how softly its sides blend
 /// into each other round a corner.
-pub const refraction: f32 = 14;
-pub const falloff: f32 = 15;
-// `refraction` stays under `falloff`: past it, the rim reaches in faster than it moves in, and
-// the picture folds back on itself a few points inside the edge — a mirror line, seen as a band.
-// Just under, the rim magnifies as strongly as it can without folding. The refraction setting can
-// still take it past, for anyone who wants the mirror.
+///
+/// Out, not in: the rim of a drop shows what lies just beyond it, squeezed into a sliver along its
+/// edge — an icon beside a pane curls round into its rim. Reaching *in* instead magnified the
+/// pane's own face, which is subtler, and folded back on itself into a mirror line when pushed;
+/// reaching out only ever compresses, so it never folds at any strength. The frost has to have
+/// what lies out there in it: a caller captures `margin` beyond the pane.
+pub const refraction: f32 = 16;
+pub const falloff: f32 = 9;
 pub const softness: f32 = 10;
+
+/// Physical pixels a caller should capture beyond a pane for it to refract, at `look`.
+pub fn margin(look: Look, scale: f32) f32 {
+    if (!bends(look)) return 0;
+    return @ceil(refraction * scale * look.lens * look.refraction) + 2;
+}
 /// How much of the unblurred picture the rim shows at its very edge, 0…1: glass is clearer
 /// where it is thin and steep, frosted across its face.
 pub const clarity: f32 = 0.55;
-/// Points: how far in the mesh keeps rings, beyond which the drop is flat and a fan will do.
-const band: f32 = 44;
+
 
 /// A pane's corner radii in physical pixels, in the order its rings run: top-left, bottom-left,
 /// bottom-right, top-right. Per corner, so a pane can be square where it meets another and
@@ -107,11 +114,34 @@ pub fn bends(look: Look) bool {
     return look.lens > 0.001;
 }
 
-/// Where the rings of a pane sit, as fractions of `band`: closer together at the rim, where the
-/// bend changes fastest. The glass is straight lines between rings, and the eye finds every kink
-/// in a gradient's slope as a band, so there are enough that the steps are finer than it can
-/// see — and few enough that a pane stays cheap: every vertex is copied to the GPU each frame.
-const ring_steps = [_]f32{ 0, 0.025, 0.055, 0.09, 0.135, 0.19, 0.26, 0.35, 0.46, 0.6, 0.78, 1.0 };
+/// How many rings a pane's curve is drawn with.
+const ring_count = 14;
+
+/// Where the rings of a pane sit, in physical pixels from the rim: each one a step of the same
+/// size down the drop's steepness (`e^(-s/falloff)` from 1 toward 0), which puts them close at
+/// the rim and further apart as it flattens — geometrically. The glass is straight lines between
+/// rings, and the eye finds every kink in a gradient's slope as a band; spaced by fixed fractions
+/// the rim got a few big kinks, contours round the pane, and the flat face rings it did not need.
+/// The last ring sits well into the flat, where a fan to the centre takes over. Never past `cap`,
+/// the most a small pane has room for.
+fn ringInsets(buf: *[ring_count + 1]f32, scale: f32, cap: f32) []const f32 {
+    const l = falloff * scale;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < ring_count) : (i += 1) {
+        const k = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(ring_count));
+        const d = @max(aa_in, -l * @log(1 - k));
+        if (d >= cap) break;
+        buf[n] = d;
+        n += 1;
+    }
+    const last = @min(cap, buf[n - 1] + l);
+    if (last > buf[n - 1] + 0.5) {
+        buf[n] = last;
+        n += 1;
+    }
+    return buf[0..n];
+}
 /// How much white the rim adds at its steepest, where it faces the light and where it faces away
 /// (times the caller's `amount`, which carries the refraction setting): a hint of a catch-light,
 /// not a line drawn round the pane.
@@ -119,7 +149,7 @@ const light_toward: f32 = 0.15;
 const light_away: f32 = 0.05;
 
 /// Segments in a corner's arc: enough that a corner reads as a curve, not a polygon.
-const arc_steps = 8;
+const arc_steps = 6;
 
 /// Physical pixels: the edge fades from solid to clear across one pixel, half inside the outline
 /// and half outside — dvui's own anti-aliasing of a rounded fill (`Path.fillConvexTriangles`,
@@ -161,7 +191,8 @@ pub fn fieldAt(p: dvui.Point.Physical, r: dvui.Rect.Physical, scale: f32) Field 
 pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.Physical, radii: Radii, scale: f32, mod: dvui.Color, look: Look) void {
     const half = @min(r.w, r.h) / 2;
     if (half < 1 or tex_bounds.w < 1 or tex_bounds.h < 1) return;
-    const band_px = @min(band * scale, half * 0.9);
+    var insets_buf: [ring_count + 1]f32 = undefined;
+    const insets = ringInsets(&insets_buf, scale, half * 0.9);
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();
     const col = dvui.Color.PMA.fromColor(mod);
@@ -172,12 +203,12 @@ pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.
     // The face: the rings through the curve, from half a pixel inside the outline, and a fan
     // over the flat middle — in the texture's own blend.
     {
-        const rings = ring_steps.len;
+        const rings = insets.len;
         const vtx_count = per_ring * rings + 1;
         var b = dvui.Triangles.Builder.init(arena, vtx_count, per_ring * 6 * (rings - 1) + per_ring * 3) catch return;
         defer b.deinit(arena);
-        for (ring_steps) |x| {
-            ringPoints(pts, null, r, radii, @max(aa_in, band_px * x), arc_steps, 1, 1);
+        for (insets) |d| {
+            ringPoints(pts, null, r, radii, d, arc_steps, 1, 1);
             for (pts) |p| b.appendVertex(.{ .pos = p, .col = col, .uv = seen(p, r, scale, reach_px, tex_bounds) });
         }
         const c = r.center();
@@ -202,20 +233,20 @@ pub fn drawPane(tex: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.
         if (look.blend_over) |set| set(tex, false);
     }
 
-    if (look.sharp) |sharp| drawClear(sharp, tex_bounds, r, radii, scale, mod, look, band_px);
+    if (look.sharp) |sharp| drawClear(sharp, tex_bounds, r, radii, scale, mod, look, insets);
 }
 
 /// The rim's clearer glass: the unblurred picture over the frost, bent the same way, as much of
 /// it as `clarity` times the drop's steepness — sharpest at the very edge, gone where the face
 /// is flat. Drawn at the frost's weight (`mod`), so it takes the pane's tint and lift afterwards
 /// like the frost does.
-fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.Physical, radii: Radii, scale: f32, mod: dvui.Color, look: Look, band_px: f32) void {
+fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.Physical, radii: Radii, scale: f32, mod: dvui.Color, look: Look, insets: []const f32) void {
     // With the refraction setting, up to as designed: a flat edge is a clear one no more.
     const amount = clarity * look.lens * @min(1, look.refraction) * @as(f32, @floatFromInt(mod.a)) / 255;
     if (amount <= 0.01) return;
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();
-    const rings = ring_steps.len;
+    const rings = insets.len;
     var b = dvui.Triangles.Builder.init(arena, per_ring * (rings + 1), per_ring * 6 * rings) catch return;
     defer b.deinit(arena);
     const pts = arena.alloc(dvui.Point.Physical, per_ring) catch return;
@@ -223,8 +254,8 @@ fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.P
     const reach_px = refraction * scale * look.lens * look.refraction;
     ringPoints(pts, null, r, radii, -aa_out, arc_steps, 1, 1);
     for (pts) |p| b.appendVertex(.{ .pos = p, .col = clear, .uv = seen(p, r, scale, reach_px, tex_bounds) });
-    for (ring_steps) |x| {
-        ringPoints(pts, null, r, radii, @max(aa_in, band_px * x), arc_steps, 1, 1);
+    for (insets) |d| {
+        ringPoints(pts, null, r, radii, d, arc_steps, 1, 1);
         for (pts) |p| {
             const steep = fieldAt(p, r, scale).steep;
             // Squared, so the clear glass hugs the edge and the face stays frosted.
@@ -236,12 +267,12 @@ fn drawClear(sharp: dvui.Texture, tex_bounds: dvui.Rect.Physical, r: dvui.Rect.P
     dvui.renderTriangles(b.build_unowned(), sharp) catch {};
 }
 
-/// Where the glass at `p` shows: further in, against the drop's outward direction, by as much of
+/// Where the glass at `p` shows: further out, along the drop's outward direction, by as much of
 /// `reach_px` as the drop is steep there.
 fn seen(p: dvui.Point.Physical, r: dvui.Rect.Physical, scale: f32, reach_px: f32, bd: dvui.Rect.Physical) @Vector(2, f32) {
     const f = fieldAt(p, r, scale);
     const reach = reach_px * f.steep;
-    const q: dvui.Point.Physical = .{ .x = p.x - f.out.x * reach, .y = p.y - f.out.y * reach };
+    const q: dvui.Point.Physical = .{ .x = p.x + f.out.x * reach, .y = p.y + f.out.y * reach };
     return .{
         std.math.clamp((q.x - bd.x) / bd.w, 0, 1),
         std.math.clamp((q.y - bd.y) / bd.h, 0, 1),
@@ -259,10 +290,11 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
     if (lift <= 0.002 and amount <= 0.01) return;
     const half = @min(r.w, r.h) / 2;
     if (half < 1) return;
-    const band_px = @min(band * scale, half * 0.9);
+    var insets_buf: [ring_count + 1]f32 = undefined;
+    const insets = ringInsets(&insets_buf, scale, half * 0.9);
     const per_ring = 4 * (arc_steps + 1);
     const arena = dvui.currentWindow().arena();
-    const rings = ring_steps.len;
+    const rings = insets.len;
     const vtx_count = per_ring * (rings + 1) + 1;
     var b = dvui.Triangles.Builder.init(arena, vtx_count, per_ring * 6 * rings + per_ring * 3) catch return;
     defer b.deinit(arena);
@@ -273,8 +305,8 @@ pub fn drawLift(light: Light, r: dvui.Rect.Physical, radii: Radii, scale: f32, l
     // Up and to the left, as a window's light usually is.
     const lx: f32 = -0.45;
     const ly: f32 = -0.89;
-    for (ring_steps) |x| {
-        ringPoints(pts, null, r, radii, @max(aa_in, band_px * x), arc_steps, 1, 1);
+    for (insets) |d| {
+        ringPoints(pts, null, r, radii, d, arc_steps, 1, 1);
         for (pts) |p| {
             const f = fieldAt(p, r, scale);
             const facing = f.out.x * lx + f.out.y * ly;

@@ -75,8 +75,8 @@ dialog_detail: f32 = 0.1,
 /// refracts what is behind it, 0 (none) to 1; 0.5 is as designed.
 dialog_refraction: f32 = 0.5,
 
-/// How the interface moves, 0 to 1: 0 is off (nothing animates), low is plain even motion, 0.5 is
-/// minimal (a slight bounce, glass with a bevelled edge), 1 is playful (a soft spring from rest).
+/// How the interface moves, 0 to 1: 0 is off (nothing animates), up to 0.5 (minimal) plain even
+/// motion, toward 1 (playful) an overshoot past the target and back, arriving on time throughout.
 /// Published each frame through `core.motion`, which every animation reads.
 motion: f32 = core.motion.default_level,
 

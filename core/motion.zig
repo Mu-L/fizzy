@@ -6,16 +6,20 @@
 //!   * **0, off** — nothing animates. dvui's own animations end the frame they start
 //!     (`dvui.reduce_motion`), and everything drawn here should jump straight to where it is
 //!     going (`off`). A system asking for reduced motion puts the app here whatever the setting.
-//!   * **just above 0** — motion, but plain: linear, constant speed, nothing overshoots.
-//!   * **0.5, minimal** — the app's clean character: things arriving slide in with a smooth,
-//!     slight bounce, things leaving draw back a touch before they go, moves decelerate. Frosted
-//!     glass has a bevelled edge that refracts and catches the light (`liquid`).
-//!   * **1, playful** — very smooth and fluid: arrivals start from rest and glide in on a soft
-//!     spring, landing with the barest overshoot. Eased, never wobbling.
+//!   * **up to 0.5, minimal** — plain motion: linear, constant speed, nothing overshoots.
+//!   * **0.5 to 1, playful** — things carry on past where they are going and settle back, more
+//!     the further up: at 1 about 12% past. Frosted glass has a refracting edge from minimal on
+//!     (`liquid`).
 //!
-//! Between those points everything is a blend, so the slider is a slider — of *character*, not
-//! speed. **Speed** is its own setting: a window from half as fast to twice as fast, which every
-//! duration passes through (`duration`) and which never stops motion outright — that is off's job.
+//! **Every level arrives on time.** Whatever the level, a motion reaches its target at the
+//! duration it was given (divided by the speed setting). An overshoot is not squeezed into that
+//! time — a curve that arrives early to leave room for its swing reads as faster, and the slider
+//! was changing speed where it should only change character — it is added after it:
+//! `duration` stretches every animation by the share the swing takes at this level (`stretch`),
+//! the curves arrive at the old end of it, and fades hold still for the rest. So the slider
+//! changes how a motion ends, never how long it takes to get there; how long is the **speed**
+//! setting's, a window from half as fast to twice as fast which never stops motion outright —
+//! that is off's job.
 //!
 //! **Ask by intent, not by curve.** A call site says what the motion *is* — something arriving
 //! (`enter`), leaving (`exit`), moving to a new place (`settle`), or fading (`fade`) — and gets the
@@ -96,91 +100,79 @@ pub fn liquid() f32 {
     return std.math.clamp(level() * 2, 0, 1);
 }
 
-/// A duration in microseconds as the user wants it: at their speed, and a single microsecond
-/// (done at once) when motion is off. The level changes how a motion is shaped, never how long
-/// it takes; the speed is what changes that. Pass every duration an animation runs for through
-/// this.
+/// A duration in microseconds as the user wants it: at their speed, stretched to leave room after
+/// the arrival for this level's overshoot (`stretch`), and a single microsecond (done at once)
+/// when motion is off. Pass every duration an animation runs for through this, paired with one of
+/// the curves below — they arrive at the unstretched duration.
 pub fn duration(us: i32) i32 {
     if (off()) return 1;
-    return @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(us)) / rate())));
+    return @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(us)) * stretch() / rate())));
 }
 
 /// The same in milliseconds, for animations stepped by hand: 0 when off.
 pub fn durationMs(ms: f32) f32 {
-    return if (off()) 0 else ms / rate();
+    return if (off()) 0 else ms * stretch() / rate();
+}
+
+/// How much longer than its arrival an animation runs at this level, for the overshoot to swing
+/// and settle in: 1 up to minimal, rising to 1 / (1 - `swing_max`) at playful.
+pub fn stretch() f32 {
+    return 1 / arrivalAt(level());
+}
+
+/// The share of an animation its overshoot takes at playful.
+pub const swing_max: f32 = 0.4;
+
+/// When, as a share of an animation at level `lv` (stretched by `stretch`), its curves arrive.
+pub fn arrivalAt(lv: f32) f32 {
+    return 1 - swing_max * std.math.clamp((lv - 0.5) * 2, 0, 1);
 }
 
 // ── Curves by intent ────────────────────────────────────────────────────────────────────────────
 
-/// Something arriving — opening, appearing, growing into place. Linear at the plain end, a smooth
-/// slight bounce at minimal, a soft spring from rest at playful.
+/// Something arriving — opening, appearing, growing into place: at constant speed to its target,
+/// then, above minimal, carrying on past it and settling back.
 pub fn enter(t: f32) f32 {
     return enterAt(level(), t);
 }
 
-/// Something leaving — closing, shrinking away. `enter` run backwards: at minimal it draws back
-/// a touch before it goes.
+/// Something leaving — closing, shrinking away. `enter` run backwards: above minimal it draws
+/// back first, then leaves at constant speed, taking exactly its duration to go.
 pub fn exit(t: f32) f32 {
     return 1 - enterAt(level(), 1 - t);
 }
 
-/// Something moving to a new place or size — a slide, a resize, a reorder. Linear at the plain
-/// end, a clean deceleration at minimal, a soft spring with the barest overshoot at playful.
+/// Something moving to a new place or size — a slide, a resize, a reorder. The same motion as
+/// `enter`: every kind of motion arrives on the same clock.
 pub fn settle(t: f32) f32 {
     return settleAt(level(), t);
 }
 
-/// Opacity. Never overshoots at any level: linear at the plain end, eased out from minimal on.
+/// Opacity: linear, arriving when everything else does and holding while an overshoot swings.
+/// Never past 1 — a fade has nowhere to overshoot to.
 pub fn fade(t: f32) f32 {
-    const u = clamp01(t);
-    return lerp(u, outCubic(u), std.math.clamp(level() * 2, 0, 1));
+    return clamp01(t / arrivalAt(level()));
 }
 
-/// `enter` at a given level, for a call site (or a test) that has its own.
+/// `enter` at a given level, for a call site (or a test) that has its own. Linear to the target
+/// at the arrival share, then a swing that leaves with the approach's own speed — so there is no
+/// kink as it passes — rises, and comes back to rest exactly at the end.
 pub fn enterAt(lv: f32, t: f32) f32 {
     const u = clamp01(t);
     if (u >= 1) return 1;
-    if (lv <= 0.5) return lerp(u, outBack(u, minimal_back), lv * 2);
-    return lerp(outBack(u, minimal_back), spring(u, 0.65), (lv - 0.5) * 2);
+    const a = arrivalAt(lv);
+    if (u <= a) return u / a;
+    const swing = 1 - a;
+    const x = (u - a) / swing;
+    // y = 1 + B·sin(πx)·(1 − x): leaves 1 with slope B·π/swing, which is the approach's 1/a, and
+    // lands back on 1 at rest.
+    const b = swing / (std.math.pi * a);
+    return 1 + b * @sin(std.math.pi * x) * (1 - x);
 }
 
 /// `settle` at a given level.
 pub fn settleAt(lv: f32, t: f32) f32 {
-    const u = clamp01(t);
-    if (u >= 1) return 1;
-    if (lv <= 0.5) return lerp(u, outCubic(u), lv * 2);
-    return lerp(outCubic(u), spring(u, 0.75), (lv - 0.5) * 2);
-}
-
-/// Minimal's arrival: an out-back this strong overshoots by about 5% — a bounce you see, not
-/// one you notice.
-const minimal_back: f32 = 1.2;
-
-fn outBack(t: f32, c1: f32) f32 {
-    const c3 = c1 + 1;
-    const v = t - 1;
-    return 1 + c3 * v * v * v + c1 * v * v;
-}
-
-fn outCubic(t: f32) f32 {
-    const v = 1 - t;
-    return 1 - v * v * v;
-}
-
-/// A damped spring let go from rest, with damping ratio `zeta`: it starts slowly — no jump at
-/// the first frame, which is what reads as fluid — swings a little past 1 (about 7% at 0.65, 3%
-/// at 0.75) and settles, landing exactly on 1 at t = 1.
-fn spring(t: f32, zeta: f32) f32 {
-    // Stiff enough to have settled by the end: the envelope is down to e^-4.5 at t = 1.
-    const omega = 4.5 / zeta;
-    const wd = omega * @sqrt(1 - zeta * zeta);
-    const x = struct {
-        fn at(u: f32, z: f32, w: f32, d: f32) f32 {
-            return 1 - @exp(-z * w * u) * (@cos(d * u) + (z * w / d) * @sin(d * u));
-        }
-    }.at;
-    // What is left of the swing at t = 1 is spread over the run, so it lands exactly.
-    return x(t, zeta, omega, wd) + t * (1 - x(1, zeta, omega, wd));
+    return enterAt(lv, t);
 }
 
 fn lerp(a: f32, b: f32, k: f32) f32 {

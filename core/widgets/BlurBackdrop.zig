@@ -903,11 +903,16 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
     backdrop.detail = pane.detail;
 
     const now = dvui.currentWindow().frame_time_ns;
+    // The glass's edge shows what lies just beyond it (`liquid_glass`), so the capture reaches
+    // that far past the pane; flat glass needs none.
+    const lens = motion.liquid() * liquid_glass.blurRamp(pane.radius) * liquid_glass.sizeRamp(rect, scale);
+    const margin = liquid_glass.margin(.{ .lens = lens, .refraction = pane.refraction }, scale);
+    const captured = rect.insetAll(-margin);
     // `init` takes a rect in *window* coordinates.
-    const nat = dvui.windowRectScale().rectFromPhysical(rect);
+    const nat = dvui.windowRectScale().rectFromPhysical(captured);
     // A witness that changes with the geometry and, coarsely, with time.
     const tick: i128 = if (pane.refresh_ms == 0) now else @divTrunc(now, @as(i128, pane.refresh_ms) * std.time.ns_per_ms);
-    backdrop.init(nat, .{ rect, tick });
+    backdrop.init(nat, .{ captured, tick });
 
     job.* = .{
         .backdrop = backdrop,
@@ -918,7 +923,7 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
         .mix = std.math.clamp(pane.mix, 0, 1),
         .lift = std.math.clamp(pane.lift, 0, 1),
         // The edge comes in with the blur, so a barely-frosted pane has barely an edge.
-        .lens = motion.liquid() * liquid_glass.blurRamp(pane.radius) * liquid_glass.sizeRamp(rect, scale),
+        .lens = lens,
         .refraction = pane.refraction,
     };
     dvui.deferRender(job, FrostJob.draw);
