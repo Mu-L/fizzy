@@ -47,6 +47,9 @@ grouping_id_counter: u64 = 0,
 /// The tab being dragged this frame, by surface id, for the pane it lands in. Borrowed from the
 /// registry entry, which outlives a drag.
 dragging_surface: ?[]const u8 = null,
+/// Physical width of the tab handed to the app's view drag, when it was lifted off its strip:
+/// the gap a strip opens for it when it is carried back over one.
+carried_tab_w: f32 = 0,
 tab_drag_from_tree_path: ?[]u8 = null,
 file_tree_data_id: ?dvui.Id = null,
 /// Branch id of the last root the file tree opened by default. A new root starts expanded once;

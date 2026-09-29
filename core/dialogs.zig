@@ -163,6 +163,30 @@ pub fn frostPaneKept(id: dvui.Id, rect: dvui.Rect.Physical, corners: dvui.Corner
     return true;
 }
 
+/// Something carried under the pointer — a tab being dragged, a view's card — as glass: frosted
+/// over whatever it passes (a slot it would drop into shows through, blurred), rounded like the
+/// app's cards (a capsule on anything tab-tall), its shadow a ring round it. `r` physical at
+/// `scale`; `id` keys the frost. One look for a carried thing wherever it is carried: along a
+/// tab strip and over the places alike.
+pub fn carriedGlass(id: dvui.Id, r: dvui.Rect.Physical, scale: f32) void {
+    const corners = rounding.round(rounding.card);
+    if (!frostPane(id, r, corners, scale)) {
+        r.fill(corners.scale(scale, dvui.CornerRect.Physical), .{ .color = .{ .color = dialogFill() }, .fade = 1 });
+    }
+    glassShadow(r, corners, scale, surfaceShadow(), 1);
+}
+
+/// Where a carried thing would go in among others — a tab strip's open slot: a rounded fill in
+/// the highlight colour, a little inside `r` (physical, at `scale`).
+pub fn dropSlot(r: dvui.Rect.Physical, scale: f32) void {
+    const slot = r.insetAll(2 * scale);
+    if (slot.w < 1 or slot.h < 1) return;
+    const radius = @min(rounding.scaled(rounding.small) * scale, @min(slot.w, slot.h) / 2);
+    slot.fill(.round(radius), .{ .color = .{ .color = dvui.themeGet().color(.highlight, .fill).opacity(drop_slot_alpha) }, .fade = 1 });
+}
+/// How much of the highlight a drop slot is: there without shouting over the tabs beside it.
+const drop_slot_alpha: f32 = 0.55;
+
 // ---- one floating surface, everywhere ---------------------------------------------------------
 //
 // A dialog, the command palette, the account flyout, a menu dropdown and a store card's hover

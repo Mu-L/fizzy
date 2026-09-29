@@ -610,6 +610,14 @@ gets the same. Two pieces let a plugin take part:
   `.zone = .center, .on_chooser = true` with `.point` — where along the strip, so you can insert
   it between your tabs (the region it came out of included: back on its own strip, it is a
   reorder). It returns true while a carried view is over the strip — show where it would go in.
+  `host.viewDragSurface()` names the surface being carried: leave its tab off your strips while
+  it is in the hand, as a reorder leaves the tab it lifts.
+- `host.offerInterior(rect)`, from a surface's draw, says where its content is inside chrome of
+  its own (pixi: the canvas inside its rulers). The place it is drawn in covers only that with its
+  drop zones; `region.interior()` hands the same rect back for zones a plugin draws itself (the
+  workbench's file drops).
+- The look is shared (`core.dialogs`): a carried thing is `carriedGlass` — frosted, rounded, a
+  ring shadow — and where it would go in among others is a `dropSlot`, seen blurred through it.
 
 ### 3.2 The `Plugin` vtable — the universal editor protocol
 

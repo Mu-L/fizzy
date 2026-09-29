@@ -850,6 +850,10 @@ fn persistExtent(self: *Layout, opts: InitOptions, id: dvui.Id, chosen: f32, sho
 /// tab strip inside a sub-region lists what that sub-region accepts and not what its kind accepts
 /// everywhere in the app.
 fn drawContents(self: *Layout, opts: InitOptions, keywords: []const []const u8) !dvui.App.Result {
+    // The place a surface drawn from here is in, for its `Host.offerInterior`.
+    const prev_place = self.drawing_place;
+    if (opts.name.len > 0) self.drawing_place = opts.name;
+    defer self.drawing_place = prev_place;
     if (opts.content) |content| return content.draw(content.ctx, self, keywords);
     const shows = if (opts.name.len > 0) self.state.showsOf(opts.name, opts.shows) else opts.shows;
     const place: Region = .{

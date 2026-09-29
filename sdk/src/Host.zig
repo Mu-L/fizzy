@@ -462,6 +462,14 @@ pub const Region = struct {
         return if (self.host.fizzy_api) |a| a.offerRegionChooser(self.token, bounds) else false;
     }
 
+    /// This region's content this frame: what the surface drawn in it offered as its interior
+    /// (`Host.offerInterior`), less its own chooser — the part the app's drop zones cover, for
+    /// drop zones of your own over the same part. Null when nothing narrowed it: the region is
+    /// its content.
+    pub fn interior(self: Region) ?dvui.Rect.Physical {
+        return if (self.host.fizzy_api) |a| a.regionInterior(self.token) else null;
+    }
+
     pub fn deinit(self: Region) void {
         if (self.host.fizzy_api) |a| a.endRegion(self.token);
     }
@@ -485,6 +493,20 @@ pub fn region(self: *Host, spec: RegionSpec) ?Region {
 /// Start the app's view drag for surface `id`, from `from` — see `EditorAPI.beginViewDrag`.
 pub fn beginViewDrag(self: *Host, id: []const u8, from: dvui.Rect.Physical) void {
     if (self.fizzy_api) |a| a.beginViewDrag(id, from);
+}
+
+/// From a surface's draw: where its content is, inside whatever chrome it draws for itself — a
+/// canvas inside its rulers. While a view is carried, the drop zones of the place the surface is
+/// drawn in cover only that, so they line up with what the user sees as the inside. Call it each
+/// frame the surface draws; outside a drag it costs nothing.
+pub fn offerInterior(self: *Host, bounds: dvui.Rect.Physical) void {
+    if (self.fizzy_api) |a| a.offerInterior(bounds);
+}
+
+/// The id of the surface the app's view drag is carrying, or null. A tab strip leaves that tab
+/// out while it is in the hand.
+pub fn viewDragSurface(self: *Host) ?[]const u8 {
+    return if (self.fizzy_api) |a| a.viewDragSurface() else null;
 }
 
 /// Set what the region named `region_name` shows — the same list the picker writes; `null` hands

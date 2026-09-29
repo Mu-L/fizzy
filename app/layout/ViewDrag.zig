@@ -67,6 +67,13 @@ offer_count: usize = 0,
 last_offers: [max_offers]Offer = undefined,
 last_offer_count: usize = 0,
 offer_frame: i128 = 0,
+/// Where surfaces said their content is (`offerInterior`), by the place they are drawn in: this
+/// frame's, and last frame's for a place asked about before its surface has drawn.
+interiors: [max_offers]Offer = undefined,
+interior_count: usize = 0,
+last_interiors: [max_offers]Offer = undefined,
+last_interior_count: usize = 0,
+interior_frame: i128 = 0,
 
 /// A chooser a carried view is over: a place's tab strip, a rail. Chrome, not content — the
 /// place's drop zones and the card's preview stay off it (`interiorBounds`, `drawFloat`).
@@ -126,6 +133,25 @@ pub fn offerChooser(l: *Layout, name: []const u8, bounds: dvui.Rect.Physical, in
     if (d.offer_count == max_offers) return;
     d.offers[d.offer_count] = .{ .name = l.state.internName(l.gpa, name), .bounds = bounds, .into = into };
     d.offer_count += 1;
+}
+
+/// The surface drawn in place `name` says its content is at `bounds` — inside chrome of its own,
+/// a canvas inside its rulers (`Host.offerInterior`). The place's zones cover only that.
+///
+/// Kept with or without a view drag on: a plugin's own drops (a file dragged from the tree)
+/// read the same interior through `Host.Region.interior`.
+pub fn offerInterior(l: *Layout, name: []const u8, bounds: dvui.Rect.Physical) void {
+    const d = &l.state.view_drag;
+    const now = dvui.currentWindow().frame_time_ns;
+    if (d.interior_frame != now) {
+        d.last_interiors = d.interiors;
+        d.last_interior_count = d.interior_count;
+        d.interior_count = 0;
+        d.interior_frame = now;
+    }
+    if (d.interior_count == max_offers) return;
+    d.interiors[d.interior_count] = .{ .name = l.state.internName(l.gpa, name), .bounds = bounds };
+    d.interior_count += 1;
 }
 
 /// The chooser under `p`, if one offered itself this frame or the last.
@@ -298,7 +324,17 @@ pub fn interiorBounds(state: *const Layout.State, name: []const u8) ?dvui.Rect.P
             b.h = i.y - b.y;
         }
     };
-    return if (b.h >= 1 and b.w >= 1) b else whole;
+    if (b.h < 1 or b.w < 1) b = whole;
+    // And to the content its surface says it has, inside chrome of its own (`offerInterior`) —
+    // this frame's word if it has drawn yet, else last frame's.
+    const own = if (d.interior_frame == now) d.interiors[0..d.interior_count] else d.last_interiors[0..d.last_interior_count];
+    for (own) |o| {
+        if (!std.mem.eql(u8, o.name, name)) continue;
+        const i = b.intersect(o.bounds);
+        if (i.w >= 1 and i.h >= 1) b = i;
+        break;
+    }
+    return b;
 }
 
 /// The place a release at `mouse` would land on, for a view lifted from
@@ -565,18 +601,18 @@ pub fn drawFloat(l: *Layout) void {
     var fw: dvui.FloatingWidget = undefined;
     fw.init(@src(), .{ .mouse_events = false }, .{
         .rect = .{ .x = nat.x, .y = nat.y, .w = nat.w, .h = nat.h },
-        .padding = .all(card_padding),
+        // The photograph sits inset in its glass; a tab is the glass.
+        .padding = if (show_photo) .all(card_padding) else .all(0),
         .corners = corners,
         .background = false,
         .border = .all(0),
     });
     defer fw.deinit();
     {
+        // The carried look (`core.dialogs.carriedGlass`), the same a tab has while it is dragged
+        // along its strip.
         const brs = fw.data().borderRectScale();
-        if (!core.dialogs.frostPane(fw.data().id, brs.r, corners, brs.s)) {
-            brs.r.fill(corners.scale(brs.s, dvui.CornerRect.Physical), .{ .color = .{ .color = core.dialogs.dialogFill() }, .fade = 1 });
-        }
-        core.dialogs.glassShadow(brs.r, corners, brs.s, core.dialogs.surfaceShadow(), 1);
+        core.dialogs.carriedGlass(fw.data().id, brs.r, brs.s);
     }
 
     if (if (show_photo) d.texture else null) |tex| {
@@ -613,7 +649,7 @@ fn draggedDoc(l: *Layout, d: ViewDrag) ?struct { path: []const u8, dirty: bool }
     return .{ .path = path, .dirty = if (doc) |dh| dh.owner.isDirty(dh) else false };
 }
 
-/// A card with no photograph: a pill round the tab's face.
+/// A card with no photograph: the tab's face in glass, tab-sized.
 fn pillSize(l: *Layout, d: ViewDrag, title: []const u8, scale: f32) dvui.Size.Physical {
     const text = dvui.Font.theme(.body).textSize(title);
     const doc = draggedDoc(l, d);
@@ -623,7 +659,9 @@ fn pillSize(l: *Layout, d: ViewDrag, title: []const u8, scale: f32) dvui.Size.Ph
         w += face_gap + face_dot;
     };
     const h = @max(face_icon, text.h) + 2 * face_pad_y;
-    return .{ .w = (w + 2 * card_padding) * scale, .h = (h + 2 * card_padding) * scale };
+    // Tab-sized, with no card padding round it: the same as a tab carried along its strip, which
+    // is the tab itself in glass.
+    return .{ .w = w * scale, .h = h * scale };
 }
 
 /// What a tab shows, centred on the card: the file's icon, its title, the dirty dot.
