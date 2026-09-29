@@ -19,6 +19,7 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const motion = @import("../motion.zig");
+const anim = @import("../anim.zig");
 const icon_tex = @import("../gfx/icon.zig");
 
 const Options = dvui.Options;
@@ -157,8 +158,25 @@ const StackFrame = struct {
     visited_second: bool = false,
 };
 
-/// How long a split takes to slide open, shut, or to a new settled ratio.
-const ease_us: i32 = 220_000;
+/// How long a split takes to slide, as written (`motion.duration`): the panes' one timing
+/// (`core.anim.slide`), longer growing than shrinking, which a sidebar's slide and a region's
+/// split share — a pane tree on a timing of its own (220ms, back when curves arrived at the end
+/// of theirs) slid open at a third of the speed of everything beside it once every curve came to
+/// arrive at 40% of its duration.
+fn easeUs(from: f32, to: f32, sp: Layout.Node.Split) i32 {
+    return anim.slide.ms(growing(sp, from, to)) * std.time.us_per_ms;
+}
+
+/// Whether sliding `sp` from `from` to `to` makes a child bigger: the new child of a split
+/// opening, or a fitted child growing to fit.
+fn growing(sp: Layout.Node.Split, from: f32, to: f32) bool {
+    if (sp.closing != null) return false;
+    if (sp.fit) |fit| return switch (fit.child) {
+        .first => to > from,
+        .second => to < from,
+    };
+    return false;
+}
 
 const DropTarget = union(enum) {
     tab: struct { leaf: Layout.NodeIndex, index: usize },
@@ -504,7 +522,7 @@ fn leaveSplit(self: *Dockspace, frame: *StackFrame) void {
         self.animating = true;
         if (@abs(a.end_val - target) > 0.0005) {
             // Retargeted mid-slide (a leaf emptied while opening): continue from where it is.
-            dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = motion.duration(ease_us), .easing = slideEasing(sp, frame.shown.*, target) });
+            dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = motion.duration(easeUs(frame.shown.*, target, sp)), .easing = slideEasing(sp, frame.shown.*, target) });
         } else {
             // Clamped: a spring's overshoot must not carry a pane past the split's ends, nor a
             // fitted child past the most it may take (`fit.max`) — the bounce happens inside
@@ -523,7 +541,7 @@ fn leaveSplit(self: *Dockspace, frame: *StackFrame) void {
         }
         dvui.refresh(null, @src(), self.data().id);
     } else if (@abs(frame.shown.* - target) > 0.0005) {
-        dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = motion.duration(ease_us), .easing = slideEasing(sp, frame.shown.*, target) });
+        dvui.animation(self.data().id, key, .{ .start_val = frame.shown.*, .end_val = target, .end_time = motion.duration(easeUs(frame.shown.*, target, sp)), .easing = slideEasing(sp, frame.shown.*, target) });
         dvui.refresh(null, @src(), self.data().id);
     } else if (sp.closing != null) {
         self.finishClose(frame.node);
@@ -536,13 +554,7 @@ fn leaveSplit(self: *Dockspace, frame: *StackFrame) void {
 /// eases out with no overshoot: a shrink that went past its mark would briefly hide what it is
 /// shrinking to show.
 fn slideEasing(sp: Layout.Node.Split, from: f32, to: f32) *const fn (f32) f32 {
-    const fit = sp.fit orelse return motion.settle;
-    if (sp.closing != null) return motion.settle;
-    const growing = switch (fit.child) {
-        .first => to > from,
-        .second => to < from,
-    };
-    return if (growing) motion.enter else motion.settle;
+    return if (growing(sp, from, to)) motion.enter else motion.settle;
 }
 
 /// The split has shut over `going`: collapse it. State is keyed by identity, so the kept child's
@@ -587,7 +599,8 @@ fn enterNode(self: *Dockspace, node: Layout.NodeIndex, cell: ?Rect) ?Panel {
                 if (sp.opening) |c| {
                     ptr.* = shutRatio(c);
                     layout.nodes.items[node].split.opening = null;
-                    dvui.animation(self.data().id, self.animKey(node), .{ .start_val = ptr.*, .end_val = target, .end_time = motion.duration(ease_us), .easing = motion.settle });
+                    // A new pane opening: the panes' opening slide, as a sidebar opens.
+                    dvui.animation(self.data().id, self.animKey(node), .{ .start_val = ptr.*, .end_val = target, .end_time = motion.duration(anim.slide.ms(true) * std.time.us_per_ms), .easing = motion.settle });
                     dvui.refresh(null, @src(), self.data().id);
                 }
                 break :blk ptr;

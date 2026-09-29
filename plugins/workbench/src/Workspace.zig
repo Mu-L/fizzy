@@ -371,9 +371,20 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
             const err_accent = dvui.themeGet().color(.err, .fill);
             const close_hovered = tab_close_button.hovered();
 
-            if (show_close_visible and (tab_hovered or close_hovered)) {
+            // The dialog's close button (`core.dialogs.windowHeaderCloseButtonOptions`), but
+            // only while the tab is hovered: a red circle on its drop shadow with the X in a
+            // deeper red. At rest a tab shows just the X — a row of red circles along the strip
+            // would shout over the titles.
+            const lit = show_close_visible and (tab_hovered or close_hovered);
+            if (lit) {
                 const rs = tab_close_button.data().borderRectScale();
-                rs.r.fill(.round(core.corners.scaled(8)), .{ .color = .{ .color = err_accent } });
+                const circle: dvui.CornerRect.Physical = .round(@min(rs.r.w, rs.r.h) / 2);
+                if (core.dialogs.windowHeaderCloseButtonOptions(.{}).box_shadow) |bs| {
+                    rs.r.insetAll(bs.shrink * rs.s).offsetPoint(bs.offset.scale(rs.s, dvui.Point.Physical))
+                        .fill(circle, .{ .color = .{ .color = bs.color.opacity(bs.alpha) }, .fade = bs.fade * rs.s });
+                }
+                const fill = if (close_hovered) dvui.themeGet().color(.err, .fill_hover) else err_accent;
+                rs.r.fill(circle, .{ .color = .{ .color = fill }, .fade = 1 });
             }
 
             if (dirty and !show_close_visible) {
@@ -389,8 +400,8 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
             } else {
                 const icon_color = if (!show_close_visible)
                     dvui.Color.transparent
-                else if (tab_hovered or close_hovered)
-                    dvui.Color.white
+                else if (lit)
+                    err_accent.lighten(if (dvui.themeGet().dark) -10 else 10)
                 else
                     dvui.themeGet().color(.window, .text);
                 core.icon.icon(@src(), "close", icons.tvg.lucide.x, .{

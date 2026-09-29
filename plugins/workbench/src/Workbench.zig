@@ -131,7 +131,12 @@ pub fn pane(self: *Workbench, grouping: u64) !*Workspace {
     if (!gop.found_existing) gop.value_ptr.* = Workspace.init(grouping);
     if (grouping > self.grouping_id_counter) self.grouping_id_counter = grouping;
     try self.seatPane(grouping);
-    return gop.value_ptr;
+    // Looked up again, not `gop.value_ptr`: seating a new pane goes through `paneBeside`, whose
+    // own `getOrPut` reserves room for one more entry before it finds this one — and growing
+    // moves every entry. The old pointer then named freed memory: "Open to the side" wrote the
+    // new tab through it into whichever pane the garbage said (the current document opened a
+    // second time beside itself), or crashed where the freed pages were unmapped.
+    return self.workspaces.getPtr(grouping) orelse error.NoSuchPane;
 }
 
 /// The tree leaf holding `grouping`'s pane, or null while it has none.
