@@ -3114,6 +3114,7 @@ pub fn reconcileExternalSettingsChange(editor: *Editor) void {
     editor.app.settings.dialog_blur = parsed.dialog_blur;
     editor.app.settings.dialog_lift = parsed.dialog_lift;
     editor.app.settings.dialog_detail = parsed.dialog_detail;
+    editor.app.settings.dialog_refraction = parsed.dialog_refraction;
     editor.app.settings.motion = parsed.motion;
     editor.app.settings.motion_speed = parsed.motion_speed;
     editor.app.settings.input_scheme = parsed.input_scheme;
@@ -3424,6 +3425,7 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             .chrome = .{ chrome.r, chrome.g, chrome.b, chrome.a },
             .has_chrome = true,
         });
+        fizzy.core.dialogs.publishRefraction(editor.app.settings.dialog_refraction);
     }
     // How things move this frame, for every animation here and in every plugin (`core.motion`).
     fizzy.core.motion.publish(editor.app.settings.motion, editor.app.settings.motion_speed, dvui.currentWindow().backend.prefersReducedMotion());

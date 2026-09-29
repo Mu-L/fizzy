@@ -71,9 +71,13 @@ dialog_lift: f32 = 0.3,
 /// How much of what is behind a dialog or the palette stays readable through its blur, 0 to 1.
 dialog_detail: f32 = 0.1,
 
+/// How far the bevelled edge of frosted glass — dialogs, menus, the palette, drop zones —
+/// refracts what is behind it, 0 (none) to 1; 0.5 is as designed.
+dialog_refraction: f32 = 0.5,
+
 /// How the interface moves, 0 to 1: 0 is off (nothing animates), low is plain even motion, 0.5 is
-/// minimal (a clean overshoot, glass with a lens at its edges), 1 is playful (springs, jiggle,
-/// ripples). Published each frame through `core.motion`, which every animation reads.
+/// minimal (a slight bounce, glass with a bevelled edge), 1 is playful (a soft spring from rest).
+/// Published each frame through `core.motion`, which every animation reads.
 motion: f32 = core.motion.default_level,
 
 /// How fast the interface moves, 0 (slow) to 1 (fast): half as fast to twice as fast as written,

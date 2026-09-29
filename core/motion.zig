@@ -6,13 +6,12 @@
 //!   * **0, off** — nothing animates. dvui's own animations end the frame they start
 //!     (`dvui.reduce_motion`), and everything drawn here should jump straight to where it is
 //!     going (`off`). A system asking for reduced motion puts the app here whatever the setting.
-//!   * **just above 0** — motion, but plain: linear, constant speed, nothing overshoots, nothing
-//!     ripples.
+//!   * **just above 0** — motion, but plain: linear, constant speed, nothing overshoots.
 //!   * **0.5, minimal** — the app's clean character: things arriving slide in with a smooth,
 //!     slight bounce, things leaving draw back a touch before they go, moves decelerate. Frosted
-//!     glass bends what it shows at its edges, the way a thick pane does. Nothing wobbles.
+//!     glass has a bevelled edge that refracts and catches the light (`liquid`).
 //!   * **1, playful** — very smooth and fluid: arrivals start from rest and glide in on a soft
-//!     spring, and glass ripples as it appears and as it is touched.
+//!     spring, landing with the barest overshoot. Eased, never wobbling.
 //!
 //! Between those points everything is a blend, so the slider is a slider — of *character*, not
 //! speed. **Speed** is its own setting: a window from half as fast to twice as fast, which every
@@ -22,8 +21,8 @@
 //! (`enter`), leaving (`exit`), moving to a new place (`settle`), or fading (`fade`) — and gets the
 //! curve the level gives that. They are plain `fn (f32) f32`, the shape `dvui.animation` takes, so
 //! they drop in wherever a `dvui.easing` function went; they read the level when evaluated.
-//! Effects that are not curves ask for an amount: `playful` for ripples and jiggle, `liquid`
-//! for the glass's refraction.
+//! Effects that are not curves ask for an amount: `liquid`, for how much frosted glass's bevel
+//! refracts and catches the light.
 //!
 //! **One value everywhere.** The host publishes the level into the shared dvui window each frame
 //! (`publish`); a plugin dylib's copy of this file reads it from there, the way it reads the
@@ -91,15 +90,8 @@ pub fn off() bool {
     return level() <= 0.001;
 }
 
-/// How much of the playful end is on: 0 up to minimal, rising to 1 at playful. Ripples, jiggle,
-/// anything that is there to delight rather than to explain, scales by this.
-pub fn playful() f32 {
-    return std.math.clamp((level() - 0.5) * 2, 0, 1);
-}
-
-/// How much frosted glass bends what it shows — the refraction at its edges: none at off,
-/// rising to all of it by minimal, and no more past it (playful adds ripples, not a thicker
-/// lens).
+/// How much frosted glass's bevelled edge refracts, clears and catches the light
+/// (`core.liquid_glass`): none at off, rising to all of it by minimal, and no more past it.
 pub fn liquid() f32 {
     return std.math.clamp(level() * 2, 0, 1);
 }

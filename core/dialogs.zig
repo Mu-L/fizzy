@@ -95,7 +95,26 @@ pub fn dialogFrost() ?widgets.FloatingWindowWidget.Frost {
         .mix = std.math.clamp(s.opacity, 0, 1),
         .lift = std.math.clamp(s.lift, 0, 1) * lift_max,
         .detail = std.math.clamp(s.detail, 0, 1),
+        .refraction = refraction(),
     };
+}
+
+/// Where the host records the dialog refraction setting — its own key beside the style, so a
+/// plugin built before it existed reads the style it knows and simply never asks for this.
+const refraction_key = "fizzy_dialog_refraction";
+
+/// Host only, each frame: the dialog refraction setting, 0 to 1 (0.5 as designed).
+pub fn publishRefraction(setting: f32) void {
+    const cw = dvui.currentWindow();
+    dvui.dataSet(null, cw.data().id, refraction_key, std.math.clamp(setting, 0, 1));
+}
+
+/// How far frosted glass's bevelled edge refracts, 0 (none) to 2: twice the setting, so its
+/// middle is the glass as designed.
+pub fn refraction() f32 {
+    if (dvui.current_window == null) return 1;
+    const cw = dvui.currentWindow();
+    return 2 * (dvui.dataGet(null, cw.data().id, refraction_key, f32) orelse 0.5);
 }
 
 /// How much white `Style.lift = 1` adds.

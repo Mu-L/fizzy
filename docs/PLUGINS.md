@@ -1199,9 +1199,10 @@ through `core.vfs.Mem` in a few dozen lines. The design and its remaining edges 
 
 The user picks how the app moves with one setting, **Motion**, from 0 to 1: 0 is off (nothing
 animates), low values are plain even motion, 0.5 — *minimal*, the default — overshoots a touch
-and settles and gives frosted glass a lens at its edges, and 1 — *playful* — springs, jiggles and
-ripples. A system request for reduced motion turns it off. The host publishes the level into the
-shared dvui window each frame, so a plugin's copy of `core` reads the same value, and sets dvui's
+and settles and gives frosted glass a bevelled edge, and 1 — *playful* — glides in on a soft
+spring from rest; nothing wobbles or ripples at any level. A second setting, **Motion speed**,
+runs every duration from half to twice as fast. A system request for reduced motion turns motion
+off. The host publishes both into the shared dvui window each frame, so a plugin's copy of `core` reads the same value, and sets dvui's
 own `reduce_motion` in the plugin's image too.
 
 A plugin that wants to move like the app asks `core.motion` by *intent* rather than naming a curve:
@@ -1219,8 +1220,7 @@ dvui.animation(id, "open", .{ .start_val = 0, .end_val = 1, .end_time = motion.d
 | `motion.fade` | opacity; never overshoots |
 | `motion.duration(us)` / `durationMs(ms)` | a duration at this level: zero when off |
 | `motion.off()` | jump straight to the end — for motion stepped by hand |
-| `motion.playful()` | 0…1: how much ripple, jiggle, anything there to delight |
-| `motion.liquid()` | 0…1: how much frosted glass bends (`core.liquid_glass`) |
+| `motion.liquid()` | 0…1: how much frosted glass's bevel refracts and catches light (`core.liquid_glass`) |
 
 The curves are plain `fn (f32) f32`, so they go wherever a `dvui.easing` function went. Frosted
 panes drawn through `BlurBackdrop.frostPane` (dialogs, menus, popovers) and the drop zones already

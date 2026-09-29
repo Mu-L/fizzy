@@ -168,13 +168,22 @@ pub const groups = [_]Group{
                 .draw = drawDialogLift,
             },
             .{
+                .label = "Dialog refraction",
+                .key = "dialog_refraction",
+                .description = "How far the bevelled edge of frosted glass — dialogs, menus, " ++
+                    "the command palette, drop zones — bends what is behind it. 0 is a flat " ++
+                    "edge; the middle is as designed.",
+                .keywords = "dialog palette glass frost refraction bevel edge lens liquid",
+                .draw = drawDialogRefraction,
+            },
+            .{
                 .label = "Motion",
                 .key = "motion",
                 .description = "How the interface moves. 0 is off — nothing animates. Low is " ++
-                    "plain, even motion; the middle, Minimal, overshoots a touch and settles " ++
-                    "and gives frosted glass a lens at its edges; toward Playful things spring, " ++
-                    "jiggle and ripple. A system request for reduced motion turns it off.",
-                .keywords = "animation motion reduce reduced accessibility bounce spring playful minimal ripple glass",
+                    "plain, even motion; the middle, Minimal, slides in with a slight bounce " ++
+                    "and gives frosted glass a bevelled edge; toward Playful arrivals glide in " ++
+                    "on a soft spring. A system request for reduced motion turns it off.",
+                .keywords = "animation motion reduce reduced accessibility bounce spring playful minimal glass bevel easing",
                 .draw = drawMotion,
             },
             .{
@@ -435,6 +444,18 @@ fn drawDialogDetail() void {
 fn drawDialogLift() void {
     if (dvui.sliderEntry(@src(), "{d:0.01}", .{
         .value = &fizzy.editor().app.settings.dialog_lift,
+        .interval = 0.01,
+        .max = 1.0,
+        .min = 0.0,
+    }, .{ .expand = .horizontal })) {
+        fizzy.editor().markSettingsDirty();
+        dvui.refresh(null, @src(), null);
+    }
+}
+
+fn drawDialogRefraction() void {
+    if (dvui.sliderEntry(@src(), "{d:0.01}", .{
+        .value = &fizzy.editor().app.settings.dialog_refraction,
         .interval = 0.01,
         .max = 1.0,
         .min = 0.0,

@@ -54,10 +54,6 @@ small: ?Texture = null,
 levels: [max_levels]?Texture.Target = @splat(null),
 /// True until the next `deinit` runs a real capture.
 dirty: bool = true,
-/// Fizzy addition: ripples to bend into the picture as it is copied, before it is blurred
-/// (`liquid_glass.Warp`). Set before `init` each frame; a live warp needs a capture every frame
-/// it runs, so the caller puts the frame time in its witness while it does.
-warp: liquid_glass.Warp = .{},
 /// Hash of the last `init`'s `rect` + `witness`, for auto-dirty.
 last_hash: u64 = 0,
 
@@ -265,11 +261,7 @@ fn deinitFromTarget(self: *BlurBackdrop) bool {
         if (!copy) step.clear();
         defer if (copy) tapsEnd(src, true);
         const uv: dvui.Rect = .{ .x = (r.x - off.x) / sw, .y = (r.y - off.y) / sh, .w = r.w / sw, .h = r.h / sh };
-        if (self.warp.live() and copy) {
-            // A ripple running: the copy is bent, so the blur that follows softens the bend.
-            // One tap, not the box average — the picture is moving under the wave anyway.
-            liquid_glass.drawWarped(src, .{ .x = off.x, .y = off.y }, r, dest, &self.warp);
-        } else if (shrink > 1 and copy) {
+        if (shrink > 1 and copy) {
             // The frame target samples `.nearest`, so a single tap at half size keeps one
             // pixel of every 2×2 block and drops the rest: a 1px edge (pixel-art outlines,
             // text) lands in or out of the copy as content moves under the frost by a pixel,
@@ -877,6 +869,9 @@ pub const Pane = struct {
     lift: f32 = 0,
     /// How much definition the frost keeps, 0…1 (`BlurBackdrop.detail`).
     detail: f32 = 0,
+    /// How far the pane's bevelled edge refracts what it shows, 0 (none) to 2
+    /// (`liquid_glass.Look.refraction`).
+    refraction: f32 = 1,
 };
 
 /// Fizzy addition: a frosted pane — what is under `rect`, blurred, composed with a tint and a
@@ -900,22 +895,11 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
     backdrop.radius_px = pane.radius;
     backdrop.detail = pane.detail;
 
-    // When the pane first came up: a playful pane settles like a drop of water as it opens,
-    // the ring running out to its rim, bent into the picture before the blur. Per id, so it
-    // lives exactly as long as the pane is drawn and a reopened one ripples anew.
     const now = dvui.currentWindow().frame_time_ns;
-    const born = dvui.dataGetPtrDefault(null, id, "_frost_born", i128, now);
-    const wave: liquid_glass.Wave = .{ .origin = rect.center(), .start_ns = born.*, .amount = motion.playful() };
-    backdrop.warp = .{ .now = now, .scale = scale };
-    backdrop.warp.addWave(wave);
-    backdrop.warp.addPane(rect);
-    if (wave.live(now)) dvui.refresh(null, @src(), id);
-
     // `init` takes a rect in *window* coordinates.
     const nat = dvui.windowRectScale().rectFromPhysical(rect);
-    // A witness that changes with the geometry and, coarsely, with time — every frame while a
-    // ripple is being bent into the picture.
-    const tick: i128 = if (pane.refresh_ms == 0 or backdrop.warp.live()) now else @divTrunc(now, @as(i128, pane.refresh_ms) * std.time.ns_per_ms);
+    // A witness that changes with the geometry and, coarsely, with time.
+    const tick: i128 = if (pane.refresh_ms == 0) now else @divTrunc(now, @as(i128, pane.refresh_ms) * std.time.ns_per_ms);
     backdrop.init(nat, .{ rect, tick });
 
     job.* = .{
@@ -927,8 +911,7 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
         .mix = std.math.clamp(pane.mix, 0, 1),
         .lift = std.math.clamp(pane.lift, 0, 1),
         .lens = motion.liquid(),
-        .wave = wave,
-        .now = now,
+        .refraction = pane.refraction,
     };
     dvui.deferRender(job, FrostJob.draw);
 }
@@ -943,11 +926,10 @@ const FrostJob = struct {
     tint: ?dvui.Color = null,
     mix: f32 = 0,
     lift: f32 = 0,
-    /// 0…1: how much the glass bends at its rim, and lights it (`motion.liquid`).
+    /// 0…1: how much the glass's bevel bends, clears and lights (`motion.liquid`).
     lens: f32 = 0,
-    /// The ripple it opened with (`motion.playful`).
-    wave: liquid_glass.Wave = .{},
-    now: i128 = 0,
+    /// How far the bevel refracts (`Pane.refraction`).
+    refraction: f32 = 1,
 
     fn draw(ctx: ?*anyopaque) void {
         const self: *FrostJob = @ptrCast(@alignCast(ctx orelse return));
@@ -957,19 +939,20 @@ const FrostJob = struct {
         self.backdrop.deinit();
         const weight: f32 = if (self.tint != null) 1 - self.mix else 1;
         self.drawFrost(weight);
-        if (self.tint) |tint| {
-            addTint(self.rect, self.corners, self.scale, tint, self.mix);
-            addTint(self.rect, self.corners, self.scale, .white, self.lift);
+        if (self.tint) |tint| addTint(self.rect, self.corners, self.scale, tint, self.mix);
+        // The lift and the bevel's light, in one pass after the tint so they stay white.
+        const lift: f32 = if (self.tint != null) self.lift else 0;
+        if (liquid_glass.bends(.{ .lens = self.lens })) {
+            if (whiteTexture()) |light| liquid_glass.drawLift(light, self.rect, self.finalCorners().tl.radius() * self.scale, self.scale, lift, self.lens);
+        } else if (lift > 0) {
+            addTint(self.rect, self.corners, self.scale, .white, lift);
         }
-        liquid_glass.drawRim(self.rect, self.finalCorners(), self.scale, 0.10 * self.lens);
     }
 
-    /// The frost at `weight` of itself: bent like glass when the motion level asks for it (a
-    /// lens at the rim, the ripple it opened with), a flat rect when nothing bends.
+    /// The frost at `weight` of itself: through a bevelled edge when the motion level asks for
+    /// it (`liquid_glass`), a flat rect when it does not.
     fn drawFrost(self: *const FrostJob, weight: f32) void {
-        const waves = [_]liquid_glass.Wave{self.wave};
-        // The ripple was bent into the picture before the blur (`warp`); here it only shades.
-        const look: liquid_glass.Look = .{ .lens = self.lens, .waves = &waves, .now = self.now, .waves_bend = false, .sharp = self.backdrop.sharpTexture() };
+        const look: liquid_glass.Look = .{ .lens = self.lens, .refraction = self.refraction, .sharp = self.backdrop.sharpTexture() };
         const tex = self.backdrop.small orelse return;
         if (!liquid_glass.bends(look)) {
             self.backdrop.drawRoundedScaled(self.corners, self.scale, weight);
@@ -1012,6 +995,12 @@ pub fn addTint(rect: Rect.Physical, corners: dvui.CornerRect, scale: f32, tint: 
     var c = tint;
     c.a = @intFromFloat(@round(@as(f32, @floatFromInt(tint.a)) * w));
     dvui.renderTexture(white, .{ .r = rect, .s = scale }, .{ .corners = corners, .colormod = c }) catch {};
+}
+
+/// Fizzy addition: the white texture tints are added with — anything drawn with it adds its
+/// vertex colour onto what is there. Null where the backend cannot blend that way.
+pub fn additiveWhite() ?Texture {
+    return whiteTexture();
 }
 
 var white_tex: ?Texture = null;

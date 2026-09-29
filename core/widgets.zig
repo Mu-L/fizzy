@@ -248,7 +248,7 @@ pub fn contextMenu(src: std.builtin.SourceLocation, at: dvui.Point.Natural, opts
 /// `BlurBackdrop.Pane`. Null when the style has the blur off; the panel's fill then stands alone.
 pub fn menuFrost() ?BlurBackdrop.Pane {
     const f = dialogs.dialogFrost() orelse return null;
-    return .{ .radius = f.radius, .refresh_ms = f.refresh_ms, .tint = f.tint, .mix = f.mix, .lift = f.lift, .detail = f.detail };
+    return .{ .radius = f.radius, .refresh_ms = f.refresh_ms, .tint = f.tint, .mix = f.mix, .lift = f.lift, .detail = f.detail, .refraction = f.refraction };
 }
 
 /// A menu popup's surface: `core.dialogs`' fill, corners, padding and shadow, no border — the

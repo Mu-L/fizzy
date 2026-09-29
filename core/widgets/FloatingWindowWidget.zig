@@ -92,6 +92,8 @@ pub const Frost = struct {
     lift: f32 = 0,
     /// How much of what is behind stays readable through the blur, 0…1 (`BlurBackdrop.detail`).
     detail: f32 = 0,
+    /// How far the glass's bevelled edge refracts, 0 (none) to 2 (`BlurBackdrop.Pane.refraction`).
+    refraction: f32 = 1,
 };
 
 pub const InitOptions = struct {
@@ -601,6 +603,7 @@ fn drawFrost(self: *FloatingWindowWidget, frost: Frost) void {
         .mix = frost.mix,
         .lift = frost.lift,
         .detail = frost.detail,
+        .refraction = frost.refraction,
     });
 }
 

@@ -9,10 +9,10 @@
 //!
 //! **The look is liquid glass.** A zone is a pane of the dialogs' own frost over what is under
 //! it — the app's one surface rounding, a gap around each, a faint icon saying what it does —
-//! drawn as a mesh over one blur of the place, so the glass can bend what it shows: a lens band
-//! at its rim, and ripples running through it as it arrives and as it lights under the pointer.
-//! An edge zone grows in from its edge and the middle from its centre, on a bounce, as its frost
-//! comes in; leaving, the same backwards and quicker. What is underneath is the caller's: this
+//! drawn through `core.liquid_glass` over one blur of the place, so each has a bevelled edge
+//! that refracts, clears and catches the light. An edge zone grows in from its edge and the
+//! middle from its centre, eased at the app's motion level, as its frost comes in; leaving, the
+//! same backwards and quicker. What is underneath is the caller's: this
 //! only draws the glass over it.
 //!
 //! **Every point of a place is some zone.** The gaps between the rects are there to be seen, not
@@ -27,7 +27,6 @@ const icons = @import("icons");
 const icon_tex = @import("../gfx/icon.zig");
 const motion = @import("../motion.zig");
 const liquid_glass = @import("../gfx/liquid_glass.zig");
-const Wave = liquid_glass.Wave;
 
 pub const Side = enum { left, right, top, bottom };
 
@@ -139,11 +138,6 @@ const State = struct {
     shown: f32 = 0,
     /// 0…1: how lit — the zone under the pointer.
     lit: [all.len]f32 = @splat(0),
-    /// When the zones last began to come in: their arrival ripple runs from here.
-    born_ns: i128 = 0,
-    /// The ripple a zone gives when it lights, from where the pointer was.
-    pulse_ns: [all.len]i128 = @splat(0),
-    pulse_at: [all.len]dvui.Point.Physical = @splat(.{}),
     last_ns: i128 = 0,
 };
 
@@ -181,38 +175,19 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
     st.last_ns = now;
 
     const want_shown: f32 = if (look.target) 1 else 0;
-    if (st.shown == 0 and want_shown > 0) st.born_ns = now;
     st.shown = step(st.shown, want_shown, dt_ms, motion.durationMs(if (want_shown > st.shown) appear_ms else vanish_ms));
     var moving = st.shown != want_shown;
-    const mouse = dvui.currentWindow().mouse_pt;
     for (all, 0..) |z, i| {
         const want_lit: f32 = if (look.target) (if (look.hovered) |h| (if (h.eql(z)) 1 else 0) else 0) else 0;
-        // Lighting under the pointer is a touch on the glass: it ripples from there.
-        if (want_lit == 1 and st.lit[i] < 0.5 and now - st.pulse_ns[i] > 120 * std.time.ns_per_ms) {
-            st.pulse_ns[i] = now;
-            st.pulse_at[i] = mouse;
-        }
         st.lit[i] = approach(st.lit[i], want_lit, dt_ms, motion.durationMs(light_ms));
         if (st.lit[i] != want_lit) moving = true;
     }
 
     const g = frost(st.shown);
-    const ripple = motion.playful();
     if (g > 0.01) {
         const e = grow(st.shown);
         var panes: [all.len]Pane = undefined;
-        for (all, 0..) |z, i| {
-            const full = r.of(z);
-            panes[i] = .{
-                .r = entering(full, z, e),
-                .lit = st.lit[i],
-                .waves = .{
-                    .{ .origin = arrivalOrigin(full, z), .start_ns = st.born_ns, .amount = ripple },
-                    .{ .origin = st.pulse_at[i], .start_ns = st.pulse_ns[i], .amount = ripple },
-                },
-            };
-            if (panes[i].waves[0].live(now) or panes[i].waves[1].live(now)) moving = true;
-        }
+        for (all, 0..) |z, i| panes[i] = .{ .r = entering(r.of(z), z, e), .lit = st.lit[i] };
         var area = r.center;
         for (all[1..]) |z| area = area.unionWith(r.of(z));
         glass(id, &panes, area, g, scale);
@@ -235,7 +210,7 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
 /// last place it covered. Draw after every place has drawn (it lies over their zones as they go),
 /// keyed by one `id` for the whole window.
 pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
-    const JoinState = struct { shown: f32 = 0, last_ns: i128 = 0, born_ns: i128 = 0, rect: dvui.Rect.Physical = .{} };
+    const JoinState = struct { shown: f32 = 0, last_ns: i128 = 0, rect: dvui.Rect.Physical = .{} };
     const st = dvui.dataGetPtr(null, id, "_drop_join", JoinState) orelse blk: {
         if (rect == null) return;
         break :blk dvui.dataGetPtrDefault(null, id, "_drop_join", JoinState, .{});
@@ -246,17 +221,14 @@ pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
     st.last_ns = now;
     if (rect) |rr| st.rect = inset(rr, gap * scale, gap * scale);
     const want: f32 = if (rect != null) 1 else 0;
-    if (st.shown == 0 and want > 0) st.born_ns = now;
     st.shown = step(st.shown, want, dt_ms, motion.durationMs(if (want > st.shown) appear_ms else vanish_ms));
-    var moving = st.shown != want;
+    const moving = st.shown != want;
     const g = frost(st.shown);
     if (g > 0.01 and st.rect.w >= 1 and st.rect.h >= 1) {
         const pane: Pane = .{
             .r = entering(st.rect, .center, 0.85 + 0.15 * grow(st.shown)),
             .lit = 1,
-            .waves = .{ .{ .origin = st.rect.center(), .start_ns = st.born_ns, .amount = motion.playful() }, .{} },
         };
-        if (pane.waves[0].live(now)) moving = true;
         glass(id, &.{pane}, st.rect, g, scale);
         drawIcon(pane.r, .{ .name = "drop_zone_join", .tvg = icons.tvg.lucide.@"squares-unite" }, g, 1, scale);
     }
@@ -270,7 +242,7 @@ pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
 // ── Coming and going ────────────────────────────────────────────────────────────────────────────
 
 /// How big a zone is at progress `t`: arriving, at the app's motion level (`motion.enter`) — a
-/// clean overshoot at minimal, a jiggle at playful, plain at the low end. Read backwards on the
+/// slight bounce at minimal, a soft spring at playful, plain at the low end. Read backwards on the
 /// way out, the same curve swells a touch and then goes.
 fn grow(t: f32) f32 {
     return @max(0, motion.enter(t));
@@ -297,19 +269,6 @@ fn entering(r: dvui.Rect.Physical, z: Zone, e: f32) dvui.Rect.Physical {
     };
 }
 
-/// Where a zone's arrival ripple starts: the edge it grows out of, or the middle's centre.
-fn arrivalOrigin(r: dvui.Rect.Physical, z: Zone) dvui.Point.Physical {
-    return switch (z) {
-        .center => r.center(),
-        .edge => |side| switch (side) {
-            .left => .{ .x = r.x, .y = r.y + r.h / 2 },
-            .right => .{ .x = r.x + r.w, .y = r.y + r.h / 2 },
-            .top => .{ .x = r.x + r.w / 2, .y = r.y },
-            .bottom => .{ .x = r.x + r.w / 2, .y = r.y + r.h },
-        },
-    };
-}
-
 fn scaleAbout(r: dvui.Rect.Physical, kx: f32, ky: f32) dvui.Rect.Physical {
     const w = r.w * kx;
     const h = r.h * ky;
@@ -318,11 +277,10 @@ fn scaleAbout(r: dvui.Rect.Physical, kx: f32, ky: f32) dvui.Rect.Physical {
 
 // ── The glass ───────────────────────────────────────────────────────────────────────────────────
 
-/// One pane of glass to lay down: where, how lit, and the ripples running through it.
+/// One pane of glass to lay down: where, and how lit.
 const Pane = struct {
     r: dvui.Rect.Physical,
     lit: f32 = 0,
-    waves: [2]Wave = .{ .{}, .{} },
 };
 
 
@@ -378,14 +336,7 @@ fn glass(id: dvui.Id, panes: []const Pane, area: dvui.Rect.Physical, g: f32, sca
     backdrop.mode = .readback;
     backdrop.radius_px = job.pane.radius;
     backdrop.detail = job.pane.detail;
-    // Ripples are bent into the picture before it is blurred, near each pane's rim; while any
-    // runs the place is read every frame.
-    backdrop.warp = .{ .now = job.now, .scale = scale };
-    for (job.panes[0..job.count]) |*pane| {
-        backdrop.warp.addPane(pane.r);
-        for (pane.waves) |w| backdrop.warp.addWave(w);
-    }
-    const reread = if (backdrop.warp.live()) job.now else @divTrunc(job.now, reread_ms * std.time.ns_per_ms);
+    const reread = @divTrunc(job.now, reread_ms * std.time.ns_per_ms);
     backdrop.init(dvui.windowRectScale().rectFromPhysical(bounds), .{ bounds, reread, job.pane.radius });
     job.backdrop = backdrop;
     dvui.deferRender(job, LayerJob.draw);
@@ -433,19 +384,18 @@ const LayerJob = struct {
         // As `frostPane` composes it: the frost at `1 - mix` of itself, then the tint and the
         // lift added over it.
         const frost_mod: dvui.Color = if (self.pane.tint != null) dvui.Color.white.opacity(1 - mix) else .white;
-        for (self.panes[0..self.count]) |*pane| {
-            // The ripples were bent into the picture before it was blurred; here they only shade.
+        const light = BlurBackdrop.additiveWhite();
+        for (self.panes[0..self.count]) |pane| {
             liquid_glass.drawPane(tex, self.bounds, pane.r, self.radius, self.scale, frost_mod, .{
                 .lens = self.lens,
-                .waves = &pane.waves,
-                .now = self.now,
-                .waves_bend = false,
+                .refraction = self.pane.refraction,
                 .sharp = backdrop.sharpTexture(),
             });
             if (self.pane.tint) |tint| BlurBackdrop.addTint(pane.r, self.corners, self.scale, tint, mix);
+            // The lift and the bevel's light, in one pass after the tint so they stay white; a lit
+            // zone is brighter and catches more.
             const lift = std.math.clamp(self.pane.lift + lit_lift * pane.lit * self.strength, 0, 1);
-            BlurBackdrop.addTint(pane.r, self.corners, self.scale, .white, lift);
-            liquid_glass.drawRim(pane.r, self.corners, self.scale, self.strength * (0.10 + 0.14 * pane.lit) * self.lens);
+            if (light) |l| liquid_glass.drawLift(l, pane.r, self.radius, self.scale, lift, self.strength * self.lens * (1 + 0.6 * pane.lit));
         }
     }
 };
