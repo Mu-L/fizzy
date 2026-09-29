@@ -947,7 +947,7 @@ pub fn deinit(self: *Dockspace) void {
         const s = self.data().rectScale().s;
         const highlight = dvui.themeGet().color(.highlight, .fill);
         if (@import("../dialogs.zig").dialogFrost()) |frost| {
-            @import("BlurBackdrop.zig").frostPane(self.data().id.update("drop_zone_frost"), self.hover_rect, .round(8), s, .{
+            @import("BlurBackdrop.zig").frostPane(self.data().id.update("drop_zone_frost"), self.hover_rect, @import("../corners.zig").round(8), s, .{
                 .radius = frost.radius,
                 .tint = highlight.opacity(0.6),
                 .mix = 0.35,

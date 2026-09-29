@@ -225,7 +225,7 @@ fn drawChord(chord: Chord, which: usize, color: dvui.Color, mac: bool, style: St
                     .gravity_y = 0.5,
                     .margin = .{ .x = if (i == 0) 0 else 3 },
                     .padding = .{ .x = 5, .y = 1, .w = 5, .h = 1 },
-                    .corners = .all(4),
+                    .corners = @import("corners.zig").all(4),
                     .background = true,
                     .color_fill = .{ .color = dvui.themeGet().color(.control, .fill) },
                     .min_size_content = .{ .w = 12 },

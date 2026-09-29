@@ -186,7 +186,7 @@ fn drawPreviewTogglePill(doc: *Document, id_extra: u64) void {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .background = true,
         .color_fill = .{ .color = dvui.themeGet().fill.opacity(0.92) },
-        .corners = dvui.CornerRect.all(12),
+        .corners = core.corners.all(core.corners.card),
         .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 },
         .id_extra = @intCast(id_extra + 0x3000),
     });
@@ -687,12 +687,12 @@ fn drawCompletionList(doc: *Document, ext: []const u8, te: *TextEntryWidget, id_
         .id_extra = @intCast(id_extra + 0x9000),
         .background = true,
         .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).lighten(if (dvui.themeGet().dark) 5 else -5) },
-        .corners = dvui.CornerRect.all(6),
+        .corners = core.corners.all(core.corners.small),
         .border = dvui.Rect.all(0),
         .box_shadow = .{
             .color = .black,
             .shrink = 0,
-            .corners = dvui.CornerRect.all(6),
+            .corners = core.corners.all(core.corners.small),
             .offset = .{ .x = 0, .y = 2 },
             .fade = 4,
             .alpha = 0.2,
@@ -889,12 +889,12 @@ fn drawCompletionInfoPanel(ext: []const u8, candidate: TextEntryWidget.Completio
         .id_extra = @intCast(id_extra + 0xA000),
         .background = true,
         .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).lighten(if (dvui.themeGet().dark) 5 else -5) },
-        .corners = dvui.CornerRect.all(6),
+        .corners = core.corners.all(core.corners.small),
         .border = dvui.Rect.all(0),
         .box_shadow = .{
             .color = .black,
             .shrink = 0,
-            .corners = dvui.CornerRect.all(6),
+            .corners = core.corners.all(core.corners.small),
             .offset = .{ .x = 0, .y = 2 },
             .fade = 4,
             .alpha = 0.2,

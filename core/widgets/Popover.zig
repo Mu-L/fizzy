@@ -27,7 +27,9 @@ keep: []const dvui.Rect.Physical = &.{},
 
 /// The shared surface radius (`core.dialogs`), re-exported because callers anchor submenus
 /// against it.
-pub const corners: dvui.CornerRect = dialogs.surface_corners;
+pub fn corners() dvui.CornerRect {
+    return dialogs.surfaceCorners();
+}
 
 pub const InitOptions = struct {
     /// Persistent, caller-owned: the window animates its size through it across frames. Zero
@@ -106,7 +108,7 @@ pub fn init(src: std.builtin.SourceLocation, init_opts: InitOptions) Popover {
         .id_extra = init_opts.id_extra,
         .color_text = .{ .color = theme.color(.control, .text) },
         .color_fill = .{ .color = dialogs.dialogFill() },
-        .corners = corners,
+        .corners = corners(),
         .padding = dialogs.surface_padding,
         .border = .all(0),
         .box_shadow = dialogs.surfaceShadow(),
@@ -183,7 +185,7 @@ pub fn row(src: std.builtin.SourceLocation, opts: RowOptions) Row {
         .id_extra = opts.id_extra,
         .expand = .horizontal,
         .background = false,
-        .corners = .all(4),
+        .corners = @import("../corners.zig").all(4),
         .padding = .{ .x = 10, .y = 6, .w = 10, .h = 6 },
         .margin = .{ .x = 0, .y = 1, .w = 0, .h = 1 },
     });

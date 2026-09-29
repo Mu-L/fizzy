@@ -184,7 +184,9 @@ drag_part: ?DragPart = null,
 drag_area: Rect.Physical = undefined,
 
 pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_opts: InitOptions, opts: Options) void {
-    const options = defaults.override(opts);
+    var options = defaults.override(opts);
+    // The default corner at the user's corner roundness (`core.corners`); a caller's own stands.
+    if (opts.corners == null) options.corners = @import("../corners.zig").all(5);
     var box_options = options;
     box_options.role = null;
     box_options.label = null;

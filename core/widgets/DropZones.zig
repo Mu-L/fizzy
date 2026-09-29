@@ -356,7 +356,7 @@ fn outerCorners(z: Zone) [4]bool {
 /// unresolved corner draws square whatever radius it names.
 fn surfaceRadius(scale: f32) f32 {
     const theme = dvui.themeGet();
-    return dialogs.surface_corners.finalize(&theme).tl.radius() * scale;
+    return dialogs.surfaceCorners().finalize(&theme).tl.radius() * scale;
 }
 
 /// Per-corner radii (physical, ring order) as dvui corners in natural units at `scale`.

@@ -371,7 +371,7 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
 
             if (show_close_visible and (tab_hovered or close_hovered)) {
                 const rs = tab_close_button.data().borderRectScale();
-                rs.r.fill(.round(8), .{ .color = .{ .color = err_accent } });
+                rs.r.fill(.round(core.corners.scaled(8)), .{ .color = .{ .color = err_accent } });
             }
 
             if (dirty and !show_close_visible) {

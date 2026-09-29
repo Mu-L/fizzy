@@ -452,11 +452,11 @@ pub const Branch = struct {
                         .rect = Rect.fromPoint(.cast(npt)),
                         .min_size_content = drag_min,
                         .background = true,
-                        .corners = dvui.CornerRect.all(8),
+                        .corners = @import("../corners.zig").all(8),
                         .color_fill = .{ .color = dvui.themeGet().color(.content, .fill).opacity(0.9) },
                         .box_shadow = .{
                             .fade = 8,
-                            .corners = dvui.CornerRect.all(8),
+                            .corners = @import("../corners.zig").all(8),
                             .alpha = 0.25,
                             .color = .black,
                         },

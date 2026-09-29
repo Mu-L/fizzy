@@ -439,7 +439,7 @@ pub fn drawFloat(l: *Layout) void {
     fw.init(@src(), .{ .mouse_events = false }, .{
         .rect = .{ .x = nat.x, .y = nat.y, .w = nat.w, .h = nat.h },
         .padding = .{},
-        .corners = dvui.CornerRect.round(12),
+        .corners = core.corners.round(core.corners.card),
         .background = true,
         .color_fill = .{ .color = theme.color(.window, .fill) },
         .border = dvui.Rect.all(1),
@@ -449,7 +449,7 @@ pub fn drawFloat(l: *Layout) void {
             .alpha = 0.28,
             .fade = 12,
             .offset = .{ .x = 0, .y = 4 },
-            .corners = dvui.CornerRect.round(12),
+            .corners = core.corners.round(core.corners.card),
         },
     });
     defer fw.deinit();

@@ -63,7 +63,7 @@ pub fn draw() void {
     }, .{
         .min_size_content = .{ .w = min_w, .h = min_h },
         .color_fill = .{ .color = core.dialogs.dialogFill() },
-        .corners = core.dialogs.surface_corners,
+        .corners = core.dialogs.surfaceCorners(),
         .box_shadow = core.dialogs.surfaceShadow(),
     });
     defer win.deinit();

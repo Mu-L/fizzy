@@ -71,6 +71,11 @@ dialog_lift: f32 = 0.3,
 /// How much of what is behind a dialog or the palette stays readable through its blur, 0 to 1.
 dialog_detail: f32 = 0.1,
 
+/// How round the app's corners are, 0 (square) to 1 (twice as round); 0.5 is as designed.
+/// Published each frame through `core.corners`, which every radius scales by, and applied to the
+/// theme's own corner.
+corner_roundness: f32 = core.corners.default_roundness,
+
 /// How far the bevelled edge of frosted glass — dialogs, menus, the palette, drop zones —
 /// refracts what is behind it, 0 (none) to 1; 0.5 is as designed.
 dialog_refraction: f32 = 0.5,

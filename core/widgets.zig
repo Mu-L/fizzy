@@ -105,7 +105,7 @@ pub fn popup(src: std.builtin.SourceLocation, init_opts: PopupWidget.InitOptions
 pub fn menuRowOptions(opts: dvui.Options) dvui.Options {
     const hover = dialogs.rowHover();
     return opts.override(.{
-        .corners = dialogs.row_corners,
+        .corners = dialogs.rowCorners(),
         .color_fill = .{ .color = hover.opacity(0) },
         .color_fill_hover = .{ .color = hover },
         // The label does not change colour under the pointer: a row that both lights up and
@@ -258,7 +258,7 @@ pub fn menuSurfaceOptions() dvui.Options {
         .background = true,
         .color_fill = .{ .color = dialogs.dialogFill() },
         .border = .all(0),
-        .corners = dialogs.surface_corners,
+        .corners = dialogs.surfaceCorners(),
         .padding = dialogs.surface_padding,
         .box_shadow = dialogs.surfaceShadow(),
     };

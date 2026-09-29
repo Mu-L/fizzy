@@ -177,6 +177,14 @@ pub const groups = [_]Group{
                 .draw = drawDialogRefraction,
             },
             .{
+                .label = "Corner roundness",
+                .key = "corner_roundness",
+                .description = "How round the corners of windows, panels, dialogs and buttons " ++
+                    "are, from square to twice as round. The middle is as designed.",
+                .keywords = "corner radius rounding round square shape theme",
+                .draw = drawCornerRoundness,
+            },
+            .{
                 .label = "Motion",
                 .key = "motion",
                 .description = "How the interface moves. 0 is off — nothing animates. Up to " ++
@@ -450,6 +458,27 @@ fn drawDialogLift() void {
     }, .{ .expand = .horizontal })) {
         fizzy.editor().markSettingsDirty();
         dvui.refresh(null, @src(), null);
+    }
+}
+
+fn drawCornerRoundness() void {
+    const editor = fizzy.editor();
+    if (dvui.sliderEntry(@src(), "{d:0.01}", .{
+        .value = &editor.app.settings.corner_roundness,
+        .interval = 0.01,
+        .max = 1.0,
+        .min = 0.0,
+    }, .{ .expand = .horizontal })) {
+        // The theme carries dvui's own corner; re-apply it at the new roundness.
+        editor.applySettingsTheme() catch {};
+        editor.markSettingsDirty();
+        dvui.refresh(null, @src(), null);
+    }
+    var row = dvui.overlay(@src(), .{ .expand = .horizontal });
+    defer row.deinit();
+    const text = dvui.themeGet().color(.control, .text).opacity(0.6);
+    for ([_][]const u8{ "Square", "As designed", "Round" }, [_]f32{ 0, 0.5, 1 }, 0..) |name, at, i| {
+        dvui.labelNoFmt(@src(), name, .{}, .{ .id_extra = i, .gravity_x = at, .font = dvui.Font.theme(.body).larger(-1), .color_text = .{ .color = text }, .padding = .{} });
     }
 }
 

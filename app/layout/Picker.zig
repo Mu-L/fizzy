@@ -374,7 +374,7 @@ fn card(f: *Layout, s: *const sdk.Surface, on: bool, id_extra: usize) Hit {
         .id_extra = id_extra,
         .margin = dvui.Rect.all(4),
         .padding = dvui.Rect.all(6),
-        .corners = dvui.CornerRect.all(6),
+        .corners = core.corners.all(core.corners.small),
         .background = true,
         .color_fill = .{ .color = if (on) theme.color(.highlight, .fill).opacity(0.25) else theme.color(.control, .fill) },
         .border = dvui.Rect.all(1),
@@ -435,7 +435,7 @@ fn card(f: *Layout, s: *const sdk.Surface, on: bool, id_extra: usize) Hit {
     if (armed and lifted == null) {
         // Held long enough: the card is ready to move, and says so before the finger does.
         const rs = bw.data().borderRectScale();
-        rs.r.stroke(dvui.CornerRect.all(6).scale(rs.s, dvui.CornerRect.Physical), .{
+        rs.r.stroke(core.corners.all(core.corners.small).scale(rs.s, dvui.CornerRect.Physical), .{
             .color = .{ .color = theme.color(.highlight, .fill) },
             .thickness = 2 * rs.s,
         });
@@ -450,7 +450,7 @@ fn card(f: *Layout, s: *const sdk.Surface, on: bool, id_extra: usize) Hit {
             .min_size_content = preview,
             .max_size_content = .size(preview),
             .background = true,
-            .corners = dvui.CornerRect.all(3),
+            .corners = core.corners.all(3),
             .color_fill = .{ .color = theme.color(.content, .fill) },
         });
         defer tile.deinit();
@@ -733,7 +733,7 @@ fn storeCard(offer: State.StoreOffer, installing: bool, id_extra: usize) bool {
         .id_extra = id_extra,
         .margin = dvui.Rect.all(4),
         .padding = dvui.Rect.all(6),
-        .corners = dvui.CornerRect.all(6),
+        .corners = core.corners.all(core.corners.small),
         .background = true,
         .color_fill = .{ .color = theme.color(.control, .fill) },
         .border = dvui.Rect.all(1),
@@ -751,7 +751,7 @@ fn storeCard(offer: State.StoreOffer, installing: bool, id_extra: usize) bool {
             .min_size_content = preview,
             .max_size_content = .size(preview),
             .background = true,
-            .corners = dvui.CornerRect.all(3),
+            .corners = core.corners.all(3),
             .color_fill = .{ .color = theme.color(.content, .fill) },
         });
         defer tile.deinit();

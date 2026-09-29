@@ -506,6 +506,8 @@ pub fn init(self: *TextEntryWidget, src: std.builtin.SourceLocation, init_opts: 
     };
 
     var options = defaults.min_sizeM(defaultMWidth, 1);
+    // The default corner at the user's corner roundness (`core.corners`); a caller's own stands.
+    if (opts.corners == null) options.corners = @import("core").corners.all(5);
 
     if (init_opts.password_char != null) {
         options.role = .password_input;

@@ -538,7 +538,7 @@ pub fn draw(self: *CommandPalette, editor: *Editor) void {
         // not theme text (which is light on dark themes and looked wrong).
         .color_text = .black,
         .color_fill = .{ .color = fizzy.core.dialogs.dialogFill() },
-        .corners = fizzy.core.dialogs.surface_corners,
+        .corners = fizzy.core.dialogs.surfaceCorners(),
         .padding = fizzy.core.dialogs.surface_padding,
         .border = .all(0),
         .box_shadow = fizzy.core.dialogs.surfaceShadow(),

@@ -9,6 +9,7 @@
 //! like the app's — see `core.widgets` for the divide.
 const std = @import("std");
 const dvui = @import("dvui");
+const rounding = @import("corners.zig");
 const motion = @import("motion.zig");
 const icon_tex = @import("gfx/icon.zig");
 const builtin = @import("builtin");
@@ -146,21 +147,26 @@ pub fn frostPane(id: dvui.Id, rect: dvui.Rect.Physical, corners: dvui.CornerRect
 // each one wrote its own numbers. These are those numbers, in one place, taken from the command
 // palette — the surface the rest are measured against.
 //
-// A surface: `surface_corners` + `surface_padding` + `surfaceShadow()` + `dialogFill()`, frosted
-// with `dialogFrost()`. A row inside it: `row_corners`, `rowHover()`, `rowPress()`.
+// A surface: `surfaceCorners` + `surface_padding` + `surfaceShadow()` + `dialogFill()`, frosted
+// with `dialogFrost()`. A row inside it: `rowCorners`, `rowHover()`, `rowPress()`.
 
-/// The radius a floating surface is cut with. `all` rather than `round`: it carries the theme's
-/// corner *kind* at this size, so a square-cornered theme gets square surfaces.
-pub const surface_corners: dvui.CornerRect = .all(8);
+/// The radius a floating surface is cut with, at the user's corner roundness (`core.corners`).
+/// `all` rather than `round`: it carries the theme's corner *kind* at this size, so a
+/// square-cornered theme gets square surfaces.
+pub fn surfaceCorners() dvui.CornerRect {
+    return rounding.all(rounding.surface);
+}
 /// A row inside one — tighter, so a hovered row reads as sitting *in* the surface.
-pub const row_radius: f32 = 4;
-pub const row_corners: dvui.CornerRect = .all(row_radius);
+pub const row_radius: f32 = rounding.row;
+pub fn rowCorners() dvui.CornerRect {
+    return rounding.all(row_radius);
+}
 /// The gap between a surface's edge and its rows.
 pub const surface_padding: dvui.Rect = .all(6);
 
 /// The drop shadow under a floating surface.
 pub fn surfaceShadow() dvui.Options.BoxShadow {
-    return .{ .color = .black, .fade = 8, .corners = surface_corners, .alpha = 0.25 };
+    return .{ .color = .black, .fade = 8, .corners = surfaceCorners(), .alpha = 0.25 };
 }
 
 // ---- tooltips: the same surface, small ------------------------------------------------------
@@ -171,7 +177,7 @@ pub fn surfaceShadow() dvui.Options.BoxShadow {
 // paint nothing (`tooltipOptions`) and `tooltipSurface` lays the surface down under its contents.
 
 /// A tooltip's own options: no background, border or shadow of its own — `tooltipSurface` draws
-/// them. Corners explicitly round: `surface_corners` is `.all`, which leaves the corner *kind*
+/// them. Corners explicitly round: `surfaceCorners` is `.all`, which leaves the corner *kind*
 /// to the theme, and only a widget's options resolve that — handed straight to the frost it
 /// drew square.
 pub fn tooltipOptions(id_extra: usize) dvui.Options {
@@ -179,11 +185,13 @@ pub fn tooltipOptions(id_extra: usize) dvui.Options {
         .id_extra = id_extra,
         .background = false,
         .border = .all(0),
-        .corners = tooltip_corners,
+        .corners = tooltipCorners(),
     };
 }
 
-const tooltip_corners: dvui.CornerRect = .round(8);
+fn tooltipCorners() dvui.CornerRect {
+    return rounding.round(rounding.surface);
+}
 
 /// The surface under a shown tooltip, from its widget data, at full strength — see
 /// `tooltipSurfaceFaded`. Call once the tooltip is shown, before its contents.
@@ -212,7 +220,7 @@ fn tooltipSurfaceWith(wd: *dvui.WidgetData, frost_fade: f32, paint_fade: f32) vo
     const t = std.math.clamp(frost_fade, 0, 1);
     const p = std.math.clamp(paint_fade, 0, 1);
     const brs = wd.borderRectScale();
-    const phys_corners = tooltip_corners.scale(brs.s, dvui.CornerRect.Physical);
+    const phys_corners = tooltipCorners().scale(brs.s, dvui.CornerRect.Physical);
     const bs = surfaceShadow();
     const prect = brs.r.insetAll(brs.s * bs.shrink).offsetPoint(bs.offset.scale(brs.s, dvui.Point.Physical));
     prect.fill(phys_corners, .{ .color = .{ .color = bs.color.opacity(bs.alpha * p) }, .fade = brs.s * bs.fade });
@@ -223,7 +231,7 @@ fn tooltipSurfaceWith(wd: *dvui.WidgetData, frost_fade: f32, paint_fade: f32) vo
     // Under a couple of pixels of blur there is nothing to see yet, and too little for the blur
     // to make a pass at all.
     if (f.radius * t < 2) return;
-    widgets.BlurBackdrop.frostPane(wd.id, brs.r, tooltip_corners, brs.s, .{
+    widgets.BlurBackdrop.frostPane(wd.id, brs.r, tooltipCorners(), brs.s, .{
         .radius = f.radius * t,
         .refresh_ms = f.refresh_ms,
         .tint = f.tint,
@@ -522,7 +530,7 @@ pub fn dialogWindow(id: dvui.Id) anyerror!void {
     }, .{
         .id_extra = id.asUsize(),
         .color_text = .black,
-        .corners = dvui.CornerRect.all(10),
+        .corners = rounding.all(rounding.control),
         .max_size_content = maxSize,
         .border = .all(0),
         .color_fill = .{ .color = dialogFill() },
@@ -530,7 +538,7 @@ pub fn dialogWindow(id: dvui.Id) anyerror!void {
             .color = .black,
             .alpha = 0.35,
             .fade = 10,
-            .corners = dvui.CornerRect.all(10),
+            .corners = rounding.all(rounding.control),
         },
     });
     defer win.deinit();
@@ -809,7 +817,7 @@ pub fn windowHeader(str: []const u8, right_str: []const u8, openflag: ?*bool, he
         .expand = .horizontal,
         .name = "WindowHeader",
         .background = false,
-        .corners = dvui.CornerRect.all(10),
+        .corners = rounding.all(rounding.control),
     });
     defer row.deinit();
 
@@ -1220,7 +1228,7 @@ pub fn saveCompleteToastDisplay(id: dvui.Id) !void {
     var card = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .id_extra = id.asUsize(),
         .background = true,
-        .corners = dvui.CornerRect.all(8),
+        .corners = rounding.all(rounding.surface),
         .padding = .{ .x = 16, .y = 12, .w = 16, .h = 12 },
         .color_fill = .{ .color = dvui.themeGet().color(.content, .fill).opacity(0.85) },
         .box_shadow = .{
@@ -1228,7 +1236,7 @@ pub fn saveCompleteToastDisplay(id: dvui.Id) !void {
             .offset = .{ .x = -2.0, .y = 2.0 },
             .fade = 12.0,
             .alpha = 0.35,
-            .corners = dvui.CornerRect.all(8),
+            .corners = rounding.all(rounding.surface),
         },
     });
     defer card.deinit();

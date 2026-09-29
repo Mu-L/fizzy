@@ -1401,7 +1401,7 @@ fn renderTaskCheckbox(checked: bool, m: MarkerMetrics, ids: *IdGen) void {
         .color_fill = .{ .color = if (checked) theme.color(.highlight, .fill) else theme.color(.control, .fill) },
         .border = dvui.Rect.all(1),
         .color_border = .{ .color = if (checked) theme.color(.highlight, .fill) else theme.border.opacity(0.7) },
-        .corners = dvui.CornerRect.all(3),
+        .corners = @import("core").corners.all(3),
         .id_extra = ids.next(),
     });
     defer b.deinit();
@@ -2378,7 +2378,7 @@ fn renderBlock(n: ast.Node, ids: *IdGen, ctx: RenderContext) void {
                 .expand = .vertical,
                 .background = true,
                 .color_fill = .{ .color = dvui.themeGet().color(.highlight, .fill).opacity(0.75) },
-                .corners = dvui.CornerRect.all(2),
+                .corners = @import("core").corners.all(2),
                 .id_extra = ids.next(),
             });
 
@@ -2479,7 +2479,7 @@ fn renderBlock(n: ast.Node, ids: *IdGen, ctx: RenderContext) void {
                 .margin = .{ .x = block_inset_x, .y = 6, .w = block_inset_x, .h = 6 },
                 .background = true,
                 .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(0.9) },
-                .corners = dvui.CornerRect.all(6),
+                .corners = @import("core").corners.all(6),
                 .border = dvui.Rect.all(1),
                 .color_border = .{ .color = dvui.themeGet().border.opacity(0.35) },
                 .id_extra = ids.next(),
@@ -2686,7 +2686,7 @@ fn renderBlock(n: ast.Node, ids: *IdGen, ctx: RenderContext) void {
                     .expand = .none,
                     .background = true,
                     .color_fill = .{ .color = dvui.themeGet().color(.window, .fill).opacity(0.3) },
-                    .corners = dvui.CornerRect.all(4),
+                    .corners = @import("core").corners.all(4),
                     .border = dvui.Rect.all(1),
                     .color_border = .{ .color = dvui.themeGet().border.opacity(0.3) },
                     .id_extra = ids.next(),

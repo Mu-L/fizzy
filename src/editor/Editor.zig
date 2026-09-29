@@ -2809,7 +2809,7 @@ pub fn applyFontSizesFromSettings(editor: *Editor) void {
     const active_name = dvui.themeGet().name;
     for (editor.themes.items) |*t| {
         if (std.mem.eql(u8, t.name, active_name)) {
-            dvui.themeSet(t.*);
+            dvui.themeSet(editor.shapedTheme(t.*));
             break;
         }
     }
@@ -2837,12 +2837,23 @@ fn resolveSettingsTheme(editor: *Editor) *dvui.Theme {
     return &editor.themes.items[0];
 }
 
+/// A theme as the user has it shaped: its corner scaled by the corner roundness, as every radius
+/// of fizzy's own is (`core.corners`) — dvui's own widgets take their corner from the theme.
+/// Every `themeSet` of one of `editor.themes` goes through this.
+fn shapedTheme(editor: *const Editor, base: dvui.Theme) dvui.Theme {
+    var theme = base;
+    const k = fizzy.core.corners.factorFor(editor.app.settings.corner_roundness);
+    theme.corner.rx *= k;
+    theme.corner.y *= k;
+    return theme;
+}
+
 pub fn applySettingsTheme(editor: *Editor) !void {
     const t = resolveSettingsTheme(editor);
     if (!std.mem.eql(u8, editor.app.settings.theme, t.name)) {
         try Settings.setThemeName(&editor.app.settings, editor.app.gpa, t.name);
     }
-    dvui.themeSet(t.*);
+    dvui.themeSet(editor.shapedTheme(t.*));
     editor.applyFontSizesFromSettings();
 }
 
@@ -3115,6 +3126,7 @@ pub fn reconcileExternalSettingsChange(editor: *Editor) void {
     editor.app.settings.dialog_lift = parsed.dialog_lift;
     editor.app.settings.dialog_detail = parsed.dialog_detail;
     editor.app.settings.dialog_refraction = parsed.dialog_refraction;
+    editor.app.settings.corner_roundness = parsed.corner_roundness;
     editor.app.settings.motion = parsed.motion;
     editor.app.settings.motion_speed = parsed.motion_speed;
     editor.app.settings.input_scheme = parsed.input_scheme;
@@ -3426,6 +3438,7 @@ pub fn tick(editor: *Editor) !dvui.App.Result {
             .has_chrome = true,
         });
         fizzy.core.dialogs.publishRefraction(editor.app.settings.dialog_refraction);
+        fizzy.core.corners.publish(editor.app.settings.corner_roundness);
     }
     // How things move this frame, for every animation here and in every plugin (`core.motion`).
     fizzy.core.motion.publish(editor.app.settings.motion, editor.app.settings.motion_speed, dvui.currentWindow().backend.prefersReducedMotion());

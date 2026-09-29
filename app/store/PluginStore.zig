@@ -2363,7 +2363,7 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
         .min_size_content = .{ .w = card_min_w },
         .margin = .{ .x = 3, .y = 3, .w = 12, .h = 3 },
         .padding = .{ .x = 8, .y = 6, .w = 8, .h = 6 },
-        .corners = dvui.CornerRect.all(8),
+        .corners = core.corners.all(core.corners.surface),
         .background = true,
         .color_fill = .{ .color = fill },
         .color_fill_hover = .{ .color = theme.color(.control, .fill).opacity(0.5) },
@@ -2494,7 +2494,7 @@ fn drawCardShell(entry: StoreEntry, controls: *const fn (StoreEntry) void, row2_
                             .border = .all(0),
                             .box_shadow = .{
                                 .color = .black,
-                                .corners = dvui.CornerRect.all(8),
+                                .corners = core.corners.all(core.corners.surface),
                                 .fade = 4,
                                 .alpha = 0.25,
                             },

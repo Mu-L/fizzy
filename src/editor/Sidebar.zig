@@ -143,7 +143,7 @@ fn drawFooterGlass(id: dvui.Id, rs: dvui.RectScale, under: f32) void {
     const g = std.math.clamp(under / (footer_glass_ramp * rs.s), 0, 1);
     if (g <= 0.01) return;
     const theme = dvui.themeGet();
-    const corners = core.dialogs.surface_corners.finalize(&theme);
+    const corners = core.dialogs.surfaceCorners().finalize(&theme);
     if (core.widgets.menuFrost()) |base| {
         var pane = base;
         pane.radius = base.radius * g;
