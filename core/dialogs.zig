@@ -93,10 +93,11 @@ pub fn dialogFrost() ?widgets.FloatingWindowWidget.Frost {
     if (s.blur < 1) return null;
     return .{
         .radius = s.blur,
-        // What is behind a dialog seldom moves while it is open; re-reading and re-blurring it
-        // every frame cost a frame's worth of GPU work that grew with the dialog. The glass still
-        // takes every frame while it forms or its geometry moves (`BlurBackdrop.frostPane`).
-        .refresh_ms = 100,
+        // Every frame, so what moves behind the glass moves in it — the welcome logo following
+        // the pointer under a dialog stepped at 10 Hz on a 100 ms re-read. A re-read is about a
+        // quarter of a millisecond in Debug now (a half-size copy and the Gaussian's few passes),
+        // and it is only paid on frames something asked for: an idle app draws none.
+        .refresh_ms = 0,
         .tint = s.chromeColor(),
         .mix = std.math.clamp(s.opacity, 0, 1),
         .lift = std.math.clamp(s.lift, 0, 1) * lift_max,
