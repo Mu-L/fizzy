@@ -26,8 +26,12 @@ const dvui = @import("dvui");
 /// Points: how far in, at the very rim, the drop reaches for what it shows (times
 /// `Look.refraction`); how far in its curve fades by a factor of e; and how softly its sides blend
 /// into each other round a corner.
-pub const refraction: f32 = 18;
+pub const refraction: f32 = 14;
 pub const falloff: f32 = 15;
+// `refraction` stays under `falloff`: past it, the rim reaches in faster than it moves in, and
+// the picture folds back on itself a few points inside the edge — a mirror line, seen as a band.
+// Just under, the rim magnifies as strongly as it can without folding. The refraction setting can
+// still take it past, for anyone who wants the mirror.
 pub const softness: f32 = 10;
 /// How much of the unblurred picture the rim shows at its very edge, 0…1: glass is clearer
 /// where it is thin and steep, frosted across its face.
@@ -70,6 +74,18 @@ pub fn blurRamp(radius: f32) f32 {
 }
 pub const full_at_blur: f32 = 20;
 
+/// How much of the glass's edge a pane `r` is big enough for: none on something tooltip-sized,
+/// all of it once its shorter side is `full_at_size` points. The edge reaches some forty points
+/// in; on a pane smaller than that there is no face for it to be the edge of — a tooltip was
+/// all rim, washed with the edge's light and clear copy, where it should simply frost what is
+/// behind it.
+pub fn sizeRamp(r: dvui.Rect.Physical, scale: f32) f32 {
+    const side = @min(r.w, r.h) / @max(scale, 0.01);
+    return std.math.clamp((side - no_edge_below) / (full_at_size - no_edge_below), 0, 1);
+}
+pub const no_edge_below: f32 = 40;
+pub const full_at_size: f32 = 110;
+
 /// Whether `look` bends anything at all — when it does not, a flat textured rect is the same
 /// picture for a fraction of the work.
 pub fn bends(look: Look) bool {
@@ -77,9 +93,10 @@ pub fn bends(look: Look) bool {
 }
 
 /// Where the rings of a pane sit, as fractions of `band`: closer together at the rim, where the
-/// bend changes fastest. Few enough that a pane stays cheap — every vertex is copied to the GPU
-/// each frame, for every pane on screen — and enough that the bend between them reads as a curve.
-const ring_steps = [_]f32{ 0, 0.05, 0.12, 0.21, 0.33, 0.48, 0.66, 1.0 };
+/// bend changes fastest. The glass is straight lines between rings, and the eye finds every kink
+/// in a gradient's slope as a band, so there are enough that the steps are finer than it can
+/// see — and few enough that a pane stays cheap: every vertex is copied to the GPU each frame.
+const ring_steps = [_]f32{ 0, 0.025, 0.055, 0.09, 0.135, 0.19, 0.26, 0.35, 0.46, 0.6, 0.78, 1.0 };
 /// How much white the rim adds at its steepest, where it faces the light and where it faces away
 /// (times the caller's `amount`, which carries the refraction setting): a hint of a catch-light,
 /// not a line drawn round the pane.

@@ -127,7 +127,7 @@ fn inset(r: dvui.Rect.Physical, dx: f32, dy: f32) dvui.Rect.Physical {
 /// How long the zones take to come in and to go, in milliseconds. In is the longer: it carries
 /// the bounce, and the place arrived at is watched turning into glass. Out gets out of the way of
 /// the place arrived at, and of what a drop is doing.
-pub const appear_ms: f32 = 340;
+pub const appear_ms: f32 = 420;
 pub const vanish_ms: f32 = 170;
 /// A time constant: how quickly a zone lights or dims under the pointer, most of the way in
 /// about three of these.
@@ -170,7 +170,10 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
     const st = dvui.dataGetPtrDefault(null, id, "_drop_zones", State, .{});
     const now = dvui.currentWindow().frame_time_ns;
     // A gap of more than a few frames is a new visit: start from nothing.
-    if (st.last_ns == 0 or now - st.last_ns > 200 * std.time.ns_per_ms) st.* = .{ .last_ns = now };
+    // Where the zones were is kept until they have gone (`forget`), however long between frames:
+    // a drag held still asks for none, and treating the gap as a new visit replayed the entrance
+    // on the next twitch of the pointer.
+    if (st.last_ns == 0) st.last_ns = now;
     const dt_ms: f32 = @as(f32, @floatFromInt(now - st.last_ns)) / std.time.ns_per_ms;
     st.last_ns = now;
 
@@ -187,12 +190,12 @@ pub fn draw(id: dvui.Id, r: Rects, scale: f32, look: Look) void {
     if (g > 0.01) {
         var area = r.center;
         for (all[1..]) |z| area = area.unionWith(r.of(z));
-        const panes = splitting(r, area, st.shown, &st.lit, scale);
-        glass(id, &panes, area, g, scale);
-        for (all, 0..) |z, i| {
+        const set = splitting(r, area, st.shown, &st.lit, scale);
+        glass(id, set.panes[0..set.count], area, g, scale);
+        if (set.count == all.len) for (all, 0..) |z, i| {
             if (z == .center and look.center == .none) continue;
-            drawIcon(panes[i].r, iconFor(z, look.center), @min(g, panes[i].lens), st.lit[i], scale);
-        }
+            drawIcon(set.panes[i].r, iconFor(z, look.center), @min(g, set.panes[i].lens), st.lit[i], scale);
+        };
     }
 
     if (moving) {
@@ -214,7 +217,10 @@ pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
         break :blk dvui.dataGetPtrDefault(null, id, "_drop_join", JoinState, .{});
     };
     const now = dvui.currentWindow().frame_time_ns;
-    if (st.last_ns == 0 or now - st.last_ns > 200 * std.time.ns_per_ms) st.* = .{ .last_ns = now };
+    // Where the zones were is kept until they have gone (`forget`), however long between frames:
+    // a drag held still asks for none, and treating the gap as a new visit replayed the entrance
+    // on the next twitch of the pointer.
+    if (st.last_ns == 0) st.last_ns = now;
     const dt_ms: f32 = @as(f32, @floatFromInt(now - st.last_ns)) / std.time.ns_per_ms;
     st.last_ns = now;
     if (rect) |rr| st.rect = inset(rr, gap * scale, gap * scale);
@@ -253,21 +259,40 @@ fn frost(t: f32) f32 {
     return motion.fade(t);
 }
 
-/// The zones `p` of the way in, as one pane of glass splitting into five. They start as tiles
-/// that exactly fill the place — each grown half a gap toward its neighbours, square where they
-/// meet — so together they are one solid pane, fading in and swelling to size; then the gaps
-/// open, the corners where they met round off and each piece's edge forms, and they are five.
+/// The zones `p` of the way in, as liquid splitting into five. A round drop at the place's centre
+/// swells out to fill it, its corners tightening as it reaches the edges; then it parts — as tiles
+/// that exactly fill the place, each grown half a gap toward its neighbours and square where they
+/// meet — the gaps open, the corners where they met round off and each piece's edge forms, and
+/// they are five.
 /// Leaving runs it backwards: the pieces run together into one, and it fades. Glass that overlaps
 /// itself would double its tint where it did, so the pieces never overlap — they tile.
-fn splitting(r: Rects, area: dvui.Rect.Physical, p: f32, lit: *const [all.len]f32, scale: f32) [all.len]Pane {
+/// The glass `splitting` lays down: one drop, or the five pieces it split into.
+const Split = struct {
+    panes: [all.len]Pane,
+    count: usize,
+};
+
+fn splitting(r: Rects, area: dvui.Rect.Physical, p: f32, lit: *const [all.len]f32, scale: f32) Split {
     const half_gap = gap * scale / 2;
     const radius = surfaceRadius(scale);
-    // The solid comes in first, the split follows once it is mostly there.
-    const swell = 0.94 + 0.06 * grow(std.math.clamp(p / 0.5, 0, 1));
-    const split = grow(std.math.clamp((p - 0.25) / 0.75, 0, 1));
+    // A drop at the place's centre swells to fill it, then splits once it is mostly there. While
+    // it is small it is round all over — its outer corners as round as its size allows — and
+    // they tighten to the surface rounding as it reaches the edges.
+    const fill = grow(std.math.clamp(p / 0.55, 0, 1));
+    const swell = drop_start + (1 - drop_start) * fill;
+    const split = grow(std.math.clamp((p - 0.4) / 0.6, 0, 1));
     const round = std.math.clamp(split, 0, 1);
+    const outer_radius = radius + (@min(area.w, area.h) / 2 - radius) * (1 - std.math.clamp(fill, 0, 1));
     const c = area.center();
     var out: [all.len]Pane = undefined;
+    // Until it starts to part it is one pane — as tiles, its outline could only round as far as
+    // the thin side bands allow, and a drop is round. The tiles take over at the instant they
+    // start to part, when the drop has all but reached the place's corners and matches them.
+    if (split <= 0.001) {
+        const drop: dvui.Rect.Physical = .{ .x = c.x - area.w * swell / 2, .y = c.y - area.h * swell / 2, .w = area.w * swell, .h = area.h * swell };
+        out[0] = .{ .r = drop, .radii = liquid_glass.uniform(outer_radius), .lens = 0 };
+        return .{ .panes = out, .count = 1 };
+    }
     for (all, 0..) |z, i| {
         const settled = r.of(z);
         const tile = tileOf(settled, z, half_gap);
@@ -275,12 +300,15 @@ fn splitting(r: Rects, area: dvui.Rect.Physical, p: f32, lit: *const [all.len]f3
         // The whole set swells as one, about the place's centre.
         const swollen: dvui.Rect.Physical = .{ .x = c.x + (here.x - c.x) * swell, .y = c.y + (here.y - c.y) * swell, .w = here.w * swell, .h = here.h * swell };
         var radii: liquid_glass.Radii = undefined;
-        for (outerCorners(z), 0..) |outer, k| radii[k] = if (outer) radius else radius * round;
+        for (outerCorners(z), 0..) |outer, k| radii[k] = if (outer) outer_radius else radius * round;
         // Each piece's own edge — its refraction and light — forms as it comes away.
         out[i] = .{ .r = swollen, .lit = lit[i], .radii = radii, .lens = round };
     }
-    return out;
+    return .{ .panes = out, .count = all.len };
 }
+
+/// How big the drop the zones come out of starts, of the place.
+const drop_start: f32 = 0.18;
 
 /// `settled` grown half a gap toward every neighbouring zone, so the five tile the place.
 fn tileOf(settled: dvui.Rect.Physical, z: Zone, h: f32) dvui.Rect.Physical {

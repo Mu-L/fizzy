@@ -918,7 +918,7 @@ pub fn frostPane(id: dvui.Id, rect: Rect.Physical, corners: dvui.CornerRect, sca
         .mix = std.math.clamp(pane.mix, 0, 1),
         .lift = std.math.clamp(pane.lift, 0, 1),
         // The edge comes in with the blur, so a barely-frosted pane has barely an edge.
-        .lens = motion.liquid() * liquid_glass.blurRamp(pane.radius),
+        .lens = motion.liquid() * liquid_glass.blurRamp(pane.radius) * liquid_glass.sizeRamp(rect, scale),
         .refraction = pane.refraction,
     };
     dvui.deferRender(job, FrostJob.draw);
