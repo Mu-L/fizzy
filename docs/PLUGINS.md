@@ -604,6 +604,12 @@ gets the same. Two pieces let a plugin take part:
   Unhandled, the middle takes the view by the app's default (added to what the region shows)
   and an edge does nothing — the app cannot split a region you laid out, so a new pane beside
   yours is yours to make (the workbench's `paneDrop`).
+- `region.offerChooser(strip_rect)`, each frame your own chooser (a tab strip) draws, marks it as
+  chrome: while a view is carried, the zones and the preview cover your region *less* the strip,
+  the view rides over the strip as a tab, and a release there reaches `on_drop` as
+  `.zone = .center, .on_chooser = true` with `.point` — where along the strip, so you can insert
+  it between your tabs (the region it came out of included: back on its own strip, it is a
+  reorder). It returns true while a carried view is over the strip — show where it would go in.
 
 ### 3.2 The `Plugin` vtable — the universal editor protocol
 

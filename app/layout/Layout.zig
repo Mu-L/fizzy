@@ -988,6 +988,18 @@ pub fn pluginRegionSelected(self: *Layout, token: sdk.RegionSpec.Token) ?*Surfac
     return self.selectedIn(r);
 }
 
+/// A plugin region's own chooser (its tab strip) is at `bounds` this frame
+/// (`Host.Region.offerChooser`): while a view is carried it is where the view goes *into* the
+/// region, and chrome the region's zones stay off. True while the carried view is over it.
+pub fn offerPluginRegionChooser(self: *Layout, token: sdk.RegionSpec.Token, bounds: dvui.Rect.Physical) bool {
+    const r = self.pluginRegion(token) orelse return false;
+    if (!self.state.view_drag.active() or r.name.len == 0) return false;
+    // Into the region even for the one the view came out of: back on its own strip it is being
+    // reordered, which only the plugin can do (`RegionSpec.Drop.on_chooser`).
+    ViewDrag.offerChooser(self, r.name, bounds, true);
+    return bounds.contains(dvui.currentWindow().mouse_pt);
+}
+
 pub fn pluginRegionSelect(self: *Layout, token: sdk.RegionSpec.Token, id: []const u8) void {
     const r = self.pluginRegion(token) orelse return;
     self.selectIn(r, id);

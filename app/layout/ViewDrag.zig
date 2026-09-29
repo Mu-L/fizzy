@@ -48,6 +48,14 @@ texture_rect: dvui.Rect.Physical = .{},
 start_ns: i128 = 0,
 /// Surface lifted from the source: what the card under the pointer shows, and what lands.
 moved_id: []const u8 = "",
+/// The card's size as last drawn, and the size and moment its current change of shape set out
+/// from: at lift from what was grabbed; over a chooser it becomes a tab and off one the preview
+/// again, each on the same growing motion (`drawFloat`).
+card_size: dvui.Size.Physical = .{},
+card_from: dvui.Size.Physical = .{},
+card_start_ns: i128 = 0,
+/// The card is a tab this frame: the pointer is over a chooser.
+card_tab: bool = false,
 /// The places this drag can land on, and where they were, frozen at lift.
 targets: [max_targets]Target = undefined,
 target_count: usize = 0,
@@ -60,11 +68,16 @@ last_offers: [max_offers]Offer = undefined,
 last_offer_count: usize = 0,
 offer_frame: i128 = 0,
 
-/// A chooser that will take the dragged view into its place.
+/// A chooser a carried view is over: a place's tab strip, a rail. Chrome, not content — the
+/// place's drop zones and the card's preview stay off it (`interiorBounds`, `drawFloat`).
 pub const Offer = struct {
     /// Interned place name.
     name: []const u8,
     bounds: dvui.Rect.Physical,
+    /// A release over it lands the view in its place. False for the app's own strip of the
+    /// place the view came out of, where dropping it back is no move; a plugin's strip always
+    /// takes it, since back on its own strip it is being reordered.
+    into: bool = true,
 };
 pub const max_offers = 16;
 
@@ -100,7 +113,7 @@ pub fn loose(self: ViewDrag) bool {
 /// A chooser, drawing during a drag, offering itself as somewhere the view can go: into place
 /// `name`, as one of its views. Its place may sit elsewhere — a rail beside a sidebar — or the
 /// chooser inside it; either way over the chooser the drop is into the place, not a split of it.
-pub fn offerChooser(l: *Layout, name: []const u8, bounds: dvui.Rect.Physical) void {
+pub fn offerChooser(l: *Layout, name: []const u8, bounds: dvui.Rect.Physical, into: bool) void {
     const d = &l.state.view_drag;
     if (!d.active()) return;
     const now = dvui.currentWindow().frame_time_ns;
@@ -111,7 +124,7 @@ pub fn offerChooser(l: *Layout, name: []const u8, bounds: dvui.Rect.Physical) vo
         d.offer_frame = now;
     }
     if (d.offer_count == max_offers) return;
-    d.offers[d.offer_count] = .{ .name = l.state.internName(l.gpa, name), .bounds = bounds };
+    d.offers[d.offer_count] = .{ .name = l.state.internName(l.gpa, name), .bounds = bounds, .into = into };
     d.offer_count += 1;
 }
 
@@ -180,6 +193,10 @@ pub fn begin(l: *Layout, name: []const u8, from: dvui.Rect.Physical) void {
     d.name = l.state.internName(l.gpa, name);
     d.from = from.size();
     d.start_ns = dvui.currentWindow().frame_time_ns;
+    d.card_from = d.from;
+    d.card_size = d.from;
+    d.card_start_ns = d.start_ns;
+    d.card_tab = false;
     if (visibleId(l, name)) |id| d.moved_id = id;
     mapTargets(l, d);
 }
@@ -194,6 +211,10 @@ pub fn beginLoose(l: *Layout, id: []const u8, from: dvui.Rect.Physical, texture:
     d.name = loose_source;
     d.from = from.size();
     d.start_ns = dvui.currentWindow().frame_time_ns;
+    d.card_from = d.from;
+    d.card_size = d.from;
+    d.card_start_ns = d.start_ns;
+    d.card_tab = false;
     d.moved_id = s.id;
     d.texture = texture;
     d.texture_rect = from;
@@ -245,8 +266,39 @@ fn frozen(state: *const Layout.State, name: []const u8) ?Target {
 }
 
 fn kindAt(state: *const Layout.State, dest: []const u8, mouse: dvui.Point.Physical, scale: f32) Drop.Kind {
-    const dest_b = placeBounds(state, dest) orelse return .swap;
+    const dest_b = interiorBounds(state, dest) orelse return .swap;
     return Drop.kindAt(dest_b, mouse, scale);
+}
+
+/// The part of place `name` a carried view's zones cover: the place less its own chooser — a tab
+/// strip across its top or foot, which offered itself while the drag was on (`offerChooser`).
+/// The strip is chrome: over it the view goes into the place's list, not onto a zone, so the
+/// zones, the edge the pointer is read against and a split's halves are all cut from the rest.
+pub fn interiorBounds(state: *const Layout.State, name: []const u8) ?dvui.Rect.Physical {
+    const whole = placeBounds(state, name) orelse return null;
+    var b = whole;
+    const d = &state.view_drag;
+    const now = dvui.currentWindow().frame_time_ns;
+    const sets = [2][]const Offer{
+        if (d.offer_frame == now) d.offers[0..d.offer_count] else &.{},
+        d.last_offers[0..d.last_offer_count],
+    };
+    for (sets) |set| for (set) |o| {
+        if (!std.mem.eql(u8, o.name, name)) continue;
+        const i = b.intersect(o.bounds);
+        // A band across the place, not a rail beside it or a sliver of overlap.
+        if (i.w < b.w * 0.5 or i.h <= 0) continue;
+        const above = i.y - b.y;
+        const below = (b.y + b.h) - (i.y + i.h);
+        if (above <= below) {
+            const cut = i.y + i.h - b.y;
+            b.y += cut;
+            b.h -= cut;
+        } else {
+            b.h = i.y - b.y;
+        }
+    };
+    return if (b.h >= 1 and b.w >= 1) b else whole;
 }
 
 /// The place a release at `mouse` would land on, for a view lifted from
@@ -254,12 +306,13 @@ fn kindAt(state: *const Layout.State, dest: []const u8, mouse: dvui.Point.Physic
 /// pane beats the main area it sits in.
 pub fn targetAt(l: *Layout, mouse: dvui.Point.Physical, source: []const u8) ?[]const u8 {
     const state = l.state;
-    // Over a chooser, its place — as one of its views, never a split.
-    if (chooserAt(state, mouse)) |o| return o.name;
+    // Over a chooser, its place — as one of its views, never a split — or nowhere, over the
+    // app's own strip of the place the view came out of.
+    if (chooserAt(state, mouse)) |o| return if (o.into) o.name else null;
     // The source's own edge is a self-split, and it outranks any pane nested
     // inside it — otherwise a document filling the place always wins on area
     // and its own edges become unreachable.
-    if (placeBounds(state, source)) |bounds| {
+    if (interiorBounds(state, source)) |bounds| {
         if (bounds.contains(mouse)) {
             switch (Drop.kindAt(bounds, mouse, dvui.currentWindow().natural_scale)) {
                 .split => return source,
@@ -383,7 +436,9 @@ pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
     const aimed = aimedAt(l, name) and !over_chooser;
     const target = aimed and isTarget(l, name) and aimedJoin(l) == null;
     if (!target and !DropZones.showing(key)) return;
-    const whole = placeBounds(l.state, name) orelse {
+    // Over the place less its own strip (`interiorBounds`): the strip takes the view into the
+    // place's list, and the zones are for its content.
+    const whole = interiorBounds(l.state, name) orelse {
         DropZones.forget(key);
         return;
     };
@@ -464,14 +519,23 @@ pub fn zonesShowing(l: *Layout, name: []const u8, key: dvui.Id) bool {
 /// left the gesture looking cancelled.
 pub fn drawFloat(l: *Layout) void {
     tick(l);
-    const d = l.state.view_drag;
+    const d = &l.state.view_drag;
     if (!d.active()) return;
     const mouse = dvui.currentWindow().mouse_pt;
     const now = dvui.currentWindow().frame_time_ns;
-    // The lift grows the card the way a dialog grows open (`motion.enter` over the dialogs' 300ms
-    // as written, past its size and back when motion is playful): instant when motion is off.
+    // Over a chooser — a tab strip, a rail — the view is going into a list, and the card is a
+    // tab: the preview of a place is for the places' insides. Each change of shape grows from
+    // the card as it was, the way a dialog grows open.
+    const as_tab = chooserAt(l.state, mouse) != null;
+    if (as_tab != d.card_tab) {
+        d.card_tab = as_tab;
+        d.card_from = d.card_size;
+        d.card_start_ns = now;
+    }
+    // `motion.enter` over the dialogs' 300ms as written, past its size and back when motion is
+    // playful: instant when motion is off.
     const dur: f64 = core.motion.durationMs(300) * @as(f64, std.time.ns_per_ms);
-    const elapsed: f64 = @floatFromInt(now - d.start_ns);
+    const elapsed: f64 = @floatFromInt(now - d.card_start_ns);
     const t = if (dur <= 0) 1 else core.motion.enter(@floatCast(std.math.clamp(elapsed / dur, 0, 1)));
 
     // From the size of what was grabbed to a card, keeping the grab point under the pointer, so
@@ -481,12 +545,14 @@ pub fn drawFloat(l: *Layout) void {
     const scale = dvui.currentWindow().natural_scale;
     const pad = card_padding * scale;
     const title = if (l.host.surfaceById(d.moved_id)) |s| s.title else "view";
-    const target: dvui.Size.Physical = if (d.texture != null) blk: {
+    const show_photo = d.texture != null and !as_tab;
+    const target: dvui.Size.Physical = if (show_photo) blk: {
         const f = floatTarget(d.texture_rect.size(), scale);
         break :blk .{ .w = f.w + 2 * pad, .h = f.h + 2 * pad };
-    } else pillSize(l, d, title, scale);
-    const w = from.w + (target.w - from.w) * t;
-    const h = from.h + (target.h - from.h) * t;
+    } else pillSize(l, d.*, title, scale);
+    const w = d.card_from.w + (target.w - d.card_from.w) * t;
+    const h = d.card_from.h + (target.h - d.card_from.h) * t;
+    d.card_size = .{ .w = w, .h = h };
     const sx = if (from.w > 0) w / from.w else 1;
     const sy = if (from.h > 0) h / from.h else 1;
     const off = dvui.dragOffset();
@@ -513,7 +579,7 @@ pub fn drawFloat(l: *Layout) void {
         core.dialogs.glassShadow(brs.r, corners, brs.s, core.dialogs.surfaceShadow(), 1);
     }
 
-    if (d.texture) |tex| {
+    if (if (show_photo) d.texture else null) |tex| {
         // The photograph, inset in the glass, its corners following the card's.
         // Over the content fill: a document paints no background of its own (the pane behind it
         // does), and on bare glass its photograph was text floating in the frost.
@@ -522,7 +588,7 @@ pub fn drawFloat(l: *Layout) void {
         crs.r.fill(inner.scale(crs.s, dvui.CornerRect.Physical), .{ .color = .{ .color = dvui.themeGet().color(.content, .fill) }, .fade = 1 });
         dvui.renderTexture(tex, crs, .{ .corners = inner }) catch {};
     } else {
-        drawTabFace(l, d, title);
+        drawTabFace(l, d.*, title);
     }
     // Frames only while the card is still changing into the one in the hand: after that it moves
     // when the pointer does, and the pointer moving is a frame anyway.
@@ -618,6 +684,8 @@ fn floatTarget(from: dvui.Size.Physical, scale: f32) dvui.Size.Physical {
 /// means something, so letting go over the window frame cancels.
 pub fn apply(l: *Layout, source: []const u8, mouse: dvui.Point.Physical) void {
     if (chooserAt(l.state, mouse)) |o| {
+        if (!o.into) return;
+        if (dropOnPluginChooser(l, source, o.name, mouse)) return;
         place(l, source, o.name, .swap);
         return;
     }
@@ -625,6 +693,23 @@ pub fn apply(l: *Layout, source: []const u8, mouse: dvui.Point.Physical) void {
     if (placeBounds(l.state, dest) == null) return;
     const scale = dvui.currentWindow().natural_scale;
     place(l, source, dest, kindAt(l.state, dest, mouse, scale));
+}
+
+/// A release over a plugin region's own chooser: straight to the plugin's `on_drop`, as into the
+/// region with where along its strip — even for the region the view came out of, whose strip
+/// reorders it, which `place` would refuse as no move. False when `dest` is not a plugin region
+/// with a drop of its own, for `place` to handle.
+fn dropOnPluginChooser(l: *Layout, source: []const u8, dest: []const u8, mouse: dvui.Point.Physical) bool {
+    const r = regionNamed(l.state, dest) orelse return false;
+    const on_drop = r.on_drop orelse return false;
+    const moved = ownId(l.arena, movedFrom(l, source) orelse return true) orelse return true;
+    const s = l.host.surfaceById(moved) orelse return true;
+    if (!accepts(r.*, s.keywords)) return true;
+    if (on_drop(r.drop_ctx, .{ .surface_id = moved, .zone = .center, .point = mouse, .on_chooser = true })) {
+        l.state.markDirty();
+        dvui.refresh(null, @src(), null);
+    }
+    return true;
 }
 
 /// Move the visible surface of `source` onto `dest`. The picker's own moves

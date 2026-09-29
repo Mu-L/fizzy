@@ -45,6 +45,13 @@ pub const Drop = struct {
     /// The dropped surface's id, as registered.
     surface_id: []const u8,
     zone: Zone,
+    /// Where it was let go, physical — for a region placing it among its own children (the tab
+    /// a strip inserts it before).
+    point: dvui.Point.Physical = .{},
+    /// Let go over the region's own chooser (`Host.Region.offerChooser`): the zone is `center`,
+    /// and `point` says where along the chooser. Also for the region the view came out of —
+    /// dropped back on its own strip, it is being reordered.
+    on_chooser: bool = false,
 
     pub const Zone = union(enum) {
         /// Into the region itself.

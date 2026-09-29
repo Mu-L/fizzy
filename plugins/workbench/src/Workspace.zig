@@ -47,6 +47,10 @@ pane_rect_physical: ?dvui.Rect.Physical = null,
 /// The tab strip as last laid out — where a lifted tab can still be put back in a strip, before
 /// it becomes a view drag (`drawTabs`).
 strip_rect_physical: ?dvui.Rect.Physical = null,
+/// Where each tab was this frame, with its index in the pane's tab list: where a tab carried
+/// back over the strip goes in (`insertIndexAt`).
+tab_slots: [max_tab_slots]TabSlot = undefined,
+tab_slot_count: usize = 0,
 /// The pane as it looked just before its last document closed (the host's
 /// `FrameTarget.snapshot`), drawn while the emptied pane slides shut so it reads as the file
 /// closing rather than as a blank pane. Freed when the pane goes, or refills.
@@ -55,6 +59,9 @@ closing_snapshot: ?dvui.Texture = null,
 /// it reaches the tree on the next rebuild, so this is a frame or so at most; past that the pane
 /// is staying, and a picture of a closed document must not stand in for it.
 snapshot_idle_frames: u8 = 0,
+
+const max_tab_slots = 64;
+const TabSlot = struct { index: usize, rect: dvui.Rect.Physical };
 
 pub fn init(grouping: u64) Workspace {
     return .{ .grouping = grouping };
@@ -155,8 +162,10 @@ pub fn draw(self: *Workspace) !dvui.App.Result {
 
     // Where this frame's tab strip is, for a file dropped on it; none when there are no tabs.
     self.strip_rect_physical = null;
+    self.tab_slot_count = 0;
     if (tabs.len > 0) {
         self.drawTabs(region, tabs, selected);
+        self.offerStrip(region, self.tabCount());
     } else if (!solePane()) {
         // An empty pane in a split looks like its neighbours with nothing open: the tab strip's
         // room, then the same card, empty — not a bare pane that starts higher than they do.
@@ -242,6 +251,12 @@ fn drawTabs(self: *Workspace, region: sdk.Host.Region, tabs: []const *sdk.Surfac
             .border = .all(0),
         });
         defer reorderable.deinit();
+        if (self.tab_slot_count < max_tab_slots) {
+            // Its place in the assignment, which is what a drop rewrites — the list drawn here
+            // leaves out entries that name nothing loadable, so its own index can be short.
+            self.tab_slots[self.tab_slot_count] = .{ .index = self.assignedIndexOf(surface.id) orelse i, .rect = reorderable.data().borderRectScale().r };
+            self.tab_slot_count += 1;
+        }
 
         // Active-tab chrome belongs to the one pane that is active: four panes each dressing
         // their own tab as current is four claims to be where the next command lands.
@@ -604,6 +619,14 @@ pub fn hasTab(self: *Workspace, id: []const u8) bool {
     return false;
 }
 
+/// Where `id` is in this pane's assignment.
+fn assignedIndexOf(self: *const Workspace, id: []const u8) ?usize {
+    var buf: [32]u8 = undefined;
+    const existing = runtime.host().assignedSurfaces(name(&buf, self.grouping)) orelse return null;
+    for (existing, 0..) |e, k| if (std.mem.eql(u8, e, id)) return k;
+    return null;
+}
+
 /// How many tabs this pane has by assignment, open or not.
 pub fn tabCount(self: *Workspace) usize {
     var buf: [32]u8 = undefined;
@@ -623,6 +646,61 @@ pub fn liveTabCount(self: *Workspace) usize {
         if (host.surfaceById(id) != null) n += 1;
     }
     return n;
+}
+
+/// The strip is this pane's chooser (`Host.Region.offerChooser`): a tab carried in the app's view
+/// drag back over it goes into the tabs rather than onto a drop zone — the zones and the preview
+/// are for the pane's inside — and while it is over, a bar shows where it would go in.
+fn offerStrip(self: *Workspace, region: sdk.Host.Region, tab_count: usize) void {
+    const strip = self.strip_rect_physical orelse return;
+    if (!region.offerChooser(strip)) return;
+    const index = self.insertIndexAt(dvui.currentWindow().mouse_pt.x, tab_count);
+    const x = self.insertX(index) orelse return;
+    const s = dvui.currentWindow().natural_scale;
+    const bar_w = 3 * s;
+    const bar_h = strip.h * 0.7;
+    const bar: dvui.Rect.Physical = .{ .x = x - bar_w / 2, .y = strip.y + (strip.h - bar_h) / 2, .w = bar_w, .h = bar_h };
+    bar.fill(.round(bar_w / 2), .{ .color = .{ .color = dvui.themeGet().color(.highlight, .fill) }, .fade = 1 });
+}
+
+/// The index in this pane's assignment a tab let go at `x` goes in before: the first tab whose
+/// middle is past it, else the end.
+pub fn insertIndexAt(self: *const Workspace, x: f32, tab_count: usize) usize {
+    for (self.tab_slots[0..self.tab_slot_count]) |slot| {
+        if (x < slot.rect.x + slot.rect.w / 2) return slot.index;
+    }
+    return tab_count;
+}
+
+/// Where the gap before tab `index` is along the strip: its left edge, or after the last tab.
+fn insertX(self: *const Workspace, index: usize) ?f32 {
+    var last_right: ?f32 = null;
+    for (self.tab_slots[0..self.tab_slot_count]) |slot| {
+        if (slot.index >= index) return slot.rect.x;
+        last_right = slot.rect.x + slot.rect.w;
+    }
+    return last_right;
+}
+
+/// Put `id` in this pane's tabs before `index` — moved there if it is already one of them — and
+/// show it.
+pub fn insertTab(self: *Workspace, id: []const u8, index: usize) void {
+    self.expecting = false;
+    var buf: [32]u8 = undefined;
+    const arena = runtime.host().arena();
+    var ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    var at = index;
+    if (runtime.host().assignedSurfaces(name(&buf, self.grouping))) |existing| {
+        for (existing, 0..) |e, k| {
+            if (std.mem.eql(u8, e, id)) {
+                if (k < index) at -|= 1;
+                continue;
+            }
+            ids.append(arena, e) catch return;
+        }
+    }
+    ids.insert(arena, @min(at, ids.items.len), id) catch return;
+    self.setTabs(ids.items, id);
 }
 
 /// Whether `p` is over some pane's tab strip, or near enough to it — within half a strip's
@@ -654,7 +732,13 @@ pub fn paneDrop(ctx: ?*anyopaque, drop: sdk.RegionSpec.Drop) bool {
         if (other.grouping != target) other.removeTab(drop.surface_id);
     }
     const pane = wb.pane(target) catch return false;
-    pane.addTab(drop.surface_id, true);
+    // Over the strip: where along it — between the tabs it was let go between, and back on its
+    // own strip that is a reorder.
+    if (drop.on_chooser) {
+        pane.insertTab(drop.surface_id, pane.insertIndexAt(drop.point.x, pane.tabCount()));
+    } else {
+        pane.addTab(drop.surface_id, true);
+    }
     return true;
 }
 
@@ -668,22 +752,29 @@ fn paneSide(side: sdk.RegionSpec.Drop.Side) core.widgets.DockLayout.Side {
 }
 
 /// A file-tree row dropped on this pane: the same zones and reading as a dragged view
-/// (`core.widgets.DropZones`) — the middle opens it here, an edge in a new pane on that side. The
-/// whole pane is the target, its tab strip included: over the strip the file joins the tabs, so
-/// the middle lights there whatever band it sits in (a drop the strip itself takes is the same,
-/// `processTabsDrag`). A tab dragged between panes is not read here: off its strip it is the
-/// app's view drag.
-/// The zone a file dropped at `p` lands in: the middle anywhere on the tab strip — it joins the
-/// tabs — else whichever zone `p` reads as.
+/// (`core.widgets.DropZones`) — the middle opens it here, an edge in a new pane on that side —
+/// over the same part of the pane: its inside, below the tab strip (`interiorRect`). The strip is
+/// chrome, as it is for a carried tab: over it the file goes in among the tabs, where the strip's
+/// own reorder shows it and takes the release (`processTabsDrag`). A tab dragged between panes
+/// is not read here: off its strip it is the app's view drag.
 fn zoneAt(self: *const Workspace, zones: core.widgets.DropZones.Rects, p: dvui.Point.Physical) core.widgets.DropZones.Zone {
-    if (self.strip_rect_physical) |strip| if (strip.contains(p)) return .center;
+    _ = self;
     return core.widgets.DropZones.at(zones, p);
+}
+
+/// The pane less its tab strip: what its drop zones cover.
+fn interiorRect(self: *const Workspace) ?dvui.Rect.Physical {
+    const pane = self.pane_rect_physical orelse return null;
+    const strip = self.strip_rect_physical orelse return pane;
+    const top = strip.y + strip.h;
+    if (top <= pane.y or top >= pane.y + pane.h) return pane;
+    return .{ .x = pane.x, .y = top, .w = pane.w, .h = pane.y + pane.h - top };
 }
 
 pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
     const DZ = core.widgets.DropZones;
     const rs = data.rectScale();
-    const bounds = self.pane_rect_physical orelse rs.r;
+    const bounds = self.interiorRect() orelse rs.r;
     const zones = DZ.rects(bounds, rs.s);
     const wb = runtime.workbench();
     const dragging = dvui.dragName("tab_drag") and wb.tab_drag_from_tree_path != null;

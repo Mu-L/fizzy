@@ -243,6 +243,12 @@ pub const VTable = struct {
     /// on a plugin's region). Call it when something of the plugin's is dragged off the place it
     /// lives, as a document tab off its strip.
     beginViewDrag: *const fn (ctx: *anyopaque, id: []const u8, from: dvui.Rect.Physical) void,
+    /// The region's own chooser — the tab strip a plugin draws for it — is at `bounds` this
+    /// frame. While a view is carried it is chrome, not content: over it the drop is into the
+    /// region (`RegionSpec.Drop.on_chooser`), the carried view shows as a tab rather than a
+    /// preview, and the region's drop zones cover the region less it. True while a carried view
+    /// is over it — the plugin's cue to show where it would go in.
+    offerRegionChooser: *const fn (ctx: *anyopaque, token: RegionSpec.Token, bounds: dvui.Rect.Physical) bool,
     regionSelect: *const fn (ctx: *anyopaque, token: RegionSpec.Token, id: []const u8) void,
     /// Set what a region shows, by the name it is declared under — the same list the picker
     /// writes. `null` returns the region to its keywords. By name rather than by token so a
@@ -540,6 +546,10 @@ pub fn regionSelected(self: EditorAPI, token: RegionSpec.Token) ?*Surface {
 
 pub fn beginViewDrag(self: EditorAPI, id: []const u8, from: dvui.Rect.Physical) void {
     self.vtable.beginViewDrag(self.ctx, id, from);
+}
+
+pub fn offerRegionChooser(self: EditorAPI, token: RegionSpec.Token, bounds: dvui.Rect.Physical) bool {
+    return self.vtable.offerRegionChooser(self.ctx, token, bounds);
 }
 
 pub fn regionSelect(self: EditorAPI, token: RegionSpec.Token, id: []const u8) void {

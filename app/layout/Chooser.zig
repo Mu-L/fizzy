@@ -266,16 +266,20 @@ pub fn deinit(self: *Chooser) void {
 /// While a view is carried, the chooser is somewhere it can go: into this chooser's place, as one
 /// of its views — a rail beside a sidebar as much as a strip inside a panel. It says so to the drag
 /// (`ViewDrag.offerChooser`), which lands a release over it there; and under the pointer it shows
-/// as one pane of the drop zones' glass across it, where the places' own zones step back. Not for
-/// the place the view came out of: dropping it back is no move.
+/// as one pane of the drop zones' glass across it, where the places' own zones step back. For the
+/// place the view came out of it is chrome only: dropping it back is no move.
 fn offerDrop(self: *Chooser, key: dvui.Id) void {
     const f = self.layout;
     const d = f.state.view_drag;
     const name = placeName(f, &self.place);
     var lit: ?dvui.Rect.Physical = null;
-    if (d.active()) if (name) |n| if (!std.mem.eql(u8, n, d.name)) {
-        ViewDrag.offerChooser(f, n, self.bounds);
-        if (self.bounds.contains(dvui.currentWindow().mouse_pt)) lit = self.bounds;
+    if (d.active()) if (name) |n| {
+        // Offered for the place the view came out of as well, as chrome: its zones stay off the
+        // strip and the card rides as a tab over it (`ViewDrag.interiorBounds`), but a release
+        // there lands nowhere — dropping it back is no move — and it does not light.
+        const into = !std.mem.eql(u8, n, d.name);
+        ViewDrag.offerChooser(f, n, self.bounds, into);
+        if (into and self.bounds.contains(dvui.currentWindow().mouse_pt)) lit = self.bounds;
     };
     core.widgets.DropZones.drawSingle(key.update("_chooser_drop"), lit, dvui.currentWindow().natural_scale, .{
         .inset = 2,
