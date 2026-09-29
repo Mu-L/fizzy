@@ -21,8 +21,8 @@
 //! the pointer is the one a release takes. Moving to another place, its zones
 //! clear as the new place's come in — the window is never covered in targets,
 //! and the one change on screen is where the pointer is. The middle of the
-//! other half of a split is a join (`drawJoin`): aimed at, the place's zones
-//! step back for one pane across both halves — the place the drop leaves.
+//! other half of a split is a join, which its middle bubble says with its icon
+//! (`DropZones.Center.join`) — no other drop previews what it leaves, so neither does this.
 const std = @import("std");
 const dvui = @import("dvui");
 const core = @import("core");
@@ -457,13 +457,12 @@ fn aimedAt(l: *Layout, name: []const u8) bool {
 pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
     // Only the place under the pointer: its zones come in as the pointer arrives and clear as it
     // leaves for another, whose come in over it — for as long as they are still showing, so a
-    // place left mid-fade finishes going. Aimed at a join, they step back for the one pane across
-    // both halves (`drawJoin`).
+    // place left mid-fade finishes going.
     // Over a chooser the drop is into its place, shown by the chooser (`Chooser`); the places'
     // own zones step back.
     const over_chooser = chooserAt(l.state, dvui.currentWindow().mouse_pt) != null;
     const aimed = aimedAt(l, name) and !over_chooser;
-    const target = aimed and isTarget(l, name) and aimedJoin(l) == null;
+    const target = aimed and isTarget(l, name);
     if (!target and !DropZones.showing(key)) return;
     // Over the place less its own strip (`interiorBounds`): the strip takes the view into the
     // place's list, and the zones are for its content.
@@ -500,8 +499,7 @@ pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
 }
 
 /// What a view drag draws over every place at once, after they have all drawn: the drops they
-/// queued (`drawZones`), the join across two of them (`drawJoin`), and over them the card riding
-/// the pointer — in a layer of its own over the window.
+/// queued (`drawZones`), and over them the card riding the pointer — in a layer of its own over the window.
 pub fn drawOverlay(l: *Layout) void {
     const d = &l.state.view_drag;
     const now = dvui.currentWindow().frame_time_ns;
@@ -529,12 +527,8 @@ pub fn drawOverlay(l: *Layout) void {
     }
     d.last_pending = drops;
     d.last_pending_count = n;
-    const join_key = dvui.Id.extendId(null, @src(), 0);
-    if (n == 0 and !d.active() and !DropZones.showing(join_key)) {
-        // Nothing to lay over the window; the join still hears that it is gone.
-        drawJoin(l, join_key);
-        return;
-    }
+    // Nothing to lay over the window.
+    if (n == 0 and !d.active()) return;
     var layer: dvui.FloatingWidget = undefined;
     layer.init(@src(), .{ .mouse_events = false }, .{ .rect = .cast(dvui.windowRect()), .background = false });
     defer layer.deinit();
@@ -549,7 +543,6 @@ pub fn drawOverlay(l: *Layout) void {
         DropZones.draw(p.key, p.wheel, scale, p.look);
     }
     dvui.clipSet(prev_clip);
-    drawJoin(l, join_key);
     if (d.active()) drawFloat(l);
 }
 
@@ -562,34 +555,6 @@ fn joins(l: *Layout, source: []const u8, dest: []const u8) bool {
     if (l.state.joinable(source, dest) == null) return false;
     const r = regionNamed(l.state, source) orelse return true;
     return r.shows == .one or holding(l, source).len <= 1;
-}
-
-/// The join a release here would make, if the pointer is on the middle of the other half of
-/// the split the view was lifted from.
-fn aimedJoin(l: *Layout) ?SplitTree.Forest.Pair {
-    const d = l.state.view_drag;
-    if (!d.active() or d.loose()) return null;
-    const mouse = dvui.currentWindow().mouse_pt;
-    // Over a chooser the drop is into its place, which the chooser shows.
-    if (chooserAt(l.state, mouse) != null) return null;
-    const dest = targetAt(l, mouse, d.name) orelse return null;
-    if (!joins(l, d.name, dest)) return null;
-    const k = kindAt(l, dest, mouse, dvui.currentWindow().natural_scale) orelse return null;
-    if (k != .swap) return null;
-    return l.state.joinable(d.name, dest);
-}
-
-/// The join's pane: one lit sheet of the zones' glass across both halves of the split being
-/// joined, while it is aimed at, where each half showed its own zones. It is the one place the
-/// drop will leave, shown before it is made — the answer to "what does dropping here do" that a
-/// single zone's icon cannot give. Drawn after every place (the framework calls it once the
-/// shape has declared them all), so it lies over the zones stepping back beneath it.
-fn drawJoin(l: *Layout, key: dvui.Id) void {
-    const scale = dvui.currentWindow().natural_scale;
-    const pair = aimedJoin(l) orelse return DropZones.drawJoin(key, null, scale);
-    const a = placeBounds(l.state, pair.keep) orelse return DropZones.drawJoin(key, null, scale);
-    const b = placeBounds(l.state, pair.drop) orelse return DropZones.drawJoin(key, null, scale);
-    DropZones.drawJoin(key, a.unionWith(b), scale);
 }
 
 /// Whether `name` is somewhere the dragged view could land — one of the places mapped at lift

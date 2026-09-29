@@ -445,7 +445,7 @@ pub fn register(manager: PluginManager) !void {
 /// description still wraps within the (expanded) info column.
 fn drawDetailHeader(entry: StoreEntry) void {
     const theme = dvui.themeGet();
-    const muted = theme.color(.window, .text).opacity(0.7);
+    const muted = theme.color(.window, .fill).lerp(theme.color(.window, .text), 0.7);
 
     // ScrollInfo defaults can be clobbered if a prior frame left vertical enabled; pin both.
     detail_header_scroll.horizontal = .auto;
@@ -696,7 +696,7 @@ fn drawChangelogPlaceholder() void {
     });
     defer box.deinit();
 
-    const muted = dvui.themeGet().color(.window, .text).opacity(0.7);
+    const muted = dvui.themeGet().color(.window, .fill).lerp(dvui.themeGet().color(.window, .text), 0.7);
     core.icon.icon(@src(), "ChangelogPlaceholder", icons.tvg.lucide.history, .{ .stroke_color = .{ .color = muted } }, .{
         .gravity_x = 0.5,
         .min_size_content = .{ .w = 32, .h = 32 },
@@ -2087,7 +2087,7 @@ fn drawFetchingPlaceholder() void {
 /// ordinary state for this pane, not an error banner over the whole tab.
 fn drawUnreachablePlaceholder() void {
     const theme = dvui.themeGet();
-    const muted = theme.color(.window, .text).opacity(0.7);
+    const muted = theme.color(.window, .fill).lerp(theme.color(.window, .text), 0.7);
 
     var center = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = false });
     defer center.deinit();
@@ -3064,7 +3064,7 @@ fn updateRelease(entry: StoreEntry) ?store.ShardRelease {
 ///   * bundled built-in → not store-manageable (no uninstall).
 fn drawCardControls(entry: StoreEntry) void {
     const theme = dvui.themeGet();
-    const muted = theme.color(.window, .text).opacity(0.7);
+    const muted = theme.color(.window, .fill).lerp(theme.color(.window, .text), 0.7);
 
     var ctl = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1.0, .gravity_y = 0.5 });
     defer ctl.deinit();
@@ -3209,7 +3209,7 @@ fn drawCardControls(entry: StoreEntry) void {
 /// already running.
 fn drawStoreCardControls(entry: StoreEntry) void {
     const theme = dvui.themeGet();
-    const muted = theme.color(.window, .text).opacity(0.7);
+    const muted = theme.color(.window, .fill).lerp(theme.color(.window, .text), 0.7);
 
     var ctl = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1.0, .gravity_y = 0.5 });
     defer ctl.deinit();

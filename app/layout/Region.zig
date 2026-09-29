@@ -740,7 +740,7 @@ fn cornerButton(self: *Layout, opts: InitOptions, keywords: []const []const u8, 
     if ((alpha > 0.01 or dragged) and !dragged) {
         bw.drawBackground();
         core.icon.icon(@src(), "regions", dvui.entypo.grid, .{
-            .fill_color = .{ .color = if (bw.hovered()) theme.color(.highlight, .fill) else theme.color(.control, .text).opacity(alpha) },
+            .fill_color = .{ .color = if (bw.hovered()) theme.color(.highlight, .fill) else theme.color(.control, .fill).lerp(theme.color(.control, .text), alpha) },
         }, .{ .expand = .both });
     }
     if (bw.clicked() and !dragged) {

@@ -269,6 +269,8 @@ pub fn deinit(self: *Tabs) void {
     // The slot a dragged item will land in: a pane of the drop zones' glass, rounded, moving
     // with it along the strip and going when the drag does — the same target every drop shows.
     const slot_key = self.outer.data().id.update("_tabs_slot");
+    // The drag over, the tab stands where the slot was: the slot goes with it, not after.
+    if (self.slot == null and !dvui.dragName(self.opts.drag_name)) DropZones.forgetSingle(slot_key);
     const scale = if (self.slot) |rs| rs.s else dvui.currentWindow().natural_scale;
     DropZones.drawSingle(slot_key, if (self.slot) |rs| rs.r else null, scale, .{
         .inset = 1,

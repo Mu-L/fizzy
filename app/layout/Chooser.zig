@@ -281,7 +281,11 @@ fn offerDrop(self: *Chooser, key: dvui.Id) void {
         ViewDrag.offerChooser(f, n, self.bounds, into);
         if (into and self.bounds.contains(dvui.currentWindow().mouse_pt)) lit = self.bounds;
     };
-    core.widgets.DropZones.drawSingle(key.update("_chooser_drop"), lit, dvui.currentWindow().natural_scale, .{
+    const drop_key = key.update("_chooser_drop");
+    // A release over the chooser lands the view in it, which then shows there: the pane goes with
+    // the drag rather than fading round the view that just arrived. Off it, it fades as it leaves.
+    if (!d.active()) core.widgets.DropZones.forgetSingle(drop_key);
+    core.widgets.DropZones.drawSingle(drop_key, lit, dvui.currentWindow().natural_scale, .{
         .inset = 2,
         .icon = .add,
         .radius = core.corners.scaled(core.corners.small),

@@ -140,7 +140,9 @@ pub fn drawMenuRow(title: []const u8, icon: ?[]const u8, kb: dvui.enums.Keybind,
     const id_extra: usize = @truncate(std.hash.Wyhash.hash(0, title));
     var r = Popover.row(@src(), .{ .enabled = enabled, .id_extra = id_extra });
     defer r.deinit();
-    const text_color = if (enabled) theme.color(.control, .text) else theme.color(.control, .text).opacity(0.5);
+    // Dimmed by mixing toward the popover's glass, not by opacity: a see-through icon shows its
+    // own overlapping strokes and whatever the frost has behind it.
+    const text_color = if (enabled) theme.color(.control, .text) else fizzy.core.dialogs.dialogFill().opacity(1).lerp(theme.color(.control, .text), 0.5);
     {
         // The same cell an account's disc takes; the command's icon sits in it, centred.
         var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id_extra, .min_size_content = .{ .w = row_disc, .h = row_disc }, .max_size_content = .size(.{ .w = row_disc, .h = row_disc }), .gravity_y = 0.5, .margin = .{ .w = row_disc_gap }, .background = false, .padding = .all(0) });
@@ -197,7 +199,7 @@ fn accountRowContent(label: []const u8, avatar: ?dvui.ImageSource) void {
     dvui.labelNoFmt(@src(), label, .{}, .{ .gravity_y = 0.5, .margin = .all(0), .padding = .all(0) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 16, .h = 1 }, .expand = .horizontal });
     fizzy.core.icon.icon(@src(), "chevron_right", dvui.entypo.chevron_small_right, .{
-        .stroke_color = .{ .color = theme.color(.control, .text).opacity(0.5) },
-        .fill_color = .{ .color = theme.color(.control, .text).opacity(0.5) },
+        .stroke_color = .{ .color = fizzy.core.dialogs.dialogFill().opacity(1).lerp(theme.color(.control, .text), 0.5) },
+        .fill_color = .{ .color = fizzy.core.dialogs.dialogFill().opacity(1).lerp(theme.color(.control, .text), 0.5) },
     }, .{ .gravity_x = 1.0, .gravity_y = 0.5, .margin = .all(0), .padding = .all(0) });
 }

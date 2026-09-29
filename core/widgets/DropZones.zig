@@ -363,18 +363,6 @@ const BlobJob = struct {
     }
 };
 
-/// The join over two places a drop would make one: a single lit pane of the same glass across
-/// both, where each showed its own zones — the place the drop leaves, shown before it is made.
-/// `rect` is the two places together; null while no join is aimed at, and the pane goes over the
-/// last place it covered. Draw after every place has drawn (it lies over their zones as they go),
-/// keyed by one `id` for the whole window.
-pub fn drawJoin(id: dvui.Id, rect: ?dvui.Rect.Physical, scale: f32) void {
-    drawSingle(id, rect, scale, .{ .inset = join_inset, .icon = .join });
-}
-
-/// Points the join's pane stands in from the two places it covers.
-const join_inset: f32 = 8;
-
 /// How `drawSingle` lays its pane down.
 pub const Single = struct {
     /// Points in from the rect the pane sits.
@@ -657,6 +645,13 @@ pub fn showing(id: dvui.Id) bool {
 /// Drop `id`'s zones outright: the next time its place is the target they come in from nothing.
 pub fn forget(id: dvui.Id) void {
     dvui.dataRemove(null, id, "_drop_zones");
+}
+
+/// Take `drawSingle`'s pane away at once rather than letting it fade: for a slot whose drop has
+/// landed, where the item now stands in it — a slot fading round the item that just arrived read
+/// as a bubble the item grew to fill.
+pub fn forgetSingle(id: dvui.Id) void {
+    dvui.dataRemove(null, id, "_drop_single");
 }
 
 /// `v` eased toward `target` over `dt_ms`, with time constant `tau_ms`.
