@@ -653,15 +653,16 @@ pub fn processTabDrag(self: *Workspace, data: *dvui.WidgetData) void {
     const wb = runtime.workbench();
     const dragging = dvui.dragName("tab_drag") and wb.tab_drag_from_tree_path != null;
     if (!dvui.dragName("tab_drag")) wb.clearFileTreeTabDragDropState();
-    // Every pane shows its zones for the whole drag, the one under the pointer lit, as every
-    // place does for a dragged view; when the drag ends they fade out.
-    if (!dragging) {
+    // The pane under the pointer shows its zones, the one under the pointer lit, as a place does
+    // for a dragged view; left, or when the drag ends, they fade out.
+    const mouse = dvui.currentWindow().mouse_pt;
+    if (!dragging or !bounds.contains(mouse)) {
         if (DZ.showing(data.id)) DZ.draw(data.id, zones, rs.s, .{ .target = false, .center = .add });
-        return;
+        if (!dragging) return;
+    } else {
+        DZ.draw(data.id, zones, rs.s, .{ .hovered = DZ.at(zones, mouse), .center = .add });
     }
     const path = wb.tab_drag_from_tree_path.?;
-    const mouse = dvui.currentWindow().mouse_pt;
-    DZ.draw(data.id, zones, rs.s, .{ .hovered = if (bounds.contains(mouse)) DZ.at(zones, mouse) else null, .center = .add });
 
     for (dvui.events()) |*e| {
         if (!dvui.eventMatch(e, .{ .id = data.id, .r = bounds, .drag_name = "tab_drag" })) continue;

@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const fizzy = @import("../fizzy.zig");
 const dvui = @import("dvui");
+const core = @import("core");
 const Constants = @import("Constants.zig");
 const Entry = fizzy.Entry;
 const Editor = fizzy.Editor;
@@ -14,11 +15,14 @@ const Chooser = Layout.Chooser;
 
 pub const Sidebar = @This();
 
-/// Fizzy built-in views pinned to the bottom of the rail (always visible). Everything else —
-/// the plugin-contributed views — scrolls above them in registration (load) order.
-fn isPinned(id: []const u8) bool {
-    return std.mem.eql(u8, id, PluginStore.view_id) or
-        std.mem.eql(u8, id, Editor.view_settings);
+/// Which end of the rail a view sits at. The app's own views — registered by fizzy, owned by no
+/// plugin (the store, settings) — are the rail's footer: always in view, the same in every
+/// install. What plugins contribute is the list above, in the place's order, and it is the part
+/// that grows: with more than fit, it scrolls, passing under the footer rather than pushing it
+/// off the end. A rule about who registered a view, not a list of ids, so a view the app adds
+/// later lands at the right end without this file hearing of it.
+fn isFooter(view: *const Layout.Surface) bool {
+    return view.owner == null;
 }
 
 pub fn init() !Sidebar {
@@ -56,32 +60,33 @@ pub fn draw(_: Sidebar, editor: *Editor, f: *Layout, keywords: []const []const u
     const place: Layout.Region = .{ .keywords = keywords };
     var ret: Action = .none;
 
-    // Plugin-contributed views scroll in a bounded area, in the place's order. When more icons
-    // exist than fit, an edge shadow hints at the hidden ones.
-    {
-        var list = Chooser.init(@src(), f, place, .{
-            .dir = .vertical,
-            .scroll_shadows = true,
-            .outer = .{ .expand = .both, .background = false },
-        });
-        defer list.deinit();
-        for (list.views(), 0..) |view, i| {
-            if (isPinned(view.id)) continue;
-            drawIcon(editor, &list, view, i);
-        }
-        ret = pickAction(editor, &list, ret);
-    }
+    // The list and the footer share the rail's height: the list runs the whole of it and scrolls
+    // under the footer, which sits on top at the bottom. An overlay, with the footer declared
+    // first and rendered last (`RenderFrontToBack`): the first widget to run takes a click, and
+    // the last to render is on top, so an icon passing under the footer is under it both ways.
+    var stack = dvui.overlay(@src(), .{ .expand = .both, .background = false });
+    defer stack.deinit();
 
-    // Plugin store + Settings: pinned to the bottom of the rail, always visible.
+    var footer_top: f32 = 0;
+    var footer_h: f32 = 0;
     {
+        var ftb: dvui.RenderFrontToBack = undefined;
+        ftb.init();
+        defer ftb.deinit();
+
         var bottom = dvui.box(@src(), .{ .dir = .vertical }, .{
             .gravity_y = 1.0,
+            .expand = .horizontal,
             .background = false,
         });
         defer bottom.deinit();
+        const rs = bottom.data().rectScale();
+        footer_top = rs.r.y;
+        footer_h = bottom.data().rect.h;
+        drawFooterGlass(bottom.data().id, rs, dvui.dataGet(null, vbox.data().id, "_rail_under", f32) orelse 0);
 
         // The account disc, when anything can be signed in to; then plugin-drawn items (a
-        // badge, a status light); then fizzy's own two.
+        // badge, a status light); then fizzy's own views.
         if (editor.app.host.account_providers.items.len != 0) try Accounts.drawRailDisc(editor, rail_icon);
         for (editor.app.host.rail_items.items, 0..) |item, i| {
             if (item.hidden) continue;
@@ -98,13 +103,58 @@ pub fn draw(_: Sidebar, editor: *Editor, f: *Layout, keywords: []const []const u
         });
         defer pinned.deinit();
         for (pinned.views(), 0..) |view, i| {
-            if (!isPinned(view.id)) continue;
-            drawIcon(editor, &pinned, view, i);
+            if (!isFooter(view)) continue;
+            _ = drawIcon(editor, &pinned, view, i);
         }
         ret = pickAction(editor, &pinned, ret);
     }
 
+    // What plugins contribute, the whole height of the rail, scrolling under the footer. The
+    // space at its end is the footer's, so the last icon can always be scrolled clear of it.
+    {
+        var list = Chooser.init(@src(), f, place, .{
+            .dir = .vertical,
+            .scroll_shadows = true,
+            .outer = .{ .expand = .both, .background = false },
+        });
+        defer list.deinit();
+        var last_bottom: f32 = 0;
+        for (list.views(), 0..) |view, i| {
+            if (isFooter(view)) continue;
+            last_bottom = drawIcon(editor, &list, view, i);
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = footer_h } });
+        ret = pickAction(editor, &list, ret);
+        // How far the list reaches under the footer, for its glass next frame.
+        dvui.dataSet(null, vbox.data().id, "_rail_under", @max(0, last_bottom - footer_top));
+    }
+
     return ret;
+}
+
+/// Physical pixels of list under the footer at which its glass is fully there.
+const footer_glass_ramp: f32 = 12;
+
+/// The footer's glass: the dialogs' frost over the list scrolling under it, so an icon passing
+/// beneath is blurred out of the way rather than drawn through the footer's own. Only as much as
+/// there is list under it — with the rail's usual handful of plugin views there is none, and the
+/// footer is the bare rail it always was.
+fn drawFooterGlass(id: dvui.Id, rs: dvui.RectScale, under: f32) void {
+    const g = std.math.clamp(under / (footer_glass_ramp * rs.s), 0, 1);
+    if (g <= 0.01) return;
+    const theme = dvui.themeGet();
+    const corners = core.dialogs.surface_corners.finalize(&theme);
+    if (core.widgets.menuFrost()) |base| {
+        var pane = base;
+        pane.radius = base.radius * g;
+        pane.mix = base.mix * g;
+        pane.lift = base.lift * g;
+        core.widgets.BlurBackdrop.frostPane(id, rs.r, corners, rs.s, pane);
+    } else {
+        const c = core.dialogs.dialogFill();
+        rs.r.fill(corners.scale(rs.s, dvui.CornerRect.Physical), .{ .color = .{ .color = c.opacity(@as(f32, @floatFromInt(c.a)) / 255 * g) }, .fade = 1.0 });
+    }
+    if (g < 1) dvui.refresh(null, @src(), id);
 }
 
 /// Points tall, a rail icon; its cell is twice that.
@@ -130,7 +180,8 @@ fn pickAction(editor: *Editor, c: *const Chooser, so_far: Action) Action {
 }
 
 /// One rail icon: the chooser's item, drawn as the view's glyph with the store's attention badge.
-fn drawIcon(editor: *Editor, c: *Chooser, view: *Layout.Surface, index: usize) void {
+/// Returns the bottom of the item's cell, in physical pixels.
+fn drawIcon(editor: *Editor, c: *Chooser, view: *Layout.Surface, index: usize) f32 {
     // Only the store view can carry one; nothing else in the rail has a pending-decision notion.
     const undecided_count: usize = if (std.mem.eql(u8, view.id, PluginStore.view_id))
         editor.app.undecidedPluginCount()
@@ -147,6 +198,7 @@ fn drawIcon(editor: *Editor, c: *Chooser, view: *Layout.Surface, index: usize) v
 
     var it = c.item(@src(), view, .{ .tooltip = true, .tooltip_detail = detail });
     defer it.deinit();
+    const cell = it.data().borderRectScale().r;
 
     // Register the icon as interactive in the title bar so clicks reach DVUI even when it
     // overlaps the top drag strip on Windows. Only the topmost icon(s) actually sit inside the
@@ -178,4 +230,5 @@ fn drawIcon(editor: *Editor, c: *Chooser, view: *Layout.Surface, index: usize) v
             .fade = 0,
         });
     }
+    return cell.y + cell.h;
 }

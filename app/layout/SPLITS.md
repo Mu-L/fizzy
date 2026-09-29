@@ -63,12 +63,13 @@ and the view you are carrying — never as the view drawn in two places.
   builds every widget under the place twice, and dvui reports a duplicate id for each of them),
   and a card of it rides the pointer. The place goes on drawing its view underneath: the drop
   zones are what changes, over a window that stays put.
-- **Every place it could land shows its drop zones.** All five of them — the middle and each
-  edge — on every such place at once, so every option in the window is in view before you move
-  toward any of them. They are the dialogs' frosted glass, the app's surface rounding, an even gap
-  around each, and a faint icon saying what a drop there does: a pane opening on that side, or
-  the middle's trade (one view), add (several) or join (the other half of a split). The one
-  under the pointer lights. The middle of the place the view came from is bare glass: dropping
+- **The place under the pointer shows its drop zones.** All five of them — the middle and each
+  edge — at once, and only there: moving to another place, its zones go as the new place's come
+  in, so the one change on screen follows the pointer instead of covering the window in targets.
+  They are the dialogs' frosted glass, the app's surface rounding, an even gap around each, and a
+  faint icon saying what a drop there does: a pane opening on that side, or the middle's trade
+  (one view), add (several) or join (the other half of a split). The one under the pointer
+  lights. The middle of the place the view came from is bare glass: dropping
   there does nothing.
 - **A join shows the place it leaves.** Aimed at, the two halves' zones step back and one lit
   pane of the same glass lies across both — the single place the drop will make, the divider
@@ -76,12 +77,13 @@ and the view you are carrying — never as the view drawn in two places.
 - **Nothing is previewed in place.** No place poses the view as if it had landed, and none pulls
   back to make room: one copy of a view is easier to read than two, and the layout that answers
   the drop moves after it, with the easing every split and swap already has.
-- **The zones come and go as a change of mode.** They spread out from where the view was picked
-  up — the place under the pointer first, each farther one a little later — and each grows into
-  its rect as its glass frosts over, eased in and out, its icon arriving once the glass is mostly
-  there. Going, the same backwards and quicker, out of the way of what the drop does. Never by
-  opacity: a frost replaces what it covers, and a half-opaque one would show a see-through
-  window's content through it.
+- **The zones are liquid glass.** An edge zone grows in out of its edge and the middle out of its
+  centre, on a bounce, while the frost comes in ahead of the size; its icon arrives once the glass
+  is mostly there. The glass is a mesh over one blur of the place, so it bends what it shows: a
+  lens band at the rim, and a damped ripple running in from where the zone grew, and out from the
+  pointer when a zone lights. Going, the same curve backwards, quicker. Never by opacity: a frost
+  replaces what it covers, and a half-opaque one would show a see-through window's content
+  through it.
 - **A drag does not change the map it is read against.** The places, and where they are, are
   photographed at lift, exactly like the view is. A place can still move during a drag — a split
   easing shut, a window resized — and a hit-test read against the live layout would chase it.

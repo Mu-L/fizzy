@@ -3585,3 +3585,29 @@ test "drop zones: a small place keeps a middle to aim at" {
     try std.testing.expect(r.center.w > 10 and r.center.h > 10);
     try std.testing.expect(DZ.at(r, .{ .x = 60, .y = 45 }).eql(.center));
 }
+
+test "drop zones: the rings of a pane run the way dvui's paths do" {
+    const r: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+    var pts: [4 * 7 + 2 * (8 - 1) + 2 * (4 - 1)]dvui.Point.Physical = undefined;
+    DZ.ringPoints(&pts, r, 8, 0, 6, 8, 4);
+    // Shoelace: the sign of dvui's own rect path (top-left, bottom-left, bottom-right,
+    // top-right), which is negative in these coordinates.
+    var area: f32 = 0;
+    for (pts, 0..) |p, i| {
+        const q = pts[(i + 1) % pts.len];
+        area += p.x * q.y - q.x * p.y;
+    }
+    try std.testing.expect(area < 0);
+    // Starts at the top of the top-left corner.
+    try std.testing.expectApproxEqAbs(@as(f32, 8), pts[0].x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), pts[0].y, 0.01);
+}
+
+test "drop zones: a zone bounces past its size and settles on it" {
+    try std.testing.expectEqual(@as(f32, 0), DZ.grow(0));
+    try std.testing.expectApproxEqAbs(@as(f32, 1), DZ.grow(1), 1e-5);
+    var peak: f32 = 0;
+    var t: f32 = 0;
+    while (t <= 1) : (t += 0.01) peak = @max(peak, DZ.grow(t));
+    try std.testing.expect(peak > 1.05);
+}

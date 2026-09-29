@@ -16,13 +16,13 @@
 //! a window that stays put. The layout moves after the drop, with the
 //! animations every split and swap already has.
 //!
-//! **Every place it could land shows its drop zones** (`drawZones`,
-//! `core.widgets.DropZones`), all five at once, so every option in the window
-//! is in view; the one under the pointer is the one a release takes. They
-//! spread out from where the view was picked up, nearest place first. The
-//! middle of the other half of a split is a join (`drawJoin`): aimed at, the
-//! two places' zones step back for one pane across both — the place the drop
-//! leaves.
+//! **The place under the pointer shows its drop zones** (`drawZones`,
+//! `core.widgets.DropZones`), all five of its options at once; the one under
+//! the pointer is the one a release takes. Moving to another place, its zones
+//! clear as the new place's come in — the window is never covered in targets,
+//! and the one change on screen is where the pointer is. The middle of the
+//! other half of a split is a join (`drawJoin`): aimed at, the place's zones
+//! step back for one pane across both halves — the place the drop leaves.
 const std = @import("std");
 const dvui = @import("dvui");
 const core = @import("core");
@@ -41,8 +41,6 @@ const ViewDrag = @This();
 name: []const u8 = "",
 /// Physical size of the source when the drag began — the card shrinks from it.
 from: dvui.Size.Physical = .{},
-/// Where the pointer was when the drag began: the drop zones spread out from here.
-start_pt: dvui.Point.Physical = .{},
 /// The lifted surface as it last drew. The floating card is this texture.
 texture: ?dvui.Texture = null,
 /// Where it was taken.
@@ -136,7 +134,6 @@ pub fn begin(l: *Layout, name: []const u8, from: dvui.Rect.Physical) void {
     d.name = l.state.internName(l.gpa, name);
     d.from = from.size();
     d.start_ns = dvui.currentWindow().frame_time_ns;
-    d.start_pt = dvui.currentWindow().mouse_pt;
     if (visibleId(l, name)) |id| d.moved_id = id;
     mapTargets(l, d);
 }
@@ -151,7 +148,6 @@ pub fn beginLoose(l: *Layout, id: []const u8, from: dvui.Rect.Physical, texture:
     d.name = loose_source;
     d.from = from.size();
     d.start_ns = dvui.currentWindow().frame_time_ns;
-    d.start_pt = dvui.currentWindow().mouse_pt;
     d.moved_id = s.id;
     d.texture = texture;
     d.texture_rect = from;
@@ -332,19 +328,18 @@ fn aimedAt(l: *Layout, name: []const u8) bool {
     return std.mem.eql(u8, target, name);
 }
 
-/// The drop zones over `name` while it is somewhere the view could land
+/// The drop zones over `name` while the dragged view is over it and could land there
 /// (`core.widgets.DropZones`): every option the place offers at once, as the dialogs' frosted
 /// glass, the one under the pointer lit. Call after the place's own contents, so the glass lies
 /// over them. `key` is any id stable for the place.
 pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
-    // Every place the view could land shows all its zones for the whole drag, so every option
-    // is in view at once; the one under the pointer lights. When the drag ends they fade out
-    // rather than vanish, for as long as they are still showing. The two halves of a join being
-    // aimed at step back for the one pane across both (`drawJoin`).
-    const joining = if (aimedJoin(l)) |j| std.mem.eql(u8, j.keep, name) or std.mem.eql(u8, j.drop, name) else false;
-    const target = isTarget(l, name) and !joining;
-    if (!target and !DropZones.showing(key)) return;
+    // Only the place under the pointer: its zones come in as the pointer arrives and clear as it
+    // leaves for another, whose come in over it — for as long as they are still showing, so a
+    // place left mid-fade finishes going. Aimed at a join, they step back for the one pane across
+    // both halves (`drawJoin`).
     const aimed = aimedAt(l, name);
+    const target = aimed and isTarget(l, name) and aimedJoin(l) == null;
+    if (!target and !DropZones.showing(key)) return;
     const whole = placeBounds(l.state, name) orelse {
         DropZones.forget(key);
         return;
@@ -364,25 +359,8 @@ pub fn drawZones(l: *Layout, name: []const u8, key: dvui.Id) void {
         .hovered = if (aimed) DropZones.at(zones, dvui.currentWindow().mouse_pt) else null,
         .target = target,
         .center = center,
-        .appear_at_ns = d.start_ns + spreadDelay(d.start_pt, whole, scale),
     });
 }
-
-/// How long after the lift a place's zones start to come in: the farther from where the view
-/// was picked up, the later, so the targets spread out across the window from the hand that
-/// started it. Capped, so the farthest place is never waited for.
-fn spreadDelay(from: dvui.Point.Physical, bounds: dvui.Rect.Physical, scale: f32) i128 {
-    const dx = @max(@max(bounds.x - from.x, 0), from.x - (bounds.x + bounds.w));
-    const dy = @max(@max(bounds.y - from.y, 0), from.y - (bounds.y + bounds.h));
-    const dist_pt = @sqrt(dx * dx + dy * dy) / @max(scale, 0.01);
-    const ms = @min(dist_pt / spread_pt_per_ms, spread_max_ms);
-    return @intFromFloat(ms * std.time.ns_per_ms);
-}
-
-/// Points a place's distance from the lift adds per millisecond of delay, and the most any
-/// place waits.
-const spread_pt_per_ms: f32 = 4;
-const spread_max_ms: f32 = 110;
 
 /// Whether dropping the view lifted from `source` in the middle of `dest` joins them: the two
 /// halves of one split (`State.joinable`), with the view the last thing `source` shows — a
@@ -431,9 +409,9 @@ fn isTarget(l: *Layout, name: []const u8) bool {
     return false;
 }
 
-/// Whether `key`'s zones are on screen — a place the drag could land, or fading out after it.
+/// Whether `key`'s zones are on screen — the place the drag is over, or fading out after it.
 pub fn zonesShowing(l: *Layout, name: []const u8, key: dvui.Id) bool {
-    return isTarget(l, name) or DropZones.showing(key);
+    return (isTarget(l, name) and aimedAt(l, name)) or DropZones.showing(key);
 }
 
 /// The card under the pointer. Always visible while dragging: it is the only
