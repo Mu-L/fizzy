@@ -955,11 +955,15 @@ pub fn windowHeader(str: []const u8, right_str: []const u8, openflag: ?*bool, he
 
     // No fill of its own: the window's frost and tint run under the header the same as under
     // the body, so a dialog is one pane of glass, not a lid on a box.
+    // Stood in from the window's corners by what their rounding takes (`cornerInset`): the close
+    // button sits in the corner, and at full roundness it sat right against the curve.
+    const inset = cornerInset(rounding.scaled(rounding.control));
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
         .name = "WindowHeader",
         .background = false,
         .corners = rounding.all(rounding.control),
+        .padding = .{ .x = inset, .y = inset, .w = inset },
     });
     defer row.deinit();
 
